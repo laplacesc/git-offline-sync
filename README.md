@@ -3,12 +3,31 @@
 在**只能访问内网 GitLab 的离线机器**与**外网开发机**之间，用 U 盘同步 Git 仓库的桌面工具。
 基于 `git clone --mirror` + `git bundle`，Windows 与 macOS 通用（Tauri 2 + React）。
 
-```
- 内网端（Windows）                       U 盘                       外网端（Mac，AI 开发）
- GitLab ─mirror→ 镜像仓库 ─bundle→  proj-out-0001-full.bundle ─clone→ 开发仓库
-                                     proj-out-0002-incr.bundle ─fetch→   └ feature/xxx 提交
- 工作仓库 ←fetch─ proj-back-0001.bundle ←──────────────────── bundle ←┘
-   └ rebase origin/main → 确认 → push → GitLab
+```mermaid
+sequenceDiagram
+    box rgba(0,82,255,0.08) 内网端（Windows）
+        participant GL as GitLab
+        participant MR as 镜像仓库
+        participant WK as 工作仓库
+    end
+    box rgba(100,116,139,0.10) U 盘
+        participant USB as bundle 文件
+    end
+    box rgba(15,157,107,0.08) 外网端（Mac，AI 开发）
+        participant DEV as 开发仓库
+    end
+
+    GL->>MR: clone --mirror
+    MR->>USB: bundle → proj-out-0001-full.bundle（首次全量）
+    USB->>DEV: clone
+    Note over DEV: 在 feature/xxx 上开发并提交
+    DEV->>USB: bundle → proj-back-0001.bundle
+    USB->>WK: fetch
+    WK->>WK: rebase origin/main，确认提交
+    WK->>GL: push
+    GL->>MR: remote update
+    MR->>USB: bundle → proj-out-0002-incr.bundle（之后增量）
+    USB->>DEV: fetch
 ```
 
 ## 功能
