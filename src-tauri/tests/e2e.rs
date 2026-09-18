@@ -55,7 +55,13 @@ fn isolate_git_env(root: &Path) {
 #[test]
 fn full_round_trip() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    // macOS 的临时目录是 /var → /private/var 软链接，需规范化；
+    // Windows 上 canonicalize 会返回 \\?\C:\... 形式，git 无法读取该路径下的配置，保持原样。
+    let root = if cfg!(windows) {
+        tmp.path().to_path_buf()
+    } else {
+        tmp.path().canonicalize().unwrap()
+    };
     isolate_git_env(&root);
 
     let log = |e: LogEvent| eprintln!("[{:?}] {}", e.kind, e.text);
