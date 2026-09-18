@@ -15,6 +15,8 @@ import {
   Input,
   InputGroup,
   Label,
+  ListBox,
+  Select,
   Separator,
   Surface,
   TextField,
@@ -120,6 +122,53 @@ export function TextInput({
       <Input placeholder={placeholder} spellCheck={false} className={mono ? "font-mono text-[13px]" : undefined} />
       {description && <Description>{description}</Description>}
     </TextField>
+  );
+}
+
+/** 基准分支下拉框：主线在前，发布分支在后。 */
+export function BaseSelect({
+  label,
+  value,
+  options,
+  onChange,
+  mainline,
+  className,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (v: string) => void;
+  /** 主线分支名，用于在选项里标注“主线 / 发布” */
+  mainline: string;
+  className?: string;
+}) {
+  // 记录的基准不在配置档列表里时（如发布分支已从配置中移除），也要能显示
+  const all = options.includes(value) || !value ? options : [...options, value];
+  return (
+    <Select
+      className={className ?? "w-56"}
+      value={value}
+      onChange={(k) => k != null && onChange(String(k))}
+    >
+      <Label>{label}</Label>
+      <Select.Trigger className="font-mono text-[13px]">
+        <Select.Value />
+        <Select.Indicator />
+      </Select.Trigger>
+      <Select.Popover>
+        <ListBox>
+          {all.map((b) => (
+            <ListBox.Item key={b} id={b} textValue={b}>
+              <span className="font-mono text-[13px]">{b}</span>
+              <span className="ml-auto pr-6 pl-3 text-xs text-muted">
+                {b === mainline ? "主线" : options.includes(b) ? "发布" : "未配置"}
+              </span>
+              <ListBox.ItemIndicator />
+            </ListBox.Item>
+          ))}
+        </ListBox>
+      </Select.Popover>
+    </Select>
   );
 }
 

@@ -116,8 +116,16 @@ pub async fn environment(app: AppHandle) -> CmdResult<Environment> {
 // ---------------- 通用 ----------------
 
 #[tauri::command]
-pub async fn repo_status(app: AppHandle, path: String, base_branch: String) -> CmdResult<RepoStatus> {
-    blocking(app, move |g| crate::core::repo::status(g, &p(path), &base_branch)).await
+pub async fn repo_status(
+    app: AppHandle,
+    path: String,
+    base_branch: String,
+    release_branches: Vec<String>,
+) -> CmdResult<RepoStatus> {
+    blocking(app, move |g| {
+        crate::core::repo::status(g, &p(path), &base_branch, &release_branches)
+    })
+    .await
 }
 
 /// 读取同步状态：外网仓库读 `.git/offline-sync`，内网镜像读 `<mirror>/offline-sync`。
@@ -210,8 +218,12 @@ pub async fn import_back(
     work_dir: String,
     bundle: String,
     base_branch: String,
+    release_branches: Vec<String>,
 ) -> CmdResult<ImportBackResult> {
-    blocking(app, move |g| sync::import_back(g, &p(work_dir), &p(bundle), &base_branch)).await
+    blocking(app, move |g| {
+        sync::import_back(g, &p(work_dir), &p(bundle), &base_branch, &release_branches)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -269,9 +281,18 @@ pub async fn export_back(
     transfer_dir: String,
     repo_name: String,
     base_branch: String,
+    release_branches: Vec<String>,
 ) -> CmdResult<ExportOutcome> {
     blocking(app, move |g| {
-        sync::export_back(g, &p(repo), &branches, &p(transfer_dir), &repo_name, &base_branch)
+        sync::export_back(
+            g,
+            &p(repo),
+            &branches,
+            &p(transfer_dir),
+            &repo_name,
+            &base_branch,
+            &release_branches,
+        )
     })
     .await
 }
@@ -284,9 +305,18 @@ pub async fn export_patches(
     transfer_dir: String,
     repo_name: String,
     base_branch: String,
+    release_branches: Vec<String>,
 ) -> CmdResult<ExportOutcome> {
     blocking(app, move |g| {
-        sync::export_patches(g, &p(repo), &branch, &p(transfer_dir), &repo_name, &base_branch)
+        sync::export_patches(
+            g,
+            &p(repo),
+            &branch,
+            &p(transfer_dir),
+            &repo_name,
+            &base_branch,
+            &release_branches,
+        )
     })
     .await
 }

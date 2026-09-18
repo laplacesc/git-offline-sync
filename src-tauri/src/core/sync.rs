@@ -94,6 +94,8 @@ pub struct ImportedBranch {
     /// 实际写入的本地分支名（非快进时会改名）
     pub local: String,
     pub sha: String,
+    /// 该分支的基准分支（来自 manifest，缺失时按前缀推断）
+    pub base: String,
     pub commits: Vec<CommitInfo>,
 }
 
@@ -338,6 +340,7 @@ pub fn export_out(
         .map(|(n, s)| RefEntry {
             name: n.clone(),
             sha: s.clone(),
+            base: None,
         })
         .collect();
     let manifest = Manifest {
@@ -382,7 +385,13 @@ fn parse_list_heads(out: &str) -> Vec<(String, String)> {
 
 /// 外网 → 内网：把回传 bundle 中的分支导入工作仓库。
 /// 分支已存在且无法快进时，导入为 `<分支>-import-<序号>`，不覆盖本地提交。
-pub fn import_back(g: &Git, work: &Path, bundle: &Path, base_branch: &str) -> Result<ImportBackResult> {
+pub fn import_back(
+    g: &Git,
+    work: &Path,
+    bundle: &Path,
+    base_branch: &str,
+    releases: &[String],
+) -> Result<ImportBackResult> {
     if repo::is_bare(g, work)? || repo::is_mirror(g, work) {
         return invalid("请在工作仓库（非镜像）中导入回传包");
     }
@@ -443,15 +452,29 @@ pub fn import_back(g: &Git, work: &Path, bundle: &Path, base_branch: &str) -> Re
                 });
             }
         }
-        let commits = if repo::rev_exists(g, work, &base_ref) {
-            repo::commits_between(g, work, &base_ref, &format!("refs/heads/{local}"))?
+        let recorded = manifest
+            .as_ref()
+            .and_then(|m| m.refs.iter().find(|r| r.name == name))
+            .and_then(|r| r.base.clone());
+        let base = match recorded {
+            Some(b) => b,
+            None => repo::infer_base(g, work, &local, base_branch, releases, "refs/remotes/origin/"),
+        };
+        repo::set_sync_base(g, work, &local, &base)?;
+        let origin_base = format!("refs/remotes/origin/{base}");
+        let commits = if repo::rev_exists(g, work, &origin_base) {
+            repo::commits_between(g, work, &origin_base, &format!("refs/heads/{local}"))?
         } else {
+            warnings.push(format!(
+                "{local} 的基准分支 origin/{base} 不存在，请先 fetch origin"
+            ));
             vec![]
         };
         branches.push(ImportedBranch {
             source: branch.to_string(),
             local,
             sha,
+            base,
             commits,
         });
     }
@@ -490,6 +513,7 @@ pub fn import_patches(
         work,
         args!["switch", "-c", branch, format!("origin/{base_branch}")],
     )?;
+    repo::set_sync_base(g, work, branch, base_branch)?;
     let mut a = args!["am", "--3way"];
     a.extend(patches.iter().map(Into::into));
     let out = g.exec(Some(work), &a, None, true)?;
@@ -505,27 +529,40 @@ pub fn import_patches(
     }
 }
 
-/// 拉取内网最新代码，把分支 rebase 到 `origin/<base>`。
+/// 把分支 rebase 到 `origin/<onto>`（分支自己的基准：主线或发布分支）。
+///
+/// 分支已记录的基准与 `onto` 不同（改基准）时，用 `rebase --onto origin/<onto> origin/<旧基准>`，
+/// 只搬运分支自己的提交，不把旧基准上的提交带过去。
 pub fn rebase_onto(
     g: &Git,
     repo: &Path,
     branch: &str,
-    base_branch: &str,
+    onto: &str,
     fetch_upstream: bool,
 ) -> Result<OpOutcome> {
     ensure_worktree_clean(g, repo)?;
     if fetch_upstream {
         g.run(repo, args!["fetch", "origin", "--prune"])?;
     }
+    let target = format!("origin/{onto}");
+    if !repo::rev_exists(g, repo, &target) {
+        return invalid(format!("找不到 {target}"));
+    }
+    let old = repo::get_sync_base(g, repo, branch)
+        .filter(|b| b != onto && repo::rev_exists(g, repo, &format!("origin/{b}")));
     g.run(repo, args!["switch", branch])?;
-    let out = g.exec(
-        Some(repo),
-        &args!["rebase", format!("origin/{base_branch}")],
-        None,
-        true,
-    )?;
+    // 先写记录：冲突后“继续”完成时，记录也已经是新基准
+    repo::set_sync_base(g, repo, branch, onto)?;
+    let a = match &old {
+        Some(b) => args!["rebase", "--onto", &target, format!("origin/{b}")],
+        None => args!["rebase", &target],
+    };
+    let out = g.exec(Some(repo), &a, None, true)?;
     if out.ok() {
-        Ok(OpOutcome::done(format!("{branch} 已基于最新的 origin/{base_branch}")))
+        Ok(OpOutcome::done(match &old {
+            Some(b) => format!("{branch} 已从 origin/{b} 移到最新的 {target}"),
+            None => format!("{branch} 已基于最新的 {target}"),
+        }))
     } else {
         Ok(OpOutcome {
             ok: false,
@@ -727,6 +764,7 @@ pub fn create_branch(g: &Git, repo: &Path, name: &str, base_branch: &str) -> Res
         return invalid(format!("找不到 {base}，请先导入内网包"));
     }
     g.run(repo, args!["switch", "-c", name, base])?;
+    repo::set_sync_base(g, repo, name, base_branch)?;
     Ok(())
 }
 
@@ -745,6 +783,7 @@ pub fn export_back(
     transfer_dir: &Path,
     repo_name: &str,
     base_branch: &str,
+    releases: &[String],
 ) -> Result<ExportOutcome> {
     if branches.is_empty() {
         return invalid("请至少选择一个分支");
@@ -767,6 +806,7 @@ pub fn export_back(
         refs.push(RefEntry {
             name: r.clone(),
             sha: repo::rev_parse(g, repo, &r)?,
+            base: Some(repo::resolve_base(g, repo, b, base_branch, releases).0),
         });
         a.push(r.into());
     }
@@ -822,6 +862,7 @@ pub fn export_patches(
     transfer_dir: &Path,
     repo_name: &str,
     base_branch: &str,
+    releases: &[String],
 ) -> Result<ExportOutcome> {
     let gd = repo::git_dir(g, repo)?;
     let mut state: ExternalState = repo::load_state(&gd)?;
@@ -835,12 +876,15 @@ pub fn export_patches(
     if dir.exists() {
         return invalid(format!("目录已存在：{}", dir.display()));
     }
-    let range = format!("origin/{base_branch}..refs/heads/{branch}");
-    if repo::commits_between(g, repo, &format!("origin/{base_branch}"), &format!("refs/heads/{branch}"))?
-        .is_empty()
-    {
+    let (branch_base, _) = repo::resolve_base(g, repo, branch, base_branch, releases);
+    let from = format!("origin/{branch_base}");
+    if !repo::rev_exists(g, repo, &from) {
+        return invalid(format!("找不到 {branch} 的基准分支 {from}"));
+    }
+    let range = format!("{from}..refs/heads/{branch}");
+    if repo::commits_between(g, repo, &from, &format!("refs/heads/{branch}"))?.is_empty() {
         return Ok(ExportOutcome::NothingToSync {
-            message: format!("{branch} 相对 origin/{base_branch} 没有新提交"),
+            message: format!("{branch} 相对 {from} 没有新提交"),
         });
     }
     fs::create_dir_all(&dir)?;
@@ -849,6 +893,7 @@ pub fn export_patches(
     let refs = vec![RefEntry {
         name: format!("refs/heads/{branch}"),
         sha: repo::rev_parse(g, repo, &format!("refs/heads/{branch}"))?,
+        base: Some(branch_base),
     }];
     let manifest = Manifest {
         format: FORMAT,

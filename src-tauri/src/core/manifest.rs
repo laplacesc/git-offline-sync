@@ -31,6 +31,9 @@ pub enum BundleKind {
 pub struct RefEntry {
     pub name: String,
     pub sha: String,
+    /// Back/Patch：该分支的基准分支（主线或发布分支）。旧版本的包没有这个字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

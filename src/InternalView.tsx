@@ -3,20 +3,25 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Input } from "@heroui/react";
 import {
   api,
+  baseCandidates,
   CommitInfo,
+  defaultBaseFor,
   ExportOutcome,
   formatTime,
   ImportBackResult,
   InternalState,
   OpOutcome,
   PackageInfo,
+  prefixWarning,
   Profile,
+  releasesOf,
   shortSha,
 } from "./api";
 import { useRunner } from "./runner";
 import { BranchTable, InProgressBanner, useRepoStatus } from "./repoBits";
 import {
   ActionButton,
+  BaseSelect,
   Check,
   Code,
   CommitList,
@@ -32,11 +37,13 @@ import {
 export function InternalView({ profile }: { profile: Profile }) {
   const { run, notify, confirm } = useRunner();
   const base = profile.baseBranch;
+  const releases = releasesOf(profile);
+  const candidates = baseCandidates(profile);
   const mirrorDir = profile.mirrorDir ?? "";
   const workDir = profile.workDir ?? "";
 
-  const mirror = useRepoStatus(mirrorDir, base);
-  const work = useRepoStatus(workDir, base);
+  const mirror = useRepoStatus(mirrorDir, base, releases);
+  const work = useRepoStatus(workDir, base, releases);
   const [state, setState] = useState<InternalState | null>(null);
   const [packages, setPackages] = useState<PackageInfo[]>([]);
 
@@ -89,10 +96,18 @@ export function InternalView({ profile }: { profile: Profile }) {
   const [importRes, setImportRes] = useState<ImportBackResult | null>(null);
   const [patchOutcome, setPatchOutcome] = useState<OpOutcome | null>(null);
   const [patchBranch, setPatchBranch] = useState<Record<string, string>>({});
+  const [patchBase, setPatchBase] = useState<Record<string, string>>({});
+  /** patch 包默认分支名与基准：优先用 manifest 记录，没有记录时按前缀推断 */
+  const patchDefaults = (pkg: PackageInfo) => {
+    const ref = pkg.manifest?.refs[0];
+    const name = (patchBranch[pkg.payloadPath] ?? ref?.name.replace(/^refs\/heads\//, "") ?? "").trim();
+    const b = patchBase[pkg.payloadPath] ?? ref?.base ?? defaultBaseFor(name, profile);
+    return { name, base: b };
+  };
 
   const importBundle = async (path: string) => {
     setPatchOutcome(null);
-    const r = await run("导入回传包", () => api.importBack(workDir, path, base));
+    const r = await run("导入回传包", () => api.importBack(workDir, path, base, releases));
     if (r) {
       setImportRes(r);
       const first = r.branches[0]?.local;
@@ -103,11 +118,10 @@ export function InternalView({ profile }: { profile: Profile }) {
 
   const importPatch = async (pkg: PackageInfo) => {
     setImportRes(null);
-    const def = pkg.manifest?.refs[0]?.name.replace(/^refs\/heads\//, "") ?? "";
-    const branch = (patchBranch[pkg.payloadPath] ?? def).trim();
+    const { name: branch, base: patchOnto } = patchDefaults(pkg);
     if (!branch) return notify("warn", "请填写导入到的分支名");
     const r = await run("应用补丁", () =>
-      api.importPatches({ workDir, patchDir: pkg.payloadPath, branch, baseBranch: base, fetchUpstream: true }),
+      api.importPatches({ workDir, patchDir: pkg.payloadPath, branch, baseBranch: patchOnto, fetchUpstream: true }),
     );
     if (r) {
       setPatchOutcome(r);
@@ -128,19 +142,31 @@ export function InternalView({ profile }: { profile: Profile }) {
   const [fetchBeforeRebase, setFetchBeforeRebase] = useState(true);
   const [forceLease, setForceLease] = useState(false);
   const [opRes, setOpRes] = useState<OpOutcome | null>(null);
+  const branchInfo = work.status?.branches.find((b) => b.name === branch);
+  // 用户在下拉框里改的基准；null 表示使用分支记录（或推断）的基准
+  const [ontoPicked, setOntoPicked] = useState<string | null>(null);
+  const onto = ontoPicked ?? branchInfo?.base ?? base;
+  const changingBase = !!branchInfo && onto !== branchInfo.base;
+  const branchWarning = branch ? prefixWarning(branch, onto, profile) : null;
 
-  useEffect(() => setOpRes(null), [branch]);
+  useEffect(() => {
+    setOpRes(null);
+    setOntoPicked(null);
+  }, [branch]);
 
+  // 改基准时 rebase --onto 只搬运“旧基准..分支”的提交，列表也按旧基准显示
+  const listFrom = changingBase && branchInfo ? branchInfo.base : onto;
   useEffect(() => {
     if (!branch || !work.status?.isRepo) return setCommits([]);
     api
-      .listCommits(workDir, `origin/${base}`, `refs/heads/${branch}`)
+      .listCommits(workDir, `origin/${listFrom}`, `refs/heads/${branch}`)
       .then(setCommits)
       .catch(() => setCommits([]));
-  }, [branch, work.status, workDir, base]);
+  }, [branch, work.status, workDir, listFrom]);
 
   const rebase = async () => {
-    const r = await run("Rebase", () => api.rebaseOnto(workDir, branch, base, fetchBeforeRebase));
+    const r = await run("Rebase", () => api.rebaseOnto(workDir, branch, onto, fetchBeforeRebase));
+    setOntoPicked(null);
     if (r) setOpRes(r);
     reloadAll();
   };
@@ -154,9 +180,9 @@ export function InternalView({ profile }: { profile: Profile }) {
         <div className="space-y-3">
           <p className="text-sm text-muted">
             推送到 <Code>origin</Code>
-            {forceLease && "（force-with-lease）"}，共 {commits.length} 个相对 origin/{base} 的提交：
+            {forceLease && "（force-with-lease）"}，共 {commits.length} 个相对 origin/{onto} 的提交：
           </p>
-          <CommitList commits={commits.slice(0, 20)} empty={`没有相对 origin/${base} 的新提交`} />
+          <CommitList commits={commits.slice(0, 20)} empty={`没有相对 origin/${onto} 的新提交`} />
           {commits.length > 20 && <p className="text-xs text-muted">…另有 {commits.length - 20} 个</p>}
         </div>
       ),
@@ -169,7 +195,6 @@ export function InternalView({ profile }: { profile: Profile }) {
 
   const mirrorReady = !!mirror.status?.isRepo;
   const workReady = !!work.status?.isRepo && !work.status.isBare;
-  const branchInfo = work.status?.branches.find((b) => b.name === branch);
 
   return (
     <div className="stagger flex flex-col gap-5">
@@ -275,7 +300,7 @@ export function InternalView({ profile }: { profile: Profile }) {
             {backPkgs.map((p) => {
               const m = p.manifest;
               const isPatch = m?.kind === "patch";
-              const def = m?.refs[0]?.name.replace(/^refs\/heads\//, "") ?? "";
+              const pd = patchDefaults(p);
               return (
                 <PackageRow
                   key={p.payloadPath}
@@ -289,12 +314,22 @@ export function InternalView({ profile }: { profile: Profile }) {
                   }
                 >
                   {isPatch && (
-                    <Input
-                      aria-label="应用到的新分支名"
-                      className="w-52 font-mono text-[13px]"
-                      value={patchBranch[p.payloadPath] ?? def}
-                      onChange={(e) => setPatchBranch((x) => ({ ...x, [p.payloadPath]: e.target.value }))}
-                    />
+                    <>
+                      <Input
+                        aria-label="应用到的新分支名"
+                        className="w-52 font-mono text-[13px]"
+                        value={pd.name}
+                        onChange={(e) => setPatchBranch((x) => ({ ...x, [p.payloadPath]: e.target.value }))}
+                      />
+                      <BaseSelect
+                        label="基于"
+                        className="w-44 [&_label]:sr-only"
+                        value={pd.base}
+                        options={candidates}
+                        mainline={base}
+                        onChange={(v) => setPatchBase((x) => ({ ...x, [p.payloadPath]: v }))}
+                      />
+                    </>
                   )}
                   <ActionButton
                     size="sm"
@@ -318,7 +353,10 @@ export function InternalView({ profile }: { profile: Profile }) {
               <div key={b.local} className="space-y-2">
                 <h4 className="text-sm font-semibold">
                   {b.local}
-                  <span className="font-normal text-muted"> · {b.commits.length} 个新提交</span>
+                  <span className="font-normal text-muted">
+                    {" "}
+                    · 基于 origin/{b.base} · {b.commits.length} 个新提交
+                  </span>
                 </h4>
                 <CommitList commits={b.commits} />
               </div>
@@ -332,7 +370,7 @@ export function InternalView({ profile }: { profile: Profile }) {
         step={4}
         label="Push"
         title="Rebase 并推送"
-        description={`基于最新 origin/${base} 整理分支，确认提交后推送到 GitLab`}
+        description="基于各分支自己的基准（主线或发布分支）整理，确认提交后推送到 GitLab"
       >
         <InProgressBanner
           repo={workDir}
@@ -344,20 +382,33 @@ export function InternalView({ profile }: { profile: Profile }) {
         />
         {work.status?.dirty && <Notice tone="warning" title="工作区有未提交的修改，rebase 前请先提交或 stash。" />}
         <BranchTable
-          branches={(work.status?.branches ?? []).filter((b) => b.name !== base)}
-          baseLabel={`origin/${base}`}
+          branches={(work.status?.branches ?? []).filter((b) => !candidates.includes(b.name))}
+          emptyText="还没有开发分支（主线和发布分支不在这里列出）"
           selected={selected}
           onSelect={setSelected}
         />
         {branch && (
           <>
+            <div className="flex flex-wrap items-end gap-3">
+              <BaseSelect label="基准分支" value={onto} options={candidates} mainline={base} onChange={setOntoPicked} />
+              {branchInfo?.baseInferred && !changingBase && (
+                <span className="pb-2 text-xs text-muted">没有记录，按分支名推断；rebase 后会记录下来</span>
+              )}
+            </div>
+            {changingBase && (
+              <Notice
+                tone="accent"
+                title={`将把 ${branch} 从 origin/${branchInfo?.base} 移到 origin/${onto}：rebase --onto，只搬运分支自己的提交`}
+              />
+            )}
+            {branchWarning && <Notice tone="warning" title={branchWarning} />}
             <h4 className="text-sm font-semibold">
-              {branch} 相对 origin/{base} 的提交
-              {branchInfo && branchInfo.behind > 0 && (
+              {changingBase ? `将搬运到 origin/${onto} 的提交（相对 origin/${listFrom}）` : `${branch} 相对 origin/${onto} 的提交`}
+              {branchInfo && !changingBase && branchInfo.behind > 0 && (
                 <span className="font-normal text-warning"> · 落后 {branchInfo.behind} 个，建议先 rebase</span>
               )}
             </h4>
-            <CommitList commits={commits} empty={`没有相对 origin/${base} 的新提交`} />
+            <CommitList commits={commits} empty={`没有相对 origin/${listFrom} 的新提交`} />
             <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
               <Check checked={fetchBeforeRebase} onChange={setFetchBeforeRebase}>
                 rebase 前 fetch origin
@@ -367,9 +418,13 @@ export function InternalView({ profile }: { profile: Profile }) {
               </Check>
               <span className="flex-1" />
               <ActionButton variant="outline" onPress={rebase} isDisabled={!workReady}>
-                Rebase 到 origin/{base}
+                Rebase 到 origin/{onto}
               </ActionButton>
-              <ActionButton variant="primary" onPress={push} isDisabled={!workReady || !!work.status?.inProgress}>
+              <ActionButton
+                variant="primary"
+                onPress={push}
+                isDisabled={!workReady || !!work.status?.inProgress || changingBase}
+              >
                 推送…
               </ActionButton>
             </div>
