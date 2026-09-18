@@ -18,7 +18,7 @@ import {
   shortSha,
 } from "./api";
 import { useRunner } from "./runner";
-import { BranchTable, InProgressBanner, useRepoStatus } from "./repoBits";
+import { BranchTable, InProgressBanner, useRefreshOnFocus, useRepoStatus } from "./repoBits";
 import {
   ActionButton,
   BaseSelect,
@@ -29,6 +29,7 @@ import {
   Notice,
   OutcomeView,
   PackageRow,
+  RefreshButton,
   StepCard,
   TextInput,
 } from "./ui";
@@ -55,6 +56,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
     reloadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile.id]);
+  useRefreshOnFocus(reloadAll);
 
   const exists = !!repo.status?.isRepo;
 
@@ -174,9 +176,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
         }
         actions={
           <>
-            <ActionButton size="sm" variant="ghost" onPress={reloadAll}>
-              刷新
-            </ActionButton>
+            <RefreshButton onPress={reloadAll} />
             <ActionButton size="sm" variant="outline" onPress={browse}>
               选择其他文件…
             </ActionButton>
@@ -268,11 +268,14 @@ export function ExternalView({ profile }: { profile: Profile }) {
         title="开发分支"
         description="在特性分支上用 AI 开发并提交，不要直接改基准分支"
         actions={
-          exists && (profile.userName || profile.userEmail) ? (
-            <ActionButton size="sm" variant="ghost" onPress={saveIdentity}>
-              写入提交身份
-            </ActionButton>
-          ) : undefined
+          <>
+            {exists && (profile.userName || profile.userEmail) && (
+              <ActionButton size="sm" variant="ghost" onPress={saveIdentity}>
+                写入提交身份
+              </ActionButton>
+            )}
+            <RefreshButton onPress={reloadAll} />
+          </>
         }
       >
         {!exists ? (

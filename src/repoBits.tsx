@@ -1,9 +1,44 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Alert, Checkbox, Chip, Table } from "@heroui/react";
 import type { Selection } from "@heroui/react";
 import { api, BranchInfo, OpOutcome, RepoStatus, shortSha } from "./api";
 import { useRunner } from "./runner";
 import { ActionButton, Code, Empty } from "./ui";
+
+/**
+ * 应用窗口回到前台时调用 reload。
+ * 用 Tauri 的原生窗口焦点事件（Windows 上 WebView2 的 DOM focus 事件不可靠）；
+ * 有操作进行中时跳过，短时间内的重复焦点事件（如关闭文件对话框）只刷新一次。
+ */
+export function useRefreshOnFocus(reload: () => unknown) {
+  const { busy } = useRunner();
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (!focused) return;
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (!busyRef.current) reloadRef.current();
+        }, 300);
+      })
+      .then((fn) => (disposed ? fn() : (unlisten = fn)))
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      unlisten?.();
+    };
+  }, []);
+}
 
 /**
  * 读取仓库状态；path 为空时返回 null。
@@ -120,9 +155,9 @@ export function BranchTable({
           <Table.Header>
             <Table.Column className="w-10">{multi ? <SelectionBox label="全选" /> : null}</Table.Column>
             <Table.Column isRowHeader>分支</Table.Column>
-            <Table.Column>提交</Table.Column>
-            <Table.Column>基准</Table.Column>
-            <Table.Column>相对基准</Table.Column>
+            <Table.Column className="whitespace-nowrap">提交</Table.Column>
+            <Table.Column className="whitespace-nowrap">基准</Table.Column>
+            <Table.Column className="whitespace-nowrap">相对基准</Table.Column>
           </Table.Header>
           <Table.Body>
             {branches.map((b) => (
@@ -134,18 +169,18 @@ export function BranchTable({
                 <Table.Cell>
                   <SelectionBox label={`选择 ${b.name}`} />
                 </Table.Cell>
-                <Table.Cell>
-                  <span className="font-medium">{b.name}</span>
+                <Table.Cell className="break-words">
+                  <span className="font-medium">{breakAfterSlash(b.name)}</span>
                   {b.current && (
                     <Chip size="sm" variant="secondary" className="ml-2">
                       当前
                     </Chip>
                   )}
                 </Table.Cell>
-                <Table.Cell>
+                <Table.Cell className="whitespace-nowrap">
                   <Code>{shortSha(b.sha)}</Code>
                 </Table.Cell>
-                <Table.Cell>
+                <Table.Cell className="whitespace-nowrap">
                   <Code>origin/{b.base}</Code>
                   {b.baseInferred && (
                     <span className="ml-1.5 text-xs text-muted" title="没有记录，按分支名前缀推断">
@@ -153,7 +188,7 @@ export function BranchTable({
                     </span>
                   )}
                 </Table.Cell>
-                <Table.Cell>
+                <Table.Cell className="whitespace-nowrap">
                   <span className="inline-flex gap-2 font-mono text-xs">
                     <span className={b.ahead > 0 ? "font-semibold text-success" : "text-muted"}>↑{b.ahead}</span>
                     <span className={b.behind > 0 ? "font-semibold text-warning" : "text-muted"}>↓{b.behind}</span>
@@ -166,6 +201,12 @@ export function BranchTable({
       </Table.ScrollContainer>
     </Table>
   );
+}
+
+/** 分支名在 “/” 后允许换行（“-” 本身就是换行点），避免从单词中间断开 */
+function breakAfterSlash(name: string) {
+  const parts = name.split("/");
+  return parts.flatMap((part, i) => (i < parts.length - 1 ? [part + "/", <wbr key={i} />] : [part]));
 }
 
 /** 表格行选择框：slot="selection" 由 Table 接管选中状态 */

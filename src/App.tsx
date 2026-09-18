@@ -29,8 +29,16 @@ function Shell() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [env, setEnv] = useState<Environment | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "view" });
-  const [logOpen, setLogOpen] = useState(true);
+  // 默认收起；开始执行操作或出现错误时自动展开
+  const [logOpen, setLogOpen] = useState(false);
   const log = useGitLog();
+  const logErrors = log.lines.filter((l) => l.kind === "error").length;
+  useEffect(() => {
+    if (busy) setLogOpen(true);
+  }, [busy]);
+  useEffect(() => {
+    if (logErrors > 0) setLogOpen(true);
+  }, [logErrors]);
 
   useEffect(() => {
     (async () => {
@@ -203,10 +211,10 @@ function Shell() {
             {mode.kind === "view" &&
               (current ? (
                 <>
-                  <header className="animate-enter mb-8 flex items-end justify-between gap-6">
-                    <div className="min-w-0 flex-1 space-y-3">
+                  <header className="animate-enter mb-6 flex items-end justify-between gap-6">
+                    <div className="min-w-0 flex-1 space-y-2">
                       <SectionLabel pulse>{current.role === "internal" ? "Intranet side" : "Internet side"}</SectionLabel>
-                      <h1 className="font-display text-4xl leading-[1.1] tracking-[-0.02em]">
+                      <h1 className="font-display text-3xl leading-[1.15] tracking-[-0.02em]">
                         {current.name}
                         <span className="text-gradient"> · {current.role === "internal" ? "内网端" : "外网端"}</span>
                       </h1>

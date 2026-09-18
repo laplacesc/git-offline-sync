@@ -18,7 +18,7 @@ import {
   shortSha,
 } from "./api";
 import { useRunner } from "./runner";
-import { BranchTable, InProgressBanner, useRepoStatus } from "./repoBits";
+import { BranchTable, InProgressBanner, useRefreshOnFocus, useRepoStatus } from "./repoBits";
 import {
   ActionButton,
   BaseSelect,
@@ -30,6 +30,7 @@ import {
   Notice,
   OutcomeView,
   PackageRow,
+  RefreshButton,
   StepCard,
   TextInput,
 } from "./ui";
@@ -57,6 +58,7 @@ export function InternalView({ profile }: { profile: Profile }) {
     reloadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile.id]);
+  useRefreshOnFocus(reloadAll);
 
   // ---------- 1. 镜像 ----------
   const [url, setUrl] = useState(profile.remoteUrl ?? "");
@@ -208,9 +210,7 @@ export function InternalView({ profile }: { profile: Profile }) {
           </>
         }
         actions={
-          <ActionButton size="sm" variant="ghost" onPress={reloadAll}>
-            刷新
-          </ActionButton>
+          <RefreshButton onPress={reloadAll} />
         }
       >
         {mirror.error && <Notice tone="danger" title="读取镜像仓库失败">{mirror.error}</Notice>}
@@ -290,9 +290,12 @@ export function InternalView({ profile }: { profile: Profile }) {
           </>
         }
         actions={
-          <ActionButton size="sm" variant="outline" onPress={browseBundle} isDisabled={!workReady}>
-            选择其他文件…
-          </ActionButton>
+          <>
+            <RefreshButton onPress={reloadAll} />
+            <ActionButton size="sm" variant="outline" onPress={browseBundle} isDisabled={!workReady}>
+              选择其他文件…
+            </ActionButton>
+          </>
         }
       >
         {work.error ? (
@@ -331,7 +334,8 @@ export function InternalView({ profile }: { profile: Profile }) {
                       />
                       <BaseSelect
                         label="基于"
-                        className="w-44 [&_label]:sr-only"
+                        hideLabel
+                        className="w-44"
                         value={pd.base}
                         options={candidates}
                         mainline={base}
@@ -379,6 +383,7 @@ export function InternalView({ profile }: { profile: Profile }) {
         label="Push"
         title="Rebase 并推送"
         description="基于各分支自己的基准（主线或发布分支）整理，确认提交后推送到 GitLab"
+        actions={<RefreshButton onPress={reloadAll} />}
       >
         <InProgressBanner
           repo={workDir}

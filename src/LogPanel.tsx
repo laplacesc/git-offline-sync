@@ -58,8 +58,9 @@ export function LogPanel({
     <section
       aria-label="命令日志"
       className={
-        "relative flex shrink-0 flex-col border-t border-border bg-default/60 transition-[height] duration-300 " +
-        (open ? "h-[24%] min-h-36" : "h-11")
+        "relative flex shrink-0 flex-col overflow-hidden border-t border-border bg-default/60 transition-[height] duration-300 " +
+        // 收起时 = 44px 标题栏 + 1px 上边框；展开时固定高度，不随窗口变高而浪费空间
+        (open ? "h-52" : "h-[45px]")
       }
     >
       <div className="flex h-11 shrink-0 items-center gap-3 px-4">

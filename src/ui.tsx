@@ -34,6 +34,15 @@ export function ActionButton({ isDisabled, ...props }: ButtonProps) {
   return <Button {...props} isDisabled={!!isDisabled || !!busy} />;
 }
 
+/** 卡片右上角的刷新按钮：重新读取仓库状态与传输目录 */
+export function RefreshButton({ onPress }: { onPress: () => void }) {
+  return (
+    <ActionButton size="sm" variant="ghost" onPress={onPress}>
+      刷新
+    </ActionButton>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // 区块标签：圆角胶囊 + 圆点 + 等宽大写文字（设计系统的 Section Label）
 // ---------------------------------------------------------------------------
@@ -133,6 +142,7 @@ export function BaseSelect({
   onChange,
   mainline,
   className,
+  hideLabel,
 }: {
   label: string;
   value: string;
@@ -141,6 +151,8 @@ export function BaseSelect({
   /** 主线分支名，用于在选项里标注“主线 / 发布” */
   mainline: string;
   className?: string;
+  /** 只保留给读屏器的标签（行内使用时） */
+  hideLabel?: boolean;
 }) {
   // 记录的基准不在配置档列表里时（如发布分支已从配置中移除），也要能显示
   const all = options.includes(value) || !value ? options : [...options, value];
@@ -150,7 +162,7 @@ export function BaseSelect({
       value={value}
       onChange={(k) => k != null && onChange(String(k))}
     >
-      <Label>{label}</Label>
+      <Label className={hideLabel ? "sr-only" : undefined}>{label}</Label>
       <Select.Trigger className="font-mono text-[13px]">
         <Select.Value />
         <Select.Indicator />
@@ -350,17 +362,22 @@ export function PackageRow({
   return (
     <div
       className={
-        "flex items-center gap-3 rounded-xl px-4 py-3 transition-shadow " +
+        "flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl px-4 py-3 transition-shadow " +
         (highlight ? "gradient-border shadow-accent " : "border border-border bg-surface ") +
         (dim ? "opacity-55" : "")
       }
     >
-      <KindChip kind={kind} />
-      <div className="min-w-0 flex-1">
-        <div className="truncate font-mono text-[13px]">{title}</div>
-        <div className="text-xs text-muted">{meta}</div>
+      <div className="flex min-w-64 flex-1 items-center gap-3">
+        <KindChip kind={kind} />
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-mono text-[13px]" title={title}>
+            {title}
+          </div>
+          <div className="text-xs text-muted">{meta}</div>
+        </div>
       </div>
-      {children}
+      {/* 空间不够时整组控件换到标题下方并靠右 */}
+      {children && <div className="ml-auto flex flex-wrap items-center justify-end gap-2">{children}</div>}
     </div>
   );
 }

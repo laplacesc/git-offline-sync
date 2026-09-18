@@ -89,6 +89,11 @@
   #root {
     height: 100%;
   }
+  /* 桌面应用：只有内容区自己滚动，根元素永不出现滚动条 */
+  html,
+  body {
+    overflow: hidden;
+  }
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-feature-settings: "cv11", "ss01";
