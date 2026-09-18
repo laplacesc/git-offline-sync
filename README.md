@@ -23,7 +23,7 @@ sequenceDiagram
     Note over DEV: 在 feature/xxx 上开发并提交
     DEV->>USB: bundle → proj-back-0001.bundle
     USB->>WK: fetch
-    WK->>WK: rebase origin/main，确认提交
+    WK->>WK: rebase 到分支的基准（origin/main 或发布分支），确认提交
     WK->>GL: push
     GL->>MR: remote update
     MR->>USB: bundle → proj-out-0002-incr.bundle（之后增量）
@@ -36,11 +36,26 @@ sequenceDiagram
 |---|---|
 | 克隆镜像（`clone --mirror`） | 首次用全量包克隆，写入提交身份和 `core.autocrlf=input` |
 | 导出全量 / 增量包（自动 fetch、verify） | 按序号导入增量包，跳号或重复导入会被拦截 |
-| 导入回传 bundle，或用 `git am --3way` 应用 patch | 新建特性分支，rebase 到最新 `origin/main` |
-| rebase 到最新 `origin/main`，列出提交确认后推送 | 回传：bundle（只含内网没有的提交）或 patch |
+| 导入回传 bundle，或用 `git am --3way` 应用 patch | 基于主线或发布分支新建分支，rebase 到它的基准 |
+| rebase 到分支的基准，列出提交确认后推送 | 回传：bundle（只含内网没有的提交）或 patch |
 | 冲突时提供“继续 / 中止” | 冲突时提供“继续 / 中止” |
 
 所有 git 命令及其输出实时显示在底部的“命令日志”中。
+
+## 主线分支与发布分支
+
+配置档里填写**主线分支**（如 `main`）和**发布分支**（如 `release/1.2, release/1.3`，手动填写，可以有多个，两端要一致）。约定：
+
+| 分支前缀 | 基准分支 |
+|---|---|
+| `feature/`、`bugfix/` | 主线分支 |
+| `hotfix/` | 某个发布分支 |
+
+- 每个分支的基准记录在仓库配置 `branch.<分支>.syncBase` 中：外网新建分支时写入，回传包的 manifest 带上（`refs[].base`），内网导入时写回工作仓库。rebase、领先/落后、提交列表、patch 导出范围都按这个基准计算。
+- 没有记录的分支（手工创建的、旧版本导出的包）按前缀推断：`hotfix/` 在发布分支中选分叉点最近的一个，其他前缀用主线。分支表里会标出“推断”，rebase 一次后记录下来。
+- 前缀和基准不匹配（如从 `main` 拉 `hotfix/x`）只显示警告，不阻止操作。
+- 在内网“Rebase 并推送”里可以改基准：用 `git rebase --onto origin/<新基准> origin/<旧基准>`，只搬运分支自己的提交。
+- 仓库身份（根提交）和增量导出基线仍然只看主线分支。
 
 ## 安全措施
 

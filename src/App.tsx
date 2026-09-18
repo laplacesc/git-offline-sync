@@ -211,8 +211,13 @@ function Shell() {
                         <span className="text-gradient"> · {current.role === "internal" ? "内网端" : "外网端"}</span>
                       </h1>
                       <p className="flex min-w-0 items-center gap-2 text-sm text-muted">
-                        <span className="shrink-0">基准分支</span>
+                        <span className="shrink-0">主线</span>
                         <Code className="shrink-0">{current.baseBranch}</Code>
+                        {(current.releaseBranches?.length ?? 0) > 0 && (
+                          <span className="shrink-0" title={current.releaseBranches?.join("\n")}>
+                            · 发布分支 {current.releaseBranches?.length} 个
+                          </span>
+                        )}
                         <span className="ml-2 shrink-0">传输目录</span>
                         <span className="min-w-0 truncate font-mono text-[12px] text-foreground" title={current.transferDir}>
                           {current.transferDir}

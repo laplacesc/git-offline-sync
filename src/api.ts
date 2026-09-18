@@ -10,7 +10,10 @@ export interface Profile {
   role: Role;
   /** 用于包文件命名，例如 proj → proj-out-0001-full.bundle */
   repoName: string;
+  /** 主线分支（feature/、bugfix/ 的基准），也用于确定仓库身份 */
   baseBranch: string;
+  /** 发布分支（hotfix/ 的基准），手动填写；老配置没有这个字段 */
+  releaseBranches?: string[];
   /** U 盘 / 传输目录 */
   transferDir: string;
   // 内网端
@@ -46,6 +49,10 @@ export interface CommitInfo {
 export interface BranchInfo {
   name: string;
   sha: string;
+  /** 该分支的基准分支（主线或发布分支） */
+  base: string;
+  /** 没有记录，按前缀推断出来的基准 */
+  baseInferred: boolean;
   ahead: number;
   behind: number;
   current: boolean;
@@ -69,6 +76,8 @@ export type BundleKind = "full" | "incr" | "back" | "patch";
 export interface RefEntry {
   name: string;
   sha: string;
+  /** 回传包：该分支的基准分支 */
+  base?: string;
 }
 
 export interface Manifest {
@@ -126,6 +135,7 @@ export interface ImportedBranch {
   source: string;
   local: string;
   sha: string;
+  base: string;
   commits: CommitInfo[];
 }
 
@@ -165,8 +175,8 @@ export const api = {
   saveConfig: (config: AppConfig) => invoke<void>("save_config", { config }),
   environment: () => invoke<Environment>("environment"),
 
-  repoStatus: (path: string, baseBranch: string) =>
-    invoke<RepoStatus>("repo_status", { path, baseBranch }),
+  repoStatus: (path: string, baseBranch: string, releaseBranches: string[]) =>
+    invoke<RepoStatus>("repo_status", { path, baseBranch, releaseBranches }),
   internalState: (mirrorDir: string) =>
     invoke<InternalState>("sync_state", { path: mirrorDir, external: false }),
   externalState: (repoDir: string) =>
@@ -189,8 +199,8 @@ export const api = {
     fetchUpstream: boolean;
     forceFull: boolean;
   }) => invoke<ExportOutcome>("export_out", a),
-  importBack: (workDir: string, bundle: string, baseBranch: string) =>
-    invoke<ImportBackResult>("import_back", { workDir, bundle, baseBranch }),
+  importBack: (workDir: string, bundle: string, baseBranch: string, releaseBranches: string[]) =>
+    invoke<ImportBackResult>("import_back", { workDir, bundle, baseBranch, releaseBranches }),
   importPatches: (a: {
     workDir: string;
     patchDir: string;
@@ -214,6 +224,7 @@ export const api = {
     transferDir: string;
     repoName: string;
     baseBranch: string;
+    releaseBranches: string[];
   }) => invoke<ExportOutcome>("export_back", a),
   exportPatches: (a: {
     repo: string;
@@ -221,6 +232,7 @@ export const api = {
     transferDir: string;
     repoName: string;
     baseBranch: string;
+    releaseBranches: string[];
   }) => invoke<ExportOutcome>("export_patches", a),
 };
 
@@ -252,3 +264,37 @@ export const KIND_LABEL: Record<BundleKind, string> = {
   back: "回传",
   patch: "补丁",
 };
+
+// ---------- 主线 / 发布分支 ----------
+
+export function releasesOf(p: Profile): string[] {
+  return p.releaseBranches ?? [];
+}
+
+/** 可作为基准的分支：主线在前，然后是发布分支。 */
+export function baseCandidates(p: Profile): string[] {
+  return [p.baseBranch, ...releasesOf(p).filter((r) => r !== p.baseBranch)];
+}
+
+/** 按分支名前缀给出默认基准：hotfix/ → 第一个发布分支，其他 → 主线。 */
+export function defaultBaseFor(name: string, p: Profile): string {
+  const releases = releasesOf(p);
+  return name.startsWith("hotfix/") && releases.length > 0 ? releases[0] : p.baseBranch;
+}
+
+/** 分支前缀与基准不匹配时的提示（只提示，不阻止）。 */
+export function prefixWarning(name: string, base: string, p: Profile): string | null {
+  const onRelease = releasesOf(p).includes(base);
+  if (name.startsWith("hotfix/") && !onRelease) {
+    return `hotfix/ 分支通常基于发布分支，当前基准是 ${base}`;
+  }
+  if ((name.startsWith("feature/") || name.startsWith("bugfix/")) && onRelease) {
+    return `${name.split("/")[0]}/ 分支通常基于主线 ${p.baseBranch}，当前基准是发布分支 ${base}`;
+  }
+  return null;
+}
+
+/** 把用户输入的“release/1.2, release/1.3”拆成数组。 */
+export function parseBranchList(text: string): string[] {
+  return [...new Set(text.split(/[\s,，]+/).map((x) => x.trim()).filter(Boolean))];
+}

@@ -24,6 +24,10 @@ pub struct CommitInfo {
 pub struct BranchInfo {
     pub name: String,
     pub sha: String,
+    /// 该分支的基准分支（主线或发布分支）
+    pub base: String,
+    /// 基准分支是按前缀推断出来的（没有 `branch.<name>.syncBase` 记录）
+    pub base_inferred: bool,
     /// 相对 `origin/<base>`（镜像仓库为 `<base>`）领先/落后的提交数
     pub ahead: u32,
     pub behind: u32,
@@ -188,6 +192,81 @@ fn ahead_behind(g: &Git, repo: &Path, base: &str, branch: &str) -> (u32, u32) {
     }
 }
 
+// ---------- 分支的基准分支 ----------
+
+/// 记录分支基准的 git config 键：`branch.<name>.syncBase`（git 自己不使用这个键）。
+fn sync_base_key(branch: &str) -> String {
+    format!("branch.{branch}.syncBase")
+}
+
+pub fn get_sync_base(g: &Git, repo: &Path, branch: &str) -> Option<String> {
+    g.exec(
+        Some(repo),
+        &args!["config", "--get", sync_base_key(branch)],
+        None,
+        false,
+    )
+    .ok()
+    .filter(|o| o.ok())
+    .map(|o| o.stdout.trim().to_string())
+    .filter(|s| !s.is_empty())
+}
+
+pub fn set_sync_base(g: &Git, repo: &Path, branch: &str, base: &str) -> Result<()> {
+    g.run(repo, args!["config", sync_base_key(branch), base])?;
+    Ok(())
+}
+
+/// 基准分支在仓库里的引用前缀：工作仓库用 `refs/remotes/origin/`，裸仓库（镜像）用 `refs/heads/`。
+pub fn base_ref_prefix(g: &Git, repo: &Path) -> &'static str {
+    if is_bare(g, repo).unwrap_or(false) {
+        "refs/heads/"
+    } else {
+        "refs/remotes/origin/"
+    }
+}
+
+/// 按分支名前缀推断基准分支：`hotfix/` 在发布分支中选分叉点最近的一个
+/// （`<release>..<branch>` 提交数最少），其他前缀用主线。
+pub fn infer_base(
+    g: &Git,
+    repo: &Path,
+    branch: &str,
+    mainline: &str,
+    releases: &[String],
+    prefix: &str,
+) -> String {
+    if branch.starts_with("hotfix/") {
+        let best = releases
+            .iter()
+            .filter(|r| rev_exists(g, repo, &format!("{prefix}{r}")))
+            .map(|r| (ahead_behind(g, repo, &format!("{prefix}{r}"), branch).0, r))
+            .min_by_key(|(ahead, _)| *ahead);
+        if let Some((_, r)) = best {
+            return r.clone();
+        }
+    }
+    mainline.to_string()
+}
+
+/// 分支的基准分支：优先用 `branch.<name>.syncBase` 记录，没有时按前缀推断。
+/// 返回 (基准分支, 是否为推断)。
+pub fn resolve_base(
+    g: &Git,
+    repo: &Path,
+    branch: &str,
+    mainline: &str,
+    releases: &[String],
+) -> (String, bool) {
+    match get_sync_base(g, repo, branch) {
+        Some(b) => (b, false),
+        None => {
+            let prefix = base_ref_prefix(g, repo);
+            (infer_base(g, repo, branch, mainline, releases, prefix), true)
+        }
+    }
+}
+
 pub fn in_progress(git_dir: &Path) -> Option<String> {
     if git_dir.join("rebase-merge").exists() {
         return Some("rebase".into());
@@ -206,7 +285,7 @@ pub fn in_progress(git_dir: &Path) -> Option<String> {
     None
 }
 
-pub fn status(g: &Git, path: &Path, base_branch: &str) -> Result<RepoStatus> {
+pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Result<RepoStatus> {
     let mut st = RepoStatus {
         path: path.to_string_lossy().into_owned(),
         exists: path.exists(),
@@ -247,16 +326,16 @@ pub fn status(g: &Git, path: &Path, base_branch: &str) -> Result<RepoStatus> {
         st.in_progress = in_progress(&git_dir(g, path)?);
     }
 
-    let base = if st.is_bare {
-        format!("refs/heads/{base_branch}")
-    } else {
-        format!("refs/remotes/origin/{base_branch}")
-    };
-    let has_base = rev_exists(g, path, &base);
+    let prefix = if st.is_bare { "refs/heads/" } else { "refs/remotes/origin/" };
     for (name, sha) in list_refs(g, path, &["refs/heads"])? {
         let short = name.trim_start_matches("refs/heads/").to_string();
-        let (ahead, behind) = if has_base {
-            ahead_behind(g, path, &base, &short)
+        let (base, base_inferred) = match get_sync_base(g, path, &short) {
+            Some(b) => (b, false),
+            None => (infer_base(g, path, &short, mainline, releases, prefix), true),
+        };
+        let base_ref = format!("{prefix}{base}");
+        let (ahead, behind) = if rev_exists(g, path, &base_ref) {
+            ahead_behind(g, path, &base_ref, &short)
         } else {
             (0, 0)
         };
@@ -264,6 +343,8 @@ pub fn status(g: &Git, path: &Path, base_branch: &str) -> Result<RepoStatus> {
             current: st.current_branch.as_deref() == Some(short.as_str()),
             name: short,
             sha,
+            base,
+            base_inferred,
             ahead,
             behind,
         });

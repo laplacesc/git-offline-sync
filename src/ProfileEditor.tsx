@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button, Card, Description, Label, Radio, RadioGroup } from "@heroui/react";
-import { Profile, Role } from "./api";
+import { parseBranchList, Profile, releasesOf, Role } from "./api";
 import { PathInput, SectionLabel, TextInput } from "./ui";
 
 export function blankProfile(role: Role, id: string): Profile {
@@ -10,6 +10,7 @@ export function blankProfile(role: Role, id: string): Profile {
     role,
     repoName: "",
     baseBranch: "main",
+    releaseBranches: [],
     transferDir: "",
     remoteUrl: "",
     mirrorDir: "",
@@ -24,7 +25,7 @@ function missing(p: Profile): string[] {
   const m: string[] = [];
   if (!p.name.trim()) m.push("名称");
   if (!p.repoName.trim()) m.push("包名前缀");
-  if (!p.baseBranch.trim()) m.push("基准分支");
+  if (!p.baseBranch.trim()) m.push("主线分支");
   if (!p.transferDir.trim()) m.push("传输目录");
   if (p.role === "internal") {
     if (!p.mirrorDir?.trim()) m.push("镜像仓库目录");
@@ -55,6 +56,8 @@ export function ProfileEditor({
 }) {
   const [p, setP] = useState<Profile>(initial);
   const set = <K extends keyof Profile>(k: K, v: Profile[K]) => setP((x) => ({ ...x, [k]: v }));
+  // 发布分支按原文编辑（允许输入中途的逗号），保存时再拆分
+  const [releasesText, setReleasesText] = useState(releasesOf(initial).join(", "));
   const miss = missing(p);
   const internal = p.role === "internal";
 
@@ -114,7 +117,21 @@ export function ProfileEditor({
             description="文件名形如 <前缀>-out-0001-full.bundle，两端要一致"
             mono
           />
-          <TextInput label="基准分支" value={p.baseBranch} onChange={(v) => set("baseBranch", v)} description="内网主干分支，通常是 main 或 master" mono />
+          <TextInput
+            label="主线分支"
+            value={p.baseBranch}
+            onChange={(v) => set("baseBranch", v)}
+            description="feature/、bugfix/ 分支的基准，通常是 main 或 master"
+            mono
+          />
+          <TextInput
+            label="发布分支"
+            value={releasesText}
+            onChange={setReleasesText}
+            placeholder="release/1.2, release/1.3"
+            description="hotfix/ 分支的基准，多个用逗号或空格分隔；两端要一致"
+            mono
+          />
           <PathInput label="传输目录（U 盘）" value={p.transferDir} onChange={(v) => set("transferDir", v)} description="导出的包写到这里，导入时从这里列出" />
         </div>
 
@@ -170,7 +187,7 @@ export function ProfileEditor({
         <Button variant="tertiary" onPress={onCancel}>
           取消
         </Button>
-        <Button variant="primary" isDisabled={miss.length > 0} onPress={() => onSave(p)}>
+        <Button variant="primary" isDisabled={miss.length > 0} onPress={() => onSave({ ...p, releaseBranches: parseBranchList(releasesText) })}>
           保存
         </Button>
       </Card.Footer>

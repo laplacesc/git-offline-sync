@@ -6,7 +6,9 @@ import { useRunner } from "./runner";
 import { ActionButton, Code, Empty } from "./ui";
 
 /** 读取仓库状态；path 为空时返回 null。 */
-export function useRepoStatus(path: string | undefined, baseBranch: string) {
+export function useRepoStatus(path: string | undefined, baseBranch: string, releaseBranches: string[]) {
+  // 数组每次渲染都是新对象，用字符串作依赖
+  const releasesKey = releaseBranches.join("\n");
   const [status, setStatus] = useState<RepoStatus | null>(null);
   const reload = useCallback(async () => {
     if (!path) {
@@ -14,11 +16,11 @@ export function useRepoStatus(path: string | undefined, baseBranch: string) {
       return;
     }
     try {
-      setStatus(await api.repoStatus(path, baseBranch));
+      setStatus(await api.repoStatus(path, baseBranch, releasesKey ? releasesKey.split("\n") : []));
     } catch {
       setStatus(null);
     }
-  }, [path, baseBranch]);
+  }, [path, baseBranch, releasesKey]);
   useEffect(() => {
     reload();
   }, [reload]);
@@ -62,20 +64,20 @@ export function InProgressBanner({
 /** 分支表：HeroUI Table，单选或多选。 */
 export function BranchTable({
   branches,
-  baseLabel,
   selected,
   onSelect,
   multi,
   isSelectable,
+  emptyText = "没有本地分支",
 }: {
   branches: BranchInfo[];
-  baseLabel: string;
   selected: string[];
   onSelect: (names: string[]) => void;
   multi?: boolean;
   isSelectable?: (b: BranchInfo) => boolean;
+  emptyText?: string;
 }) {
-  if (branches.length === 0) return <Empty>没有本地分支</Empty>;
+  if (branches.length === 0) return <Empty>{emptyText}</Empty>;
 
   const disabledKeys = isSelectable ? branches.filter((b) => !isSelectable(b)).map((b) => b.name) : [];
   const onSelectionChange = (keys: Selection) => {
@@ -101,7 +103,8 @@ export function BranchTable({
             <Table.Column className="w-10">{multi ? <SelectionBox label="全选" /> : null}</Table.Column>
             <Table.Column isRowHeader>分支</Table.Column>
             <Table.Column>提交</Table.Column>
-            <Table.Column>相对 {baseLabel}</Table.Column>
+            <Table.Column>基准</Table.Column>
+            <Table.Column>相对基准</Table.Column>
           </Table.Header>
           <Table.Body>
             {branches.map((b) => (
@@ -123,6 +126,14 @@ export function BranchTable({
                 </Table.Cell>
                 <Table.Cell>
                   <Code>{shortSha(b.sha)}</Code>
+                </Table.Cell>
+                <Table.Cell>
+                  <Code>origin/{b.base}</Code>
+                  {b.baseInferred && (
+                    <span className="ml-1.5 text-xs text-muted" title="没有记录，按分支名前缀推断">
+                      推断
+                    </span>
+                  )}
                 </Table.Cell>
                 <Table.Cell>
                   <span className="inline-flex gap-2 font-mono text-xs">

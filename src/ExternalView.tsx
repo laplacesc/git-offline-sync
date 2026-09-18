@@ -4,34 +4,52 @@ import { Table, ToggleButton, ToggleButtonGroup } from "@heroui/react";
 import type { Key } from "@heroui/react";
 import {
   api,
+  baseCandidates,
+  defaultBaseFor,
   ExportOutcome,
   ExternalState,
   formatTime,
   ImportInResult,
   OpOutcome,
   PackageInfo,
+  prefixWarning,
   Profile,
+  releasesOf,
   shortSha,
 } from "./api";
 import { useRunner } from "./runner";
 import { BranchTable, InProgressBanner, useRepoStatus } from "./repoBits";
-import { ActionButton, Check, Code, Empty, KindChip, Notice, OutcomeView, PackageRow, StepCard, TextInput } from "./ui";
+import {
+  ActionButton,
+  BaseSelect,
+  Check,
+  Code,
+  Empty,
+  KindChip,
+  Notice,
+  OutcomeView,
+  PackageRow,
+  StepCard,
+  TextInput,
+} from "./ui";
 
 export function ExternalView({ profile }: { profile: Profile }) {
   const { run, notify } = useRunner();
   const base = profile.baseBranch;
+  const releases = releasesOf(profile);
   const repoDir = profile.repoDir ?? "";
 
-  const repo = useRepoStatus(repoDir, base);
+  const repo = useRepoStatus(repoDir, base, releases);
   const [state, setState] = useState<ExternalState | null>(null);
   const [packages, setPackages] = useState<PackageInfo[]>([]);
 
   const reloadAll = useCallback(async () => {
-    const st = await api.repoStatus(repoDir, base).catch(() => null);
+    const st = await api.repoStatus(repoDir, base, releases).catch(() => null);
     await repo.reload();
     setState(st?.isRepo ? await api.externalState(repoDir).catch(() => null) : null);
     setPackages(await api.listPackages(profile.transferDir).catch(() => []));
-  }, [repo.reload, repoDir, base, profile.transferDir]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo.reload, repoDir, base, releases.join("\n"), profile.transferDir]);
 
   useEffect(() => {
     reloadAll();
@@ -69,22 +87,31 @@ export function ExternalView({ profile }: { profile: Profile }) {
 
   // ---------- 2. 分支 ----------
   const [newBranch, setNewBranch] = useState("feature/");
+  // null：跟随分支名前缀自动选择；用户手动选过后固定
+  const [newBasePicked, setNewBasePicked] = useState<string | null>(null);
+  const newBase = newBasePicked ?? defaultBaseFor(newBranch.trim(), profile);
+  const newBranchWarning = prefixWarning(newBranch.trim(), newBase, profile);
   const [selected, setSelected] = useState<string[]>([]);
   const [opRes, setOpRes] = useState<OpOutcome | null>(null);
 
   const createBranch = async () => {
     const name = newBranch.trim();
-    const ok = await run("新建分支", () => api.createBranch(repoDir, name, base));
+    const ok = await run("新建分支", () => api.createBranch(repoDir, name, newBase));
     if (ok !== undefined) {
-      notify("ok", `已创建并切换到 ${name}`);
+      notify("ok", `已基于 origin/${newBase} 创建并切换到 ${name}`);
       setNewBranch("feature/");
+      setNewBasePicked(null);
     }
     reloadAll();
   };
 
+  const selectedInfo = selected.length === 1 ? repo.status?.branches.find((b) => b.name === selected[0]) : undefined;
+  const selectedWarning = selectedInfo ? prefixWarning(selectedInfo.name, selectedInfo.base, profile) : null;
+
   const rebase = async () => {
-    const b = selected[0];
-    const r = await run("Rebase", () => api.rebaseOnto(repoDir, b, base, false));
+    if (!selectedInfo) return;
+    const { name, base: onto } = selectedInfo;
+    const r = await run("Rebase", () => api.rebaseOnto(repoDir, name, onto, false));
     if (r) setOpRes(r);
     reloadAll();
   };
@@ -99,7 +126,8 @@ export function ExternalView({ profile }: { profile: Profile }) {
   // ---------- 3. 回传 ----------
   const [mode, setMode] = useState<"bundle" | "patch">("bundle");
   const [exportRes, setExportRes] = useState<ExportOutcome | null>(null);
-  const branches = (repo.status?.branches ?? []).filter((b) => b.name !== base);
+  const candidates = baseCandidates(profile);
+  const branches = (repo.status?.branches ?? []).filter((b) => !candidates.includes(b.name));
 
   const onModeChange = (keys: Set<Key>) => {
     const m = [...keys][0] as "bundle" | "patch" | undefined;
@@ -109,7 +137,13 @@ export function ExternalView({ profile }: { profile: Profile }) {
   };
 
   const doExport = async () => {
-    const common = { repo: repoDir, transferDir: profile.transferDir, repoName: profile.repoName, baseBranch: base };
+    const common = {
+      repo: repoDir,
+      transferDir: profile.transferDir,
+      repoName: profile.repoName,
+      baseBranch: base,
+      releaseBranches: releases,
+    };
     const r =
       mode === "bundle"
         ? await run("导出回传包", () => api.exportBack({ ...common, branches: selected }))
@@ -254,23 +288,33 @@ export function ExternalView({ profile }: { profile: Profile }) {
             />
             <div className="flex flex-wrap items-end gap-3">
               <TextInput
-                label={`新分支（基于 origin/${base}）`}
+                label="新分支"
                 value={newBranch}
                 onChange={setNewBranch}
                 mono
                 className="max-w-sm min-w-56 flex-1"
               />
+              <BaseSelect
+                label="基于"
+                value={newBase}
+                options={candidates}
+                mainline={base}
+                onChange={setNewBasePicked}
+              />
               <ActionButton variant="secondary" onPress={createBranch} isDisabled={!branchNameOk}>
                 新建并切换
               </ActionButton>
               <span className="flex-1" />
-              <ActionButton variant="outline" onPress={rebase} isDisabled={selected.length !== 1}>
-                Rebase 所选分支到 origin/{base}
+              <ActionButton variant="outline" onPress={rebase} isDisabled={!selectedInfo}>
+                {selectedInfo ? `Rebase ${selectedInfo.name} 到 origin/${selectedInfo.base}` : "Rebase 所选分支"}
               </ActionButton>
             </div>
+            <p className="-mt-2 text-xs text-muted">feature/、bugfix/ 基于主线；hotfix/ 基于发布分支</p>
+            {newBranchWarning && <Notice tone="warning" title={`新分支：${newBranchWarning}`} />}
+            {selectedWarning && <Notice tone="warning" title={`${selectedInfo?.name}：${selectedWarning}`} />}
             <BranchTable
               branches={branches}
-              baseLabel={`origin/${base}`}
+              emptyText="还没有开发分支（主线和发布分支不在这里列出）"
               selected={selected}
               onSelect={setSelected}
               multi={mode === "bundle"}
