@@ -69,6 +69,42 @@ sequenceDiagram
 - 回传分支如果与内网本地分支已经分叉（比如内网 rebase 过），会导入成 `<分支>-import-<序号>`，不会覆盖本地分支。
 - 工作区有未提交修改，或仓库里有未完成的 rebase/am 时，会拒绝执行 rebase 和导入 patch。
 
+## 常见问题
+
+### macOS / Windows 上导入报 `cannot lock ref ... .lock': File exists`
+
+典型报错：
+
+```
+git update-ref --stdin
+fatal: cannot lock ref 'refs/remotes/origin/ct_main_fr47363': Unable to create
+'.../.git/refs/remotes/origin/ct_main_fr47363.lock': File exists.
+```
+
+如果没有其他 git 进程在运行，原因通常是上游有**只差大小写的分支**，例如 `CT_MAIN_FR47363` 和 `ct_main_fr47363`。GitLab 服务器（Linux）区分大小写，这两个分支可以共存。macOS（APFS）和 Windows（NTFS）默认不区分大小写，而 git 默认的 `files` 格式把每个 ref 存成一个文件，两个分支会被当成同一个文件。导入时两者在同一个 `update-ref` 事务里加锁，第二个锁文件就会报 "File exists"。即使没有报错，两个分支也可能互相覆盖、读到错误的提交。重试无法解决。
+
+检查是否存在这种分支（有输出即说明存在）：
+
+```sh
+git for-each-ref --format='%(refname)' | tr 'A-Z' 'a-z' | sort | uniq -d
+```
+
+**解决方法：把仓库的 ref 存储格式迁移为 reftable。** reftable 不用文件名存 ref，不受文件系统大小写影响。迁移命令 `git refs migrate` 需要 git 2.46 及以上版本（`git --version` 查看）：
+
+```sh
+cd <外网工作仓库>
+cp -R .git ../.git-backup        # 先备份
+git rev-parse --show-ref-format  # 输出 files 表示需要迁移
+git refs migrate --ref-format=reftable
+git rev-parse --show-ref-format  # 应输出 reftable
+```
+
+迁移后在本工具里重新导入该包即可。注意：
+
+- reftable 仓库只能用 git 2.45 及以上版本读写，旧版 git 和部分 IDE 内置的 git 可能无法识别。
+- 如果要从零开始，可以直接用 reftable 格式克隆：`git clone --ref-format=reftable <包或地址> <目录>`（git 2.45 及以上）。
+- 根本的解决办法是在上游删除或改名其中一个分支。
+
 ## 目录结构
 
 ```
