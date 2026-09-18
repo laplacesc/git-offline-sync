@@ -1,5 +1,6 @@
 //! 仓库查询：状态、分支、提交列表、同步状态文件。
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -199,6 +200,65 @@ fn sync_base_key(branch: &str) -> String {
     format!("branch.{branch}.syncBase")
 }
 
+/// 一次读出所有分支的基准记录：分支名 → 基准分支。
+pub fn all_sync_bases(g: &Git, repo: &Path) -> HashMap<String, String> {
+    let out = g.exec(
+        Some(repo),
+        &args!["config", "--get-regexp", r"^branch\..*\.syncbase$"],
+        None,
+        false,
+    );
+    let Ok(o) = out else { return HashMap::new() };
+    // 没有任何记录时 git 返回 1，stdout 为空
+    o.stdout
+        .lines()
+        .filter_map(|l| {
+            let (key, val) = l.trim().split_once(' ')?;
+            let name = key.strip_prefix("branch.")?.strip_suffix(".syncbase")?;
+            Some((name.to_string(), val.trim().to_string()))
+        })
+        .collect()
+}
+
+/// 所有本地分支相对 `base_ref` 的 (领先, 落后)。
+/// git ≥ 2.41 用一次 `for-each-ref %(ahead-behind:…)`，更早的版本逐个分支计算。
+fn ahead_behind_all(g: &Git, repo: &Path, base_ref: &str) -> HashMap<String, (u32, u32)> {
+    let out = g.exec(
+        Some(repo),
+        &args![
+            "for-each-ref",
+            format!("--format=%(refname) %(ahead-behind:{base_ref})"),
+            "refs/heads"
+        ],
+        None,
+        false,
+    );
+    if let Ok(o) = &out {
+        if o.ok() {
+            return o
+                .stdout
+                .lines()
+                .filter_map(|l| {
+                    let mut it = l.split_whitespace();
+                    let name = it.next()?.strip_prefix("refs/heads/")?.to_string();
+                    let ahead = it.next()?.parse().ok()?;
+                    let behind = it.next()?.parse().ok()?;
+                    Some((name, (ahead, behind)))
+                })
+                .collect();
+        }
+    }
+    list_refs(g, repo, &["refs/heads"])
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(n, _)| {
+            let short = n.trim_start_matches("refs/heads/").to_string();
+            let ab = ahead_behind(g, repo, base_ref, &short);
+            (short, ab)
+        })
+        .collect()
+}
+
 pub fn get_sync_base(g: &Git, repo: &Path, branch: &str) -> Option<String> {
     g.exec(
         Some(repo),
@@ -326,19 +386,61 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
         st.in_progress = in_progress(&git_dir(g, path)?);
     }
 
-    let prefix = if st.is_bare { "refs/heads/" } else { "refs/remotes/origin/" };
-    for (name, sha) in list_refs(g, path, &["refs/heads"])? {
+    let refs = list_refs(g, path, &["refs/heads"])?;
+    if st.is_bare {
+        // 镜像仓库只用于打包：界面只需要分支列表，不计算基准和领先/落后
+        //（GitLab 镜像常有成百上千个分支，逐个计算会让界面长时间没有响应）
+        st.branches = refs
+            .into_iter()
+            .map(|(name, sha)| BranchInfo {
+                name: name.trim_start_matches("refs/heads/").to_string(),
+                sha,
+                base: mainline.to_string(),
+                base_inferred: false,
+                ahead: 0,
+                behind: 0,
+                current: false,
+            })
+            .collect();
+        return Ok(st);
+    }
+
+    // 工作仓库：基准记录一次读出，领先/落后按基准分组批量计算
+    let prefix = "refs/remotes/origin/";
+    let recorded = all_sync_bases(g, path);
+    let mut counts: HashMap<String, HashMap<String, (u32, u32)>> = HashMap::new();
+    let mut counts_for = |base: &str| -> HashMap<String, (u32, u32)> {
+        counts
+            .entry(base.to_string())
+            .or_insert_with(|| {
+                let base_ref = format!("{prefix}{base}");
+                if rev_exists(g, path, &base_ref) {
+                    ahead_behind_all(g, path, &base_ref)
+                } else {
+                    HashMap::new()
+                }
+            })
+            .clone()
+    };
+    for (name, sha) in refs {
         let short = name.trim_start_matches("refs/heads/").to_string();
-        let (base, base_inferred) = match get_sync_base(g, path, &short) {
-            Some(b) => (b, false),
-            None => (infer_base(g, path, &short, mainline, releases, prefix), true),
+        let (base, base_inferred) = match recorded.get(&short) {
+            Some(b) => (b.clone(), false),
+            None => {
+                // 与 infer_base 相同的规则：hotfix/ 选分叉点最近（领先最少）的发布分支
+                let best = if short.starts_with("hotfix/") {
+                    releases
+                        .iter()
+                        .filter_map(|r| counts_for(r).get(&short).map(|c| (c.0, r)))
+                        .min_by_key(|(ahead, _)| *ahead)
+                        .map(|(_, r)| r.clone())
+                } else {
+                    None
+                };
+                (best.unwrap_or_else(|| mainline.to_string()), true)
+            }
         };
-        let base_ref = format!("{prefix}{base}");
-        let (ahead, behind) = if rev_exists(g, path, &base_ref) {
-            ahead_behind(g, path, &base_ref, &short)
-        } else {
-            (0, 0)
-        };
+        let (ahead, behind) = counts_for(&base).get(&short).copied().unwrap_or((0, 0));
         st.branches.push(BranchInfo {
             current: st.current_branch.as_deref() == Some(short.as_str()),
             name: short,
