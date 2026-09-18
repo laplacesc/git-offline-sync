@@ -1,0 +1,335 @@
+/**
+ * 应用级组合组件：全部基于 HeroUI v3，只在这里做一次“设计系统化”的组合，
+ * 页面代码直接使用这些组件，避免到处写一次性样式。
+ */
+import { ReactNode } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  Alert,
+  Button,
+  Card,
+  Checkbox,
+  Chip,
+  Description,
+  EmptyState,
+  Input,
+  InputGroup,
+  Label,
+  Separator,
+  Surface,
+  TextField,
+} from "@heroui/react";
+import type { ButtonProps } from "@heroui/react";
+import { BundleKind, CommitInfo, KIND_LABEL, OpOutcome, shortSha } from "./api";
+import { useRunner } from "./runner";
+
+// ---------------------------------------------------------------------------
+// 按钮：全局串行执行，有操作进行中时自动禁用
+// ---------------------------------------------------------------------------
+
+export function ActionButton({ isDisabled, ...props }: ButtonProps) {
+  const { busy } = useRunner();
+  return <Button {...props} isDisabled={!!isDisabled || !!busy} />;
+}
+
+// ---------------------------------------------------------------------------
+// 区块标签：圆角胶囊 + 圆点 + 等宽大写文字（设计系统的 Section Label）
+// ---------------------------------------------------------------------------
+
+export function SectionLabel({
+  children,
+  pulse,
+}: {
+  children: ReactNode;
+  pulse?: boolean;
+}) {
+  return (
+    <span className="inline-flex w-fit items-center gap-2 self-start rounded-full border border-accent/30 bg-accent/5 px-3 py-1">
+      <span className={"size-1.5 rounded-full bg-accent " + (pulse ? "animate-pulse-dot" : "")} />
+      <span className="font-mono text-[11px] tracking-[0.15em] text-accent uppercase">
+        {children}
+      </span>
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 流程步骤卡片
+// ---------------------------------------------------------------------------
+
+export function StepCard({
+  step,
+  label,
+  title,
+  description,
+  actions,
+  children,
+}: {
+  step: number;
+  label: string;
+  title: string;
+  description?: ReactNode;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <Card className="gap-0 p-0">
+      <Card.Header className="flex flex-row flex-wrap items-start gap-4 px-6 pt-6 pb-4">
+        <div className="min-w-0 flex-1 space-y-2">
+          <SectionLabel>
+            {String(step).padStart(2, "0")} · {label}
+          </SectionLabel>
+          <Card.Title className="text-lg font-semibold tracking-[-0.01em]">{title}</Card.Title>
+          {description && (
+            <Card.Description className="text-sm leading-relaxed text-muted">{description}</Card.Description>
+          )}
+        </div>
+        {actions && <div className="flex shrink-0 gap-2">{actions}</div>}
+      </Card.Header>
+      <Card.Content className="flex flex-col gap-4 px-6 pb-6">{children}</Card.Content>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 表单
+// ---------------------------------------------------------------------------
+
+export function TextInput({
+  label,
+  value,
+  onChange,
+  description,
+  placeholder,
+  isReadOnly,
+  mono,
+  className,
+}: {
+  label: string;
+  value: string;
+  onChange?: (v: string) => void;
+  description?: string;
+  placeholder?: string;
+  isReadOnly?: boolean;
+  mono?: boolean;
+  className?: string;
+}) {
+  return (
+    <TextField value={value} onChange={onChange} isReadOnly={isReadOnly} fullWidth className={className}>
+      <Label>{label}</Label>
+      <Input placeholder={placeholder} spellCheck={false} className={mono ? "font-mono text-[13px]" : undefined} />
+      {description && <Description>{description}</Description>}
+    </TextField>
+  );
+}
+
+export function PathInput({
+  label,
+  value,
+  onChange,
+  directory = true,
+  extensions,
+  placeholder,
+  description,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  directory?: boolean;
+  extensions?: string[];
+  placeholder?: string;
+  description?: string;
+}) {
+  const browse = async () => {
+    const picked = await open({
+      directory,
+      multiple: false,
+      defaultPath: value || undefined,
+      filters: extensions ? [{ name: extensions.join(", "), extensions }] : undefined,
+    });
+    if (typeof picked === "string") onChange(picked);
+  };
+  return (
+    <TextField value={value} onChange={onChange} fullWidth>
+      <Label>{label}</Label>
+      <InputGroup fullWidth>
+        <InputGroup.Input placeholder={placeholder} spellCheck={false} className="font-mono text-[13px]" />
+        <InputGroup.Suffix className="pr-1">
+          <Button size="sm" variant="ghost" onPress={browse}>
+            浏览…
+          </Button>
+        </InputGroup.Suffix>
+      </InputGroup>
+      {description && <Description>{description}</Description>}
+    </TextField>
+  );
+}
+
+export function Check({
+  checked,
+  onChange,
+  children,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  children: ReactNode;
+}) {
+  return (
+    <Checkbox isSelected={checked} onChange={onChange}>
+      <Checkbox.Content className="text-sm">
+        <Checkbox.Control>
+          <Checkbox.Indicator />
+        </Checkbox.Control>
+        {children}
+      </Checkbox.Content>
+    </Checkbox>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 状态展示
+// ---------------------------------------------------------------------------
+
+const KIND_COLOR: Record<BundleKind, "accent" | "success" | "warning" | "default"> = {
+  full: "accent",
+  incr: "success",
+  back: "warning",
+  patch: "default",
+};
+
+export function KindChip({ kind }: { kind: BundleKind | null }) {
+  return (
+    <Chip size="sm" variant="soft" color={kind ? KIND_COLOR[kind] : "default"} className="shrink-0 font-medium">
+      {kind ? KIND_LABEL[kind] : "未知"}
+    </Chip>
+  );
+}
+
+export type Tone = "success" | "warning" | "danger" | "accent" | "default";
+
+export function Notice({ tone, title, children }: { tone: Tone; title?: ReactNode; children?: ReactNode }) {
+  return (
+    <Alert status={tone}>
+      <Alert.Indicator />
+      <Alert.Content>
+        {title && <Alert.Title>{title}</Alert.Title>}
+        {children && <Alert.Description className="break-words">{children}</Alert.Description>}
+      </Alert.Content>
+    </Alert>
+  );
+}
+
+export function OutcomeView({ outcome }: { outcome: OpOutcome }) {
+  if (outcome.ok) return <Notice tone="success" title={outcome.message} />;
+  return (
+    <Notice tone={outcome.conflict ? "warning" : "danger"} title={outcome.message}>
+      {outcome.files.length > 0 && (
+        <span className="mt-1 flex flex-wrap items-center gap-1.5">
+          冲突文件：
+          {outcome.files.map((f) => (
+            <Chip key={f} size="sm" variant="secondary" className="font-mono">
+              {f}
+            </Chip>
+          ))}
+        </span>
+      )}
+    </Notice>
+  );
+}
+
+export function Empty({ children }: { children: ReactNode }) {
+  return <EmptyState className="px-0 py-1">{children}</EmptyState>;
+}
+
+/** 带分隔线的只读列表容器 */
+export function ListSurface({ children }: { children: ReactNode[] }) {
+  return (
+    <Surface variant="default" className="overflow-hidden rounded-xl border border-border shadow-none">
+      {children.map((c, i) => (
+        <div key={i}>
+          {i > 0 && <Separator />}
+          {c}
+        </div>
+      ))}
+    </Surface>
+  );
+}
+
+export function CommitList({ commits, empty = "没有提交" }: { commits: CommitInfo[]; empty?: string }) {
+  if (commits.length === 0) return <Empty>{empty}</Empty>;
+  return (
+    <div className="max-h-72 overflow-y-auto rounded-xl">
+      <ListSurface>
+        {commits.map((c) => (
+          <div key={c.sha} className="grid grid-cols-[auto_1fr] gap-x-3 px-4 py-2.5">
+            <Code>{shortSha(c.sha)}</Code>
+            <span className="truncate text-sm font-medium">{c.subject}</span>
+            <span className="col-start-2 text-xs text-muted">
+              {c.author} &lt;{c.email}&gt; · {c.date}
+            </span>
+          </div>
+        ))}
+      </ListSurface>
+    </div>
+  );
+}
+
+export function Code({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <code className={"rounded-md bg-default px-1.5 py-0.5 font-mono text-[12px] break-all text-foreground " + className}>
+      {children}
+    </code>
+  );
+}
+
+/** 传输目录中的一个包。highlight = 下一个应导入的包（渐变描边），dim = 已处理 */
+export function PackageRow({
+  kind,
+  title,
+  meta,
+  highlight,
+  dim,
+  children,
+}: {
+  kind: BundleKind | null;
+  title: string;
+  meta: ReactNode;
+  highlight?: boolean;
+  dim?: boolean;
+  children?: ReactNode;
+}) {
+  return (
+    <div
+      className={
+        "flex items-center gap-3 rounded-xl px-4 py-3 transition-shadow " +
+        (highlight ? "gradient-border shadow-accent " : "border border-border bg-surface ") +
+        (dim ? "opacity-55" : "")
+      }
+    >
+      <KindChip kind={kind} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate font-mono text-[13px]">{title}</div>
+        <div className="text-xs text-muted">{meta}</div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** 应用标志符号：与应用图标（assets/icon/*.svg）同一图形，颜色跟随 currentColor */
+export function AppGlyph({ className = "size-5" }: { className?: string }) {
+  return (
+    <svg viewBox="236 300 552 424" className={className} aria-hidden fill="none">
+      <g stroke="currentColor" strokeWidth={58} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M372 420 H692" />
+        <path d="M616 344 L692 420 L616 496" />
+        <path d="M652 604 H332" />
+        <path d="M408 528 L332 604 L408 680" />
+      </g>
+      <g fill="currentColor">
+        <circle cx="316" cy="420" r="50" />
+        <circle cx="708" cy="604" r="50" />
+      </g>
+    </svg>
+  );
+}

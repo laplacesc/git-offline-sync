@@ -1,0 +1,268 @@
+/*
+ * 设计系统：Minimalist Modern（浅色）
+ * - 所有设计 token 集中在这里，映射为 HeroUI v3 的语义变量，组件自动继承
+ * - 字体从 @fontsource 本地打包（内网 Windows 离线，无法访问 Google Fonts）
+ */
+@import "tailwindcss";
+@import "@heroui/styles";
+
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/calistoga/400.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+/* ---------------------------------------------------------------------------
+ * Tokens → HeroUI 语义变量（覆盖 HeroUI 默认主题；未分层，优先级高于 layer(theme)）
+ * ------------------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+
+  /* 调色板 */
+  --background: #fafafa;
+  --foreground: #0f172a; /* slate-900 */
+  --surface: #ffffff; /* 卡片 */
+  --surface-foreground: var(--foreground);
+  --overlay: #ffffff;
+  --overlay-foreground: var(--foreground);
+  --default: #f1f5f9; /* slate-100：次级表面 */
+  --default-foreground: var(--foreground);
+  --muted: #64748b; /* slate-500：次级文字 */
+  --accent: #0052ff; /* Electric Blue */
+  --accent-secondary: #4d7cff; /* 渐变终点 */
+  --accent-foreground: #ffffff;
+  --border: #e2e8f0; /* slate-200 */
+  --separator: #e2e8f0;
+  --focus: #0052ff;
+  --link: var(--accent);
+
+  --success: #0f9d6b;
+  --success-foreground: #ffffff;
+  --warning: #d97706;
+  --warning-foreground: #ffffff;
+  --danger: #dc2626;
+  --danger-foreground: #ffffff;
+
+  /* 表单 */
+  --field-background: #ffffff;
+  --field-foreground: var(--foreground);
+  --field-placeholder: color-mix(in srgb, var(--muted) 60%, transparent);
+  --field-border: var(--border);
+  --field-border-width: 1px;
+
+  /* 圆角：按钮/输入 12px，卡片 16px */
+  --radius: 0.75rem;
+  --field-radius: 0.75rem;
+
+  /* 阴影系统 */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.08);
+  --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.1);
+  --shadow-accent: 0 4px 14px rgba(0, 82, 255, 0.25);
+  --shadow-accent-lg: 0 8px 24px rgba(0, 82, 255, 0.35);
+  --surface-shadow: var(--shadow-sm);
+  --field-shadow: none;
+  --overlay-shadow: var(--shadow-xl);
+
+  --gradient-accent: linear-gradient(135deg, var(--accent), var(--accent-secondary));
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 暴露给 Tailwind 工具类 */
+@theme inline {
+  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+  /* Calistoga 没有中文字形，中文回落到无衬线粗体 */
+  --font-display: "Calistoga", "PingFang SC", "Microsoft YaHei", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --color-accent-secondary: var(--accent-secondary);
+  --shadow-accent: var(--shadow-accent);
+  --shadow-accent-lg: var(--shadow-accent-lg);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * HeroUI 组件定制：只改设计系统要求的部分
+ * ------------------------------------------------------------------------- */
+@layer components {
+  /* 按钮：12px 圆角，统一过渡 */
+  .button {
+    border-radius: 0.75rem;
+    transition:
+      transform 200ms var(--ease-out-expo),
+      box-shadow 200ms var(--ease-out-expo),
+      background-color 200ms ease-out,
+      border-color 200ms ease-out,
+      filter 200ms ease-out;
+  }
+
+  /* 主按钮：签名渐变 + 蓝色投影 + 悬停上浮 */
+  .button--primary {
+    background-image: var(--gradient-accent);
+    box-shadow: var(--shadow-sm);
+    @media (hover: hover) {
+      &:hover:not([data-disabled="true"], :disabled),
+      &[data-hovered="true"]:not([data-disabled="true"]) {
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-accent-lg);
+        filter: brightness(1.1);
+      }
+    }
+    &[data-pressed="true"] {
+      transform: scale(0.98);
+      box-shadow: var(--shadow-accent);
+    }
+  }
+
+  /* 描边按钮：悬停时边框转为 accent/30 */
+  .button--outline {
+    @media (hover: hover) {
+      &[data-hovered="true"] {
+        border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+        box-shadow: var(--shadow-sm);
+      }
+    }
+  }
+
+  /* 卡片：白底 + 1px 边框 + 16px 圆角，悬停阴影加深 */
+  .card--default {
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+    box-shadow: var(--shadow-md);
+    transition: box-shadow 300ms var(--ease-out-expo);
+    &:hover {
+      box-shadow: var(--shadow-lg);
+    }
+  }
+
+  /* 输入框：聚焦时显示 accent 光环 */
+  .input,
+  .input-group {
+    min-height: 2.75rem;
+    &[data-focused="true"],
+    &[data-focus-within="true"] {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 签名元素（Bold Factor）
+ * ------------------------------------------------------------------------- */
+@layer utilities {
+  .text-gradient {
+    background: var(--gradient-accent);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .bg-gradient-accent {
+    background-image: var(--gradient-accent);
+  }
+
+  /* 渐变描边：外层渐变 + 内层白底 */
+  .gradient-border {
+    border: 2px solid transparent;
+    background:
+      linear-gradient(var(--surface), var(--surface)) padding-box,
+      var(--gradient-accent) border-box;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 动效：入场淡入上移（错开）、脉冲圆点、悬浮卡片、缓慢旋转的环
+ * ------------------------------------------------------------------------- */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes pulse-dot {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.3);
+    opacity: 0.7;
+  }
+}
+@keyframes float-y {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@layer utilities {
+  .animate-enter {
+    animation: fade-in-up 0.7s var(--ease-out-expo) both;
+  }
+  .stagger > * {
+    animation: fade-in-up 0.7s var(--ease-out-expo) both;
+  }
+  .stagger > *:nth-child(2) {
+    animation-delay: 0.08s;
+  }
+  .stagger > *:nth-child(3) {
+    animation-delay: 0.16s;
+  }
+  .stagger > *:nth-child(4) {
+    animation-delay: 0.24s;
+  }
+  .stagger > *:nth-child(5) {
+    animation-delay: 0.32s;
+  }
+  .animate-pulse-dot {
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+  .animate-float {
+    animation: float-y 5s ease-in-out infinite;
+  }
+  .animate-float-slow {
+    animation: float-y 4s ease-in-out 0.6s infinite;
+  }
+  .animate-spin-slow {
+    animation: spin-slow 60s linear infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-enter,
+  .stagger > *,
+  .animate-pulse-dot,
+  .animate-float,
+  .animate-float-slow,
+  .animate-spin-slow {
+    animation: none !important;
+  }
+}
