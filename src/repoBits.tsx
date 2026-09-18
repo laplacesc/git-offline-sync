@@ -1,30 +1,48 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Checkbox, Chip, Table } from "@heroui/react";
 import type { Selection } from "@heroui/react";
 import { api, BranchInfo, OpOutcome, RepoStatus, shortSha } from "./api";
 import { useRunner } from "./runner";
 import { ActionButton, Code, Empty } from "./ui";
 
-/** 读取仓库状态；path 为空时返回 null。 */
+/**
+ * 读取仓库状态；path 为空时返回 null。
+ * loading：正在读取；error：读取失败的原因（不再静默当作“仓库不存在”）。
+ */
 export function useRepoStatus(path: string | undefined, baseBranch: string, releaseBranches: string[]) {
   // 数组每次渲染都是新对象，用字符串作依赖
   const releasesKey = releaseBranches.join("\n");
   const [status, setStatus] = useState<RepoStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // 只采用最后一次请求的结果，避免较慢的旧请求覆盖新结果
+  const seq = useRef(0);
   const reload = useCallback(async () => {
+    const id = ++seq.current;
     if (!path) {
       setStatus(null);
+      setError(null);
+      setLoading(false);
       return;
     }
+    setLoading(true);
     try {
-      setStatus(await api.repoStatus(path, baseBranch, releasesKey ? releasesKey.split("\n") : []));
-    } catch {
+      const st = await api.repoStatus(path, baseBranch, releasesKey ? releasesKey.split("\n") : []);
+      if (id !== seq.current) return;
+      setStatus(st);
+      setError(null);
+    } catch (e) {
+      if (id !== seq.current) return;
       setStatus(null);
+      setError(String(e));
+    } finally {
+      if (id === seq.current) setLoading(false);
     }
   }, [path, baseBranch, releasesKey]);
   useEffect(() => {
     reload();
   }, [reload]);
-  return { status, reload };
+  return { status, loading, error, reload };
 }
 
 /** 仓库里有未完成的 rebase / am 时显示，提供继续与中止。 */

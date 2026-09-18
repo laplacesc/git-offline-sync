@@ -183,6 +183,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
           </>
         }
       >
+        {repo.error && <Notice tone="danger" title="读取开发仓库失败">{repo.error}</Notice>}
         {inPkgs.length === 0 ? (
           <Empty>
             传输目录 <Code>{profile.transferDir}</Code> 中没有内网包。

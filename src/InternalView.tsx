@@ -213,7 +213,10 @@ export function InternalView({ profile }: { profile: Profile }) {
           </ActionButton>
         }
       >
-        {mirrorReady ? (
+        {mirror.error && <Notice tone="danger" title="读取镜像仓库失败">{mirror.error}</Notice>}
+        {!mirror.status && mirror.loading ? (
+          <p className="text-sm text-muted">正在读取镜像仓库…</p>
+        ) : mirrorReady ? (
           <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
             <dt className="text-muted">远程</dt>
             <dd className="font-mono text-[13px] break-all">{mirror.status?.remoteUrl ?? "—"}</dd>
@@ -292,7 +295,12 @@ export function InternalView({ profile }: { profile: Profile }) {
           </ActionButton>
         }
       >
-        {!workReady && <Notice tone="warning" title="工作仓库不存在或不是普通仓库，请先在该目录 clone 内网仓库。" />}
+        {work.error ? (
+          <Notice tone="danger" title="读取工作仓库失败">{work.error}</Notice>
+        ) : (
+          !workReady &&
+          !work.loading && <Notice tone="warning" title="工作仓库不存在或不是普通仓库，请先在该目录 clone 内网仓库。" />
+        )}
         {backPkgs.length === 0 ? (
           <Empty>传输目录中没有回传包。</Empty>
         ) : (
