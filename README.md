@@ -202,7 +202,7 @@ cd src-tauri && cargo test        # 单元测试 + 端到端测试
 
 Tauri 不能交叉编译，Windows 包必须在 Windows 上构建：
 
-- **CI**：`.github/workflows/build.yml` 会在 Windows 和 macOS 上分别测试并打包，从 Actions 的 Artifacts 下载 `.msi`/`.exe` 和 `.dmg`。
+- **CI**：`.github/workflows/build.yml` 会在 Windows 和 macOS 上分别测试并打包，从 Actions 的 Artifacts 下载 `.exe` 和 `.dmg`。Windows 产出两个 NSIS 安装包：`...-with-webview2.exe` 内置 WebView2 离线安装包（装机无需联网，体积大，内网首选），`...-no-webview2.exe` 不打包 WebView2（体积小，缺运行时时安装程序需联网下载）。
 - **本地**：在对应系统上执行 `pnpm tauri build`。
 
 Windows 离线安装说明：
