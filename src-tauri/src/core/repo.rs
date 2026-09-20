@@ -58,6 +58,8 @@ pub struct RepoStatus {
     pub is_bare: bool,
     pub is_mirror: bool,
     pub current_branch: Option<String>,
+    /// 所有工作树，包括没有绑定分支且没有未提交修改的 detached HEAD。
+    pub worktrees: Vec<Worktree>,
     /// 有未提交修改的工作树（含主工作树）。分支常常是在 linked worktree
     /// 里开发的，只看主工作树会漏掉那里的改动。
     pub dirty_trees: Vec<Worktree>,
@@ -529,6 +531,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
         .map(|o| o.stdout.trim().to_string());
 
     if !st.is_bare {
+        st.worktrees = list_worktrees(g, path)?;
         st.current_branch = current_branch(g, path);
         st.in_progress = in_progress(&git_dir(g, path)?);
         st.in_progress_trees = in_progress_all(g, path);
@@ -558,11 +561,10 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
     // 工作仓库：基准记录一次读出，领先/落后按基准分组批量计算
     let prefix = "refs/remotes/origin/";
     let recorded = all_sync_bases(g, path);
-    let in_worktree: HashMap<String, String> = list_worktrees(g, path)
-        .unwrap_or_default()
-        .into_iter()
+    let in_worktree: HashMap<String, String> = st.worktrees
+        .iter()
         .filter(|w| !w.main && !w.bare)
-        .filter_map(|w| w.branch.clone().map(|b| (b, w.path)))
+        .filter_map(|w| w.branch.clone().map(|b| (b, w.path.clone())))
         .collect();
     let mut counts: HashMap<String, HashMap<String, (u32, u32)>> = HashMap::new();
     let mut counts_for = |base: &str| -> HashMap<String, (u32, u32)> {

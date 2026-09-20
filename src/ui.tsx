@@ -2,7 +2,7 @@
  * 应用级组合组件：全部基于 HeroUI v3，只在这里做一次“设计系统化”的组合，
  * 页面代码直接使用这些组件，避免到处写一次性样式。
  */
-import { ReactNode } from "react";
+import { ReactNode, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Alert,
@@ -20,6 +20,8 @@ import {
   Separator,
   Surface,
   TextField,
+  FieldError,
+  Spinner,
 } from "@heroui/react";
 import type { ButtonProps } from "@heroui/react";
 import { BundleKind, CommitInfo, KIND_LABEL, OpOutcome, shortSha } from "./api";
@@ -35,11 +37,45 @@ export function ActionButton({ isDisabled, ...props }: ButtonProps) {
 }
 
 /** 卡片右上角的刷新按钮：重新读取仓库状态与传输目录 */
-export function RefreshButton({ onPress }: { onPress: () => void }) {
+export function RefreshButton({ onPress }: { onPress: () => unknown }) {
+  const [pending, setPending] = useState(false);
+  const running = useRef(false);
+  const { notify } = useRunner();
+  async function refresh() {
+    if (running.current) return;
+    running.current = true;
+    setPending(true);
+    try {
+      await onPress();
+    } catch (error) {
+      notify("error", `刷新失败：${String(error)}`);
+    } finally {
+      running.current = false;
+      setPending(false);
+    }
+  }
   return (
-    <ActionButton size="sm" variant="ghost" onPress={onPress}>
-      刷新
+    <ActionButton size="sm" variant="ghost" onPress={refresh} isDisabled={pending} aria-busy={pending}>
+      {pending && <Spinner size="sm" />}{pending ? "刷新中…" : "刷新"}
     </ActionButton>
+  );
+}
+
+export function WorkflowNav({ steps }: { steps: string[] }) {
+  return (
+    <nav aria-label="同步流程" className="workflow-nav grid grid-cols-2 gap-1 rounded-xl border border-border bg-surface p-2">
+      {steps.map((title, i) => (
+        <a key={title} href={`#step-${i + 1}`} className="rounded-lg px-3 py-2 text-sm text-muted hover:bg-default hover:text-foreground"
+          onClick={(event) => {
+            event.preventDefault();
+            const target = document.getElementById(`step-${i + 1}`);
+            target?.scrollIntoView({ block: "start" });
+            target?.focus({ preventScroll: true });
+          }}>
+          <span className="mr-2 font-mono text-accent">{i + 1}</span>{title}
+        </a>
+      ))}
+    </nav>
   );
 }
 
@@ -84,20 +120,19 @@ export function StepCard({
   children: ReactNode;
 }) {
   return (
-    <Card className="gap-0 p-0">
-      <Card.Header className="flex flex-row flex-wrap items-start gap-4 px-6 pt-6 pb-4">
-        <div className="min-w-0 flex-1 space-y-2">
-          <SectionLabel>
-            {String(step).padStart(2, "0")} · {label}
-          </SectionLabel>
-          <Card.Title className="text-lg font-semibold tracking-[-0.01em]">{title}</Card.Title>
-          {description && (
-            <Card.Description className="text-sm leading-relaxed text-muted">{description}</Card.Description>
-          )}
+    <Card id={`step-${step}`} tabIndex={-1} aria-label={title} className="workflow-step scroll-mt-4 gap-0 p-0">
+      <Card.Header className="flex flex-row flex-wrap items-start gap-3 px-5 pt-5 pb-4">
+        <div className="flex min-w-0 flex-1 gap-3">
+          <span className="step-number" aria-hidden="true">{String(step).padStart(2, "0")}</span>
+          <div className="min-w-0 space-y-1">
+            <span className="sr-only">{label}</span>
+            <Card.Title className="text-base font-semibold">{title}</Card.Title>
+            {description && <Card.Description className="text-sm leading-relaxed text-muted">{description}</Card.Description>}
+          </div>
         </div>
-        {actions && <div className="flex shrink-0 gap-2">{actions}</div>}
+        {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
       </Card.Header>
-      <Card.Content className="flex flex-col gap-4 px-6 pb-6">{children}</Card.Content>
+      <Card.Content className="flex min-w-0 flex-col gap-4 px-5 pb-5">{children}</Card.Content>
     </Card>
   );
 }
@@ -115,6 +150,8 @@ export function TextInput({
   isReadOnly,
   mono,
   className,
+  id,
+  error,
 }: {
   label: string;
   value: string;
@@ -124,12 +161,15 @@ export function TextInput({
   isReadOnly?: boolean;
   mono?: boolean;
   className?: string;
+  id?: string;
+  error?: string;
 }) {
   return (
-    <TextField value={value} onChange={onChange} isReadOnly={isReadOnly} fullWidth className={className}>
+    <TextField id={id} value={value} onChange={onChange} isReadOnly={isReadOnly} isInvalid={!!error} fullWidth className={className}>
       <Label>{label}</Label>
       <Input placeholder={placeholder} spellCheck={false} className={mono ? "font-mono text-[13px]" : undefined} />
       {description && <Description>{description}</Description>}
+      {error && <FieldError>{error}</FieldError>}
     </TextField>
   );
 }
@@ -194,6 +234,8 @@ export function PathInput({
   extensions,
   placeholder,
   description,
+  id,
+  error,
 }: {
   label: string;
   value: string;
@@ -202,6 +244,8 @@ export function PathInput({
   extensions?: string[];
   placeholder?: string;
   description?: string;
+  id?: string;
+  error?: string;
 }) {
   const browse = async () => {
     const picked = await open({
@@ -213,17 +257,18 @@ export function PathInput({
     if (typeof picked === "string") onChange(picked);
   };
   return (
-    <TextField value={value} onChange={onChange} fullWidth>
+    <TextField id={id} value={value} onChange={onChange} isInvalid={!!error} fullWidth>
       <Label>{label}</Label>
       <InputGroup fullWidth>
         <InputGroup.Input placeholder={placeholder} spellCheck={false} className="font-mono text-[13px]" />
         <InputGroup.Suffix className="pr-1">
-          <Button size="sm" variant="ghost" onPress={browse}>
+          <Button size="sm" variant="ghost" onPress={browse} aria-label={`浏览${label}`}>
             浏览…
           </Button>
         </InputGroup.Suffix>
       </InputGroup>
       {description && <Description>{description}</Description>}
+      {error && <FieldError>{error}</FieldError>}
     </TextField>
   );
 }
@@ -400,4 +445,15 @@ export function AppGlyph({ className = "size-5" }: { className?: string }) {
       </g>
     </svg>
   );
+}
+
+/** 配置与设置共用的分组布局，说明列与字段列随可用宽度切换。 */
+export function FormSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+  return <section className="form-section">
+    <div className="space-y-1">
+      <h2 className="text-base font-semibold">{title}</h2>
+      <p className="text-sm leading-relaxed text-muted">{description}</p>
+    </div>
+    <div className="min-w-0">{children}</div>
+  </section>;
 }

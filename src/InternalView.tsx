@@ -18,7 +18,7 @@ import {
   shortSha,
 } from "./api";
 import { useRunner } from "./runner";
-import { BranchTable, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus } from "./repoBits";
+import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus } from "./repoBits";
 import {
   ActionButton,
   BaseSelect,
@@ -32,6 +32,7 @@ import {
   PackageRow,
   RefreshButton,
   StepCard,
+  WorkflowNav,
   TextInput,
 } from "./ui";
 
@@ -47,11 +48,12 @@ export function InternalView({ profile }: { profile: Profile }) {
   const work = useRepoStatus(workDir, base, releases);
   const [state, setState] = useState<InternalState | null>(null);
   const [packages, setPackages] = useState<PackageInfo[]>([]);
+  const [packageError, setPackageError] = useState<string | null>(null);
 
   const reloadAll = useCallback(async () => {
     await Promise.all([mirror.reload(), work.reload()]);
     setState(await api.internalState(mirrorDir).catch(() => null));
-    setPackages(await api.listPackages(profile.transferDir).catch(() => []));
+    setPackages(await api.listPackages(profile.transferDir).then((items) => { setPackageError(null); return items; }).catch((error) => { setPackageError(String(error)); return []; }));
   }, [mirror.reload, work.reload, mirrorDir, profile.transferDir]);
 
   useEffect(() => {
@@ -217,7 +219,9 @@ export function InternalView({ profile }: { profile: Profile }) {
   const workReady = !!work.status?.isRepo && !work.status.isBare;
 
   return (
-    <div className="stagger flex flex-col gap-5">
+    <div className="workflow-layout">
+      <WorkflowNav steps={["镜像仓库", "导出到 U 盘", "导入外网回传", "Rebase 并推送"]} />
+      {packageError && <Notice tone="danger" title="无法读取传输目录，请检查路径或 U 盘连接后刷新">{packageError}</Notice>}
       <StepCard
         step={1}
         label="Mirror"
@@ -322,7 +326,7 @@ export function InternalView({ profile }: { profile: Profile }) {
           !workReady &&
           !work.loading && <Notice tone="warning" title="工作仓库不存在或不是普通仓库，请先在该目录 clone 内网仓库。" />
         )}
-        {backPkgs.length === 0 ? (
+        {packageError ? null : backPkgs.length === 0 ? (
           <Empty>传输目录中没有回传包。</Empty>
         ) : (
           <div className="flex flex-col gap-2">
@@ -438,6 +442,7 @@ export function InternalView({ profile }: { profile: Profile }) {
           selected={selected}
           onSelect={setSelected}
         />
+        <DetachedWorktreesNotice status={work.status} />
         {branch && (
           <>
             <div className="flex flex-wrap items-end gap-3">

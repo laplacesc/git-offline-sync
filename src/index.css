@@ -10,7 +10,6 @@
 @import "@fontsource/inter/500.css";
 @import "@fontsource/inter/600.css";
 @import "@fontsource/inter/700.css";
-@import "@fontsource/calistoga/400.css";
 @import "@fontsource/jetbrains-mono/400.css";
 @import "@fontsource/jetbrains-mono/500.css";
 
@@ -25,11 +24,15 @@
   --foreground: #0f172a; /* slate-900 */
   --surface: #ffffff; /* 卡片 */
   --surface-foreground: var(--foreground);
+  --surface-secondary: var(--default);
+  --surface-secondary-foreground: var(--foreground);
+  --surface-tertiary: var(--default);
+  --surface-tertiary-foreground: var(--foreground);
   --overlay: #ffffff;
   --overlay-foreground: var(--foreground);
   --default: #f1f5f9; /* slate-100：次级表面 */
   --default-foreground: var(--foreground);
-  --muted: #64748b; /* slate-500：次级文字 */
+  --muted: #526176; /* slate-500：次级文字 */
   --accent: #0052ff; /* Electric Blue */
   --accent-secondary: #4d7cff; /* 渐变终点 */
   --accent-foreground: #ffffff;
@@ -38,9 +41,9 @@
   --focus: #0052ff;
   --link: var(--accent);
 
-  --success: #0f9d6b;
+  --success: #08734f;
   --success-foreground: #ffffff;
-  --warning: #d97706;
+  --warning: #a34e00;
   --warning-foreground: #ffffff;
   --danger: #dc2626;
   --danger-foreground: #ffffff;
@@ -48,7 +51,7 @@
   /* 表单 */
   --field-background: #ffffff;
   --field-foreground: var(--foreground);
-  --field-placeholder: color-mix(in srgb, var(--muted) 60%, transparent);
+  --field-placeholder: var(--muted);
   --field-border: var(--border);
   --field-border-width: 1px;
 
@@ -74,8 +77,8 @@
 /* 暴露给 Tailwind 工具类 */
 @theme inline {
   --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
-  /* Calistoga 没有中文字形，中文回落到无衬线粗体 */
-  --font-display: "Calistoga", "PingFang SC", "Microsoft YaHei", Georgia, serif;
+  /* 标题与正文共享离线字体，保持中英文排版一致。 */
+  --font-display: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
 
   --color-accent-secondary: var(--accent-secondary);
@@ -117,18 +120,18 @@
 
   /* 主按钮：签名渐变 + 蓝色投影 + 悬停上浮 */
   .button--primary {
-    background-image: var(--gradient-accent);
-    box-shadow: var(--shadow-sm);
+    background: var(--accent);
+    box-shadow: none;
     @media (hover: hover) {
       &:hover:not([data-disabled="true"], :disabled),
       &[data-hovered="true"]:not([data-disabled="true"]) {
-        transform: translateY(-2px);
+        transform: none;
         box-shadow: var(--shadow-accent-lg);
-        filter: brightness(1.1);
+        filter: brightness(0.95);
       }
     }
     &[data-pressed="true"] {
-      transform: scale(0.98);
+      transform: none;
       box-shadow: var(--shadow-accent);
     }
   }
@@ -147,10 +150,10 @@
   .card--default {
     border: 1px solid var(--border);
     border-radius: 1rem;
-    box-shadow: var(--shadow-md);
-    transition: box-shadow 300ms var(--ease-out-expo);
+    box-shadow: var(--shadow-sm);
+    transition: border-color 150ms ease;
     &:hover {
-      box-shadow: var(--shadow-lg);
+      box-shadow: var(--shadow-sm);
     }
   }
 
@@ -270,4 +273,86 @@
   .animate-spin-slow {
     animation: none !important;
   }
+}
+
+/* 工作区：清晰焦点、稳定布局与系统主题。 */
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.skip-link { position: fixed; top: 8px; left: 8px; z-index: 100; transform: translateY(-150%); background: var(--surface); padding: 12px; border-radius: 8px; }
+.skip-link:focus { transform: none; }
+.button { min-height: 36px; touch-action: manipulation; }
+.button:not(:disabled):not([data-disabled="true"]) { cursor: pointer; }
+.checkbox-content { min-height: 36px; min-width: 36px; }
+.table__scroll-container { max-width: 100%; }
+.card__header, .card__content, .card__footer { min-width: 0; }
+.workflow-nav a { min-height: 40px; }
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --background: #111827; --foreground: #e5edf8;
+    --surface: #192334; --overlay: #202d40;
+    --default: #263449; --muted: #b3c1d3;
+    --accent: #9abbff; --accent-secondary: #a9c6ff; --accent-foreground: #101c35;
+    --border: #43536b; --separator: #43536b; --focus: #9abbff;
+    --success: #72e4b0; --success-foreground: #102b20;
+    --warning: #ffc078; --warning-foreground: #382000;
+    --danger: #ffa0a0; --danger-foreground: #3b1111;
+    --field-background: #192334; --field-border: #596b83;
+  }
+}
+@media (max-width: 700px) {
+  .app-shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .app-shell > aside { display: grid; grid-template-columns: minmax(0, 1fr) 140px; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); }
+  .app-shell > aside .app-brand, .app-profiles-title, .app-shell > aside > [data-tauri-drag-region] { display: none; }
+  .app-profile-list { max-height: 120px; }
+  .app-sidebar-actions { border-top: 0; padding: 8px; }
+  .app-shell > aside > div:first-of-type { display: none; }
+  .card__header, .card__content, .card__footer { padding-left: 16px; padding-right: 16px; }
+  .button { min-height: 44px; }
+  h1 { overflow-wrap: anywhere; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
+
+/* 页面布局由工作区可用宽度决定，而不是包含侧栏的窗口宽度。 */
+.workspace-content { container-type: inline-size; }
+.workflow-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.workflow-layout > * { min-width: 0; }
+.workflow-step { height: 100%; }
+.step-number {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  background: var(--default);
+  color: var(--accent);
+  font: 500 12px var(--font-mono);
+}
+.form-page { width: 100%; max-width: 1120px; margin-inline: auto; }
+.form-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.form-section + .form-section { border-top: 1px solid var(--border); padding-top: 24px; }
+.form-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.welcome-layout { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 32px; padding-block: 24px; }
+.page-header > div:first-child { flex-basis: 320px; }
+.workflow-nav a { display: flex; align-items: center; min-width: 0; }
+@container (min-width: 560px) {
+  .workflow-nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .form-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container (min-width: 820px) {
+  .form-section { grid-template-columns: 168px minmax(0, 1fr); gap: 32px; }
+  .welcome-layout { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 40px; }
+}
+@container (min-width: 960px) {
+  .workflow-layout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workflow-layout > * { grid-column: 1 / -1; }
+  .workflow-layout > #step-1, .workflow-layout > #step-2 { grid-column: auto; }
+}
+@media (max-width: 700px) {
+  .form-page .card__header, .form-page .card__content, .form-page .card__footer { padding: 20px 16px; }
+  .form-page .card__footer { gap: 12px; }
+  .welcome-layout { padding-block: 8px; gap: 24px; }
+  .workflow-step .card__header > div:last-child { max-width: 100%; }
 }

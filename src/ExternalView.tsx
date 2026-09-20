@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Table, ToggleButton, ToggleButtonGroup } from "@heroui/react";
+import { AlertDialog, Table, ToggleButton, ToggleButtonGroup } from "@heroui/react";
 import type { Key } from "@heroui/react";
 import {
   api,
@@ -18,7 +18,7 @@ import {
   shortSha,
 } from "./api";
 import { useRunner } from "./runner";
-import { BranchTable, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus } from "./repoBits";
+import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus } from "./repoBits";
 import {
   ActionButton,
   BaseSelect,
@@ -31,6 +31,7 @@ import {
   PackageRow,
   RefreshButton,
   StepCard,
+  WorkflowNav,
   TextInput,
 } from "./ui";
 
@@ -90,7 +91,7 @@ function DevRepoRow({
 }
 
 export function ExternalView({ profile }: { profile: Profile }) {
-  const { run, notify } = useRunner();
+  const { run, notify, busy } = useRunner();
   const base = profile.baseBranch;
   const releases = releasesOf(profile);
   const mirrorDir = profile.mirrorDir ?? "";
@@ -104,6 +105,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
   const repo = useRepoStatus(devDir, base, releases);
   const [state, setState] = useState<MirrorState | null>(null);
   const [packages, setPackages] = useState<PackageInfo[]>([]);
+  const [packageError, setPackageError] = useState<string | null>(null);
   const [devExists, setDevExists] = useState<Record<string, boolean>>({});
 
   const reloadAll = useCallback(async () => {
@@ -113,7 +115,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
       mirror.reload(),
       repo.reload(),
       mirrorDir ? api.mirrorState(mirrorDir).catch(() => null) : null,
-      api.listPackages(profile.transferDir).catch(() => []),
+      api.listPackages(profile.transferDir).then((items) => { setPackageError(null); return items; }).catch((error) => { setPackageError(String(error)); return []; }),
       Promise.all(
         devRepos.map(async (dir) => {
           const isRepo = await api
@@ -212,6 +214,12 @@ export function ExternalView({ profile }: { profile: Profile }) {
   const [worktreePath, setWorktreePath] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [opRes, setOpRes] = useState<OpOutcome | null>(null);
+  const [rebaseTarget, setRebaseTarget] = useState<{ name: string; onto: string } | null>(null);
+
+  useEffect(() => {
+    setSelected([]);
+    setRebaseTarget(null);
+  }, [profile.id, devDir]);
 
   const createBranch = async () => {
     const name = newBranch.trim();
@@ -232,14 +240,20 @@ export function ExternalView({ profile }: { profile: Profile }) {
     if (typeof p === "string") setWorktreePath(p);
   };
 
-  const selectedInfo = selected.length === 1 ? repo.status?.branches.find((b) => b.name === selected[0]) : undefined;
-  const selectedWarning = selectedInfo ? prefixWarning(selectedInfo.name, selectedInfo.base, profile) : null;
+  const rebaseInfo = repo.status?.branches.find((b) => b.name === rebaseTarget?.name);
+  const rebaseWarning = rebaseTarget ? prefixWarning(rebaseTarget.name, rebaseTarget.onto, profile) : null;
+
+  useEffect(() => {
+    if (rebaseTarget && !rebaseInfo) setRebaseTarget(null);
+  }, [rebaseTarget, rebaseInfo]);
 
   const rebase = async () => {
-    if (!selectedInfo) return;
-    const { name, base: onto } = selectedInfo;
-    const r = await run("Rebase", () => api.rebaseOnto(devDir, name, onto, false));
-    if (r) setOpRes(r);
+    if (!rebaseTarget || !rebaseInfo) return;
+    const r = await run("Rebase", () => api.rebaseOnto(devDir, rebaseTarget.name, rebaseTarget.onto, false));
+    if (r) {
+      setOpRes(r);
+      setRebaseTarget(null);
+    }
     reloadAll();
   };
 
@@ -277,7 +291,38 @@ export function ExternalView({ profile }: { profile: Profile }) {
   const canCreate = branchNameOk && (!asWorktree || worktreePath.trim() !== "");
 
   return (
-    <div className="stagger flex flex-col gap-5">
+    <div className="workflow-layout">
+      <WorkflowNav steps={["导入内网包", "开发仓库", "开发分支", "回传到内网"]} />
+      {packageError && <Notice tone="danger" title="无法读取传输目录，请检查路径或 U 盘连接后刷新">{packageError}</Notice>}
+      <AlertDialog.Backdrop
+        isOpen={!!rebaseTarget}
+        onOpenChange={(open) => { if (!open && !busy) setRebaseTarget(null); }}
+      >
+        <AlertDialog.Container>
+          <AlertDialog.Dialog className="sm:max-w-md">
+            <AlertDialog.Header>
+              <AlertDialog.Heading>Rebase 分支</AlertDialog.Heading>
+            </AlertDialog.Header>
+            <AlertDialog.Body className="space-y-4">
+              <p>分支：<Code>{rebaseTarget?.name}</Code></p>
+              <BaseSelect
+                label="Rebase 到"
+                value={rebaseTarget?.onto ?? base}
+                options={candidates}
+                mainline={base}
+                onChange={(onto) => setRebaseTarget((target) => target ? { ...target, onto } : null)}
+              />
+              {rebaseWarning && <Notice tone="warning" title={rebaseWarning} />}
+            </AlertDialog.Body>
+            <AlertDialog.Footer>
+              <ActionButton variant="tertiary" onPress={() => setRebaseTarget(null)}>取消</ActionButton>
+              <ActionButton variant="primary" onPress={rebase} isDisabled={!rebaseInfo}>
+                Rebase 到 origin/{rebaseTarget?.onto}
+              </ActionButton>
+            </AlertDialog.Footer>
+          </AlertDialog.Dialog>
+        </AlertDialog.Container>
+      </AlertDialog.Backdrop>
       <StepCard
         step={1}
         label="Import"
@@ -318,7 +363,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
             外网镜像必须是本工具建立的裸仓库。如果这里是旧版本的开发仓库，请把它删掉后重新导入全量包。
           </Notice>
         )}
-        {inPkgs.length === 0 ? (
+        {packageError ? null : inPkgs.length === 0 ? (
           <Empty>
             传输目录 <Code>{profile.transferDir}</Code> 中没有内网包。
           </Empty>
@@ -461,7 +506,9 @@ export function ExternalView({ profile }: { profile: Profile }) {
           </>
         }
       >
-        {!devReady ? (
+        {repo.loading && !repo.status ? (
+          <p role="status" className="py-6 text-sm text-muted">正在读取开发仓库和分支…</p>
+        ) : !devReady ? (
           <Empty>先克隆开发仓库。</Empty>
         ) : (
           <>
@@ -492,10 +539,6 @@ export function ExternalView({ profile }: { profile: Profile }) {
               <ActionButton variant="secondary" onPress={createBranch} isDisabled={!canCreate}>
                 {asWorktree ? "新建 worktree" : "新建并切换"}
               </ActionButton>
-              <span className="flex-1" />
-              <ActionButton variant="outline" onPress={rebase} isDisabled={!selectedInfo}>
-                {selectedInfo ? `Rebase ${selectedInfo.name} 到 origin/${selectedInfo.base}` : "Rebase 所选分支"}
-              </ActionButton>
             </div>
             <Check checked={asWorktree} onChange={setAsWorktree}>
               创建为独立 worktree（分支有自己的目录，可以和其他分支同时开着）
@@ -516,14 +559,15 @@ export function ExternalView({ profile }: { profile: Profile }) {
             )}
             <p className="-mt-2 text-xs text-muted">feature/、bugfix/ 基于主线；hotfix/ 基于发布分支</p>
             {newBranchWarning && <Notice tone="warning" title={`新分支：${newBranchWarning}`} />}
-            {selectedWarning && <Notice tone="warning" title={`${selectedInfo?.name}：${selectedWarning}`} />}
             <BranchTable
               branches={branches}
               emptyText="还没有开发分支（主线和发布分支不在这里列出）"
               selected={selected}
               onSelect={setSelected}
               multi={mode === "bundle"}
+              onRebase={(b) => setRebaseTarget({ name: b.name, onto: b.base })}
             />
+            <DetachedWorktreesNotice status={repo.status} />
             <DirtyTreesNotice status={repo.status} suffix="回传只包含已提交的内容。" />
             {opRes && <OutcomeView outcome={opRes} />}
           </>
@@ -546,7 +590,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
             </ToggleButton>
           </ToggleButtonGroup>
           <span className="flex-1" />
-          <span className="text-sm text-muted">
+          <span role="status" className="min-w-0 break-all text-sm text-muted">
             {selected.length ? `已选：${selected.join("、")}` : "在上方表格中选择分支"}
           </span>
           <ActionButton

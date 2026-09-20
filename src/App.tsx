@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Card, ListBox, Spinner, Toast } from "@heroui/react";
 import type { Selection } from "@heroui/react";
 import { api, AppConfig, Environment, newId, Profile, Role } from "./api";
@@ -6,8 +6,8 @@ import { ExternalView } from "./ExternalView";
 import { InternalView } from "./InternalView";
 import { LogPanel, useGitLog } from "./LogPanel";
 import { blankProfile, ProfileEditor } from "./ProfileEditor";
-import { RunnerProvider, useRunner } from "./runner";
-import { AppGlyph, Code, Notice, PathInput, SectionLabel, TextInput } from "./ui";
+import { OperationStatus, RunnerProvider, useRunner } from "./runner";
+import { AppGlyph, Code, FormSection, Notice, PathInput, SectionLabel, TextInput } from "./ui";
 import "./index.css";
 
 /**
@@ -28,7 +28,14 @@ function Shell() {
   const { busy, notify, confirm } = useRunner();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [env, setEnv] = useState<Environment | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [mode, setMode] = useState<Mode>({ kind: "view" });
+  const contentRef = useRef<HTMLDivElement>(null);
+  const pageKey = mode.kind === "edit" ? mode.profile.id : config?.lastProfileId;
+  useEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = 0;
+  }, [mode.kind, pageKey]);
   // 默认收起；开始执行操作或出现错误时自动展开
   const [logOpen, setLogOpen] = useState(false);
   const log = useGitLog();
@@ -43,25 +50,33 @@ function Shell() {
   useEffect(() => {
     (async () => {
       try {
+        setLoadError(null);
         const cfg = await api.loadConfig();
         setConfig({ ...cfg, profiles: cfg.profiles ?? [] });
       } catch (e) {
-        notify("error", String(e));
-        setConfig({ profiles: [] });
+        setLoadError(String(e));
       }
       setEnv(await api.environment().catch(() => null));
     })();
-  }, [notify]);
+  }, [notify, loadAttempt]);
 
   const persist = async (next: AppConfig) => {
-    setConfig(next);
     try {
       await api.saveConfig(next);
+      setConfig(next);
+      return true;
     } catch (e) {
       notify("error", `保存配置失败：${String(e)}`);
+      return false;
     }
   };
 
+  if (loadError) {
+    return <div className="grid h-full place-items-center p-6"><div className="max-w-lg space-y-4">
+      <Notice tone="danger" title="无法读取同步配置">{loadError}</Notice>
+      <Button onPress={() => setLoadAttempt((n) => n + 1)}>重新读取配置</Button>
+    </div></div>;
+  }
   if (!config) {
     return (
       <div className="grid h-full place-items-center">
@@ -77,11 +92,12 @@ function Shell() {
   };
   const startNew = (role: Role) => setMode({ kind: "edit", profile: blankProfile(role, newId()), isNew: true });
 
-  const saveProfile = (p: Profile) => {
+  const saveProfile = async (p: Profile) => {
     const exists = config.profiles.some((x) => x.id === p.id);
     const profiles = exists ? config.profiles.map((x) => (x.id === p.id ? p : x)) : [...config.profiles, p];
-    persist({ ...config, profiles, lastProfileId: p.id });
-    setMode({ kind: "view" });
+    const saved = await persist({ ...config, profiles, lastProfileId: p.id });
+    if (saved) setMode({ kind: "view" });
+    return saved;
   };
 
   const deleteProfile = async (p: Profile) => {
@@ -93,8 +109,7 @@ function Shell() {
     });
     if (!ok) return;
     const profiles = config.profiles.filter((x) => x.id !== p.id);
-    persist({ ...config, profiles, lastProfileId: profiles[0]?.id });
-    setMode({ kind: "view" });
+    if (await persist({ ...config, profiles, lastProfileId: profiles[0]?.id })) setMode({ kind: "view" });
   };
 
   const gitOk = !!env && "Ok" in env.git;
@@ -102,7 +117,7 @@ function Shell() {
   function gitIndicator() {
     if (!env) return { dot: "bg-border", text: "检测中…" };
     if ("Ok" in env.git) {
-      return { dot: "animate-pulse-dot bg-success", text: env.git.Ok.replace("git version ", "git ") };
+      return { dot: "bg-success", text: env.git.Ok.replace("git version ", "git ") };
     }
     return { dot: "bg-danger", text: "git 不可用" };
   }
@@ -111,33 +126,35 @@ function Shell() {
   const selectedKeys: Selection = new Set(mode.kind === "view" && current ? [current.id] : []);
 
   return (
-    <div className="grid h-full grid-cols-[248px_1fr]">
+    <div className="app-shell grid h-full grid-cols-[248px_1fr]">
+      <a href="#main-content" className="skip-link">跳到主要内容</a>
       {/* ---------- 侧栏：白色表面 + 右侧细边框，左上角一抹淡蓝光晕 ---------- */}
       <aside className="relative flex min-h-0 flex-col overflow-hidden border-r border-border bg-surface">
         <div className="pointer-events-none absolute -top-28 -left-28 size-64 rounded-full bg-accent/[0.06] blur-[80px]" />
         <TitleBarDrag className="relative" />
-        <div className={"relative flex items-center gap-3 px-5 pb-5 " + (IS_MAC ? "pt-1" : "pt-6")}>
+        <div className={"app-brand relative flex items-center gap-3 px-5 pb-5 " + (IS_MAC ? "pt-1" : "pt-6")}>
           <span className="bg-gradient-accent grid size-9 place-items-center rounded-xl text-white shadow-accent">
             <AppGlyph className="size-5" />
           </span>
           <div className="min-w-0">
             <div className="flex items-baseline gap-1.5">
-              <span className="font-display text-lg leading-none">Git 离线同步</span>
+              <span className="text-sm font-semibold whitespace-nowrap leading-none">Git 离线同步</span>
               {env && <span className="font-mono text-[11px] leading-none text-muted">v{env.version}</span>}
             </div>
             <div className="mt-1 font-mono text-[10px] tracking-[0.15em] text-muted uppercase">mirror · bundle</div>
           </div>
         </div>
 
-        <div className="relative px-5 pb-2">
+        <div className="app-profiles-title relative px-5 pb-2">
           <SectionLabel>Profiles</SectionLabel>
         </div>
-        <div className="relative min-h-0 flex-1 overflow-y-auto px-3">
+        <div className="app-profile-list relative min-h-0 flex-1 overflow-y-auto px-3">
           {config.profiles.length === 0 ? (
             <p className="px-2 py-2 text-sm text-muted">还没有配置</p>
           ) : (
             <ListBox
               aria-label="同步配置"
+              disabledKeys={busy || mode.kind === "edit" ? config.profiles.map((p) => p.id) : []}
               selectionMode="single"
               selectedKeys={selectedKeys}
               onSelectionChange={(keys) => {
@@ -164,28 +181,31 @@ function Shell() {
           )}
         </div>
 
-        <div className="relative space-y-2 border-t border-border p-3">
-          <Button fullWidth variant="outline" onPress={() => startNew(recommended)}>
+        <div className="app-sidebar-actions relative space-y-2 border-t border-border p-3">
+          <Button fullWidth variant="outline" onPress={() => startNew(recommended)} isDisabled={!!busy || mode.kind === "edit"}>
             ＋ 新建配置
           </Button>
           <Button
             fullWidth
             variant="ghost"
             className="justify-start gap-2 text-xs text-muted hover:text-foreground"
+            isDisabled={!!busy || mode.kind === "edit"}
+            aria-label="打开设置"
             onPress={() => setMode({ kind: "settings" })}
           >
             <span className={"size-1.5 rounded-full " + gitBits.dot} />
             <span className="flex-1 truncate text-left font-mono">{gitBits.text}</span>
-            <span>⚙</span>
+            <span>设置</span>
           </Button>
         </div>
       </aside>
 
       {/* ---------- 主区域 ---------- */}
-      <main className="flex min-h-0 min-w-0 flex-col">
+      <main id="main-content" tabIndex={-1} className="flex min-h-0 min-w-0 flex-col">
+        <OperationStatus />
         <TitleBarDrag />
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className={"mx-auto max-w-5xl px-8 pb-12 " + (IS_MAC ? "pt-2" : "pt-8")}>
+        <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto">
+          <div className={"workspace-content mx-auto w-full max-w-[1440px] px-4 lg:px-6 pb-8 " + (IS_MAC ? "pt-2" : "pt-8")}>
             {env && !gitOk && (
               <div className="mb-6">
                 <Notice tone="danger" title="找不到可用的 git">
@@ -210,9 +230,10 @@ function Shell() {
                 config={config}
                 env={env}
                 onSave={async (c) => {
-                  await persist(c);
+                  if (!await persist(c)) return false;
                   setEnv(await api.environment().catch(() => null));
                   setMode({ kind: "view" });
+                  return true;
                 }}
                 onCancel={() => setMode({ kind: "view" })}
               />
@@ -221,14 +242,14 @@ function Shell() {
             {mode.kind === "view" &&
               (current ? (
                 <>
-                  <header className="animate-enter mb-6 flex items-end justify-between gap-6">
+                  <header className="page-header mb-5 flex flex-wrap items-start justify-between gap-4">
                     <div className="min-w-0 flex-1 space-y-2">
-                      <SectionLabel pulse>{current.role === "internal" ? "Intranet side" : "Internet side"}</SectionLabel>
-                      <h1 className="font-display text-3xl leading-[1.15] tracking-[-0.02em]">
+                      <SectionLabel>{current.role === "internal" ? "Intranet side" : "Internet side"}</SectionLabel>
+                      <h1 className="font-display text-2xl leading-tight font-semibold tracking-[-0.02em]">
                         {current.name}
                         <span className="text-gradient"> · {current.role === "internal" ? "内网端" : "外网端"}</span>
                       </h1>
-                      <p className="flex min-w-0 items-center gap-2 text-sm text-muted">
+                      <p className="flex min-w-0 flex-wrap items-center gap-2 text-sm text-muted">
                         <span className="shrink-0">主线</span>
                         <Code className="shrink-0">{current.baseBranch}</Code>
                         {(current.releaseBranches?.length ?? 0) > 0 && (
@@ -275,84 +296,46 @@ function Shell() {
   );
 }
 
-/** 欢迎页：非对称两栏 + 缓慢旋转的环与漂浮的“包”卡片 */
+/** 首次使用：先选择当前环境，再了解完整同步路线。 */
 function Welcome({ onNew, recommended }: { onNew: (r: Role) => void; recommended: Role }) {
   const steps = [
-    ["内网", "克隆镜像 → 导出全量包"],
-    ["外网", "克隆全量包 → 新建分支 → AI 开发并提交 → 导出回传包"],
-    ["内网", "导入回传 → rebase 到最新 main → 确认后推送"],
-    ["之后", "内网只导出增量包，外网按序号导入"],
+    ["内网准备", "克隆镜像，将全量包导出到 U 盘。"],
+    ["外网开发", "导入内网包，克隆开发仓库，在分支或 worktree 中开发并提交。"],
+    ["回传与推送", "将新提交带回内网，整理到主线或发布分支后推送。"],
+    ["持续同步", "之后按序号交换增量包，只传输新增内容。"],
   ];
   return (
-    <div className="grid items-center gap-10 py-6 lg:grid-cols-[1.1fr_0.9fr]">
-      <div className="stagger space-y-7">
-        <SectionLabel pulse>Offline git sync</SectionLabel>
-        <h1 className="font-display text-5xl leading-[1.05] tracking-[-0.02em]">
-          在离线内网与外网之间
-          <span className="relative inline-block">
-            <span className="text-gradient">同步 Git 仓库</span>
-            <span className="absolute inset-x-0 -bottom-1 h-3 rounded-sm bg-gradient-to-r from-accent/15 to-accent-secondary/10" />
-          </span>
-        </h1>
-        <p className="max-w-xl text-lg leading-relaxed text-muted">
-          内网用 <Code>git clone --mirror</Code> 维护镜像并打包成 bundle，经 U 盘带到外网；外网在特性分支上开发，
-          把新提交打包带回内网 rebase 后推送。
-        </p>
-        <ol className="space-y-3">
-          {steps.map(([who, what], i) => (
-            <li key={i} className="flex items-start gap-4">
-              <span className="bg-gradient-accent grid size-7 shrink-0 place-items-center rounded-lg font-mono text-xs text-white shadow-accent">
-                {i + 1}
-              </span>
-              <span className="pt-0.5 text-sm">
-                <strong className="mr-2 font-semibold text-accent">{who}</strong>
-                {what}
-              </span>
+    <div className="welcome-layout">
+      <section className="min-w-0 space-y-6">
+        <SectionLabel>Offline git sync</SectionLabel>
+        <h1 className="text-3xl leading-tight font-semibold tracking-tight">让内网与外网的<br /><span className="text-accent">Git 开发保持同步</span></h1>
+        <p className="max-w-lg text-base leading-relaxed text-muted">通过 U 盘交换 Git 提交，在外网开发，在内网整理并推送。先为当前电脑创建一个同步配置。</p>
+        <div className="grid gap-3">
+          {(["internal", "external"] as Role[]).map((role) => (
+            <div key={role} className="rounded-xl border border-border bg-surface p-4">
+              <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="font-semibold">{role === "internal" ? "内网端" : "外网端"}</h2>
+                {recommended === role && <span className="text-xs text-accent">适合当前系统</span>}
+              </div>
+              <p className="mb-4 text-sm text-muted">{role === "internal" ? "可访问 GitLab，负责导出、接收回传和推送。" : "使用 AI 等开发工具，导入内网包并回传提交。"}</p>
+              <Button fullWidth variant={recommended === role ? "primary" : "outline"} onPress={() => onNew(role)}>
+                新建{role === "internal" ? "内网端" : "外网端"}配置
+              </Button>
+            </div>
+          ))}
+        </div>
+      </section>
+      <aside className="rounded-2xl border border-border bg-surface p-6">
+        <h2 className="mb-6 text-lg font-semibold">一次完整的同步</h2>
+        <ol className="space-y-6">
+          {steps.map(([title, description], i) => (
+            <li key={title} className="flex gap-4">
+              <span className="step-number shrink-0">{i + 1}</span>
+              <div className="min-w-0 space-y-1"><h3 className="font-medium">{title}</h3><p className="text-sm leading-relaxed text-muted">{description}</p></div>
             </li>
           ))}
         </ol>
-        <div className="flex flex-wrap gap-3 pt-2">
-          <Button size="lg" variant={recommended === "internal" ? "primary" : "outline"} onPress={() => onNew("internal")}>
-            新建内网端配置 →
-          </Button>
-          <Button size="lg" variant={recommended === "external" ? "primary" : "outline"} onPress={() => onNew("external")}>
-            新建外网端配置 →
-          </Button>
-        </div>
-      </div>
-
-      <HeroGraphic />
-    </div>
-  );
-}
-
-function HeroGraphic() {
-  return (
-    <div aria-hidden className="relative hidden aspect-square w-full max-w-md justify-self-center lg:block">
-      <div className="absolute inset-0 rounded-full bg-[radial-gradient(circle,rgba(0,82,255,0.08),transparent_65%)]" />
-      <div className="animate-spin-slow absolute inset-6 rounded-full border-2 border-dashed border-accent/20" />
-      <div className="absolute inset-20 rounded-full border border-border bg-surface shadow-xl" />
-      <div className="absolute top-1/2 left-1/2 grid size-24 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-3xl bg-gradient-accent text-white shadow-accent-lg">
-        <AppGlyph className="size-12" />
-      </div>
-
-      <Card className="animate-float absolute top-10 -left-2 w-52 gap-1 p-4 shadow-lg">
-        <span className="font-mono text-[10px] tracking-[0.15em] text-accent uppercase">Intranet</span>
-        <span className="font-mono text-xs">proj-out-0003-incr.bundle</span>
-        <span className="text-xs text-muted">+12 commits · 3 branches</span>
-      </Card>
-      <Card className="animate-float-slow absolute right-0 bottom-12 w-48 gap-1 p-4 shadow-lg">
-        <span className="font-mono text-[10px] tracking-[0.15em] text-accent uppercase">Return</span>
-        <span className="font-mono text-xs">proj-back-0002.bundle</span>
-        <span className="text-xs text-muted">feature/ai-login ↑2</span>
-      </Card>
-
-      <div className="absolute top-4 right-10 grid grid-cols-3 gap-2">
-        {Array.from({ length: 9 }).map((_, i) => (
-          <span key={i} className="size-1.5 rounded-full bg-accent/30" />
-        ))}
-      </div>
-      <div className="absolute bottom-6 left-10 size-10 rounded-tl-2xl rounded-br-2xl bg-accent shadow-accent" />
+      </aside>
     </div>
   );
 }
@@ -365,17 +348,29 @@ function Settings({
 }: {
   config: AppConfig;
   env: Environment | null;
-  onSave: (c: AppConfig) => void;
+  onSave: (c: AppConfig) => boolean | void | Promise<boolean | void>;
   onCancel: () => void;
 }) {
   const [gitPath, setGitPath] = useState(config.gitPath ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  async function save() {
+    setSaving(true);
+    setError("");
+    try {
+      if (await onSave({ ...config, gitPath: gitPath.trim() || undefined }) === false) setError("保存失败，请检查错误提示后重试。");
+    } catch (e) { setError(String(e)); }
+    finally { setSaving(false); }
+  }
   return (
-    <Card className="animate-enter max-w-3xl gap-0 p-0">
+    <Card className="form-page animate-enter gap-0 p-0">
       <Card.Header className="space-y-3 px-8 pt-8 pb-6">
         <SectionLabel>Settings</SectionLabel>
         <Card.Title className="font-display text-3xl font-normal">设置</Card.Title>
       </Card.Header>
       <Card.Content className="flex flex-col gap-5 px-8 pb-8">
+        {error && <p role="alert" className="text-danger">{error}</p>}
+        <FormSection title="Git 环境" description="默认自动检测 Git。只有自动检测失败或需要指定版本时，才填写可执行文件路径。">
         <PathInput
           label="git 可执行文件"
           value={gitPath}
@@ -388,6 +383,9 @@ function Settings({
               : "例如 /usr/bin/git 或 /Library/Developer/CommandLineTools/usr/bin/git"
           }
         />
+        </FormSection>
+        <FormSection title="诊断信息" description="检查 Git 状态、配置位置和应用版本。这些信息由应用自动读取。">
+        <div className="space-y-5">
         <TextInput label="当前检测结果" value={env ? ("Ok" in env.git ? env.git.Ok : env.git.Err) : "—"} isReadOnly mono />
         <TextInput label="配置文件位置" value={env?.configPath ?? "—"} isReadOnly mono />
         <TextInput
@@ -397,13 +395,15 @@ function Settings({
           mono
           description="导出包的 manifest 里会记下这个版本（toolVersion）"
         />
+        </div>
+        </FormSection>
       </Card.Content>
-      <Card.Footer className="flex justify-end gap-3 border-t border-border px-8 py-5">
-        <Button variant="tertiary" onPress={onCancel}>
+      <Card.Footer className="flex flex-wrap justify-end gap-3 border-t border-border px-8 py-5">
+        <Button variant="tertiary" onPress={onCancel} isDisabled={saving}>
           取消
         </Button>
-        <Button variant="primary" onPress={() => onSave({ ...config, gitPath: gitPath.trim() || undefined })}>
-          保存并重新检测
+        <Button variant="primary" onPress={save} isDisabled={saving}>
+          {saving ? "保存并检测中…" : "保存并重新检测"}
         </Button>
       </Card.Footer>
     </Card>

@@ -1,7 +1,7 @@
-import { useState } from "react";
-import { Button, Card, Description, Label, Radio, RadioGroup } from "@heroui/react";
+import { useRef, useState } from "react";
+import { AlertDialog, Button, Card, Description, Label, Radio, RadioGroup } from "@heroui/react";
 import { parseBranchList, Profile, releasesOf, Role } from "./api";
-import { PathInput, SectionLabel, TextInput } from "./ui";
+import { FormSection, PathInput, SectionLabel, TextInput } from "./ui";
 
 export function blankProfile(role: Role, id: string): Profile {
   return {
@@ -21,14 +21,14 @@ export function blankProfile(role: Role, id: string): Profile {
   };
 }
 
-function missing(p: Profile): string[] {
-  const m: string[] = [];
-  if (!p.name.trim()) m.push("名称");
-  if (!p.repoName.trim()) m.push("包名前缀");
-  if (!p.baseBranch.trim()) m.push("主线分支");
-  if (!p.transferDir.trim()) m.push("传输目录");
-  if (!p.mirrorDir?.trim()) m.push("镜像仓库目录");
-  if (p.role === "internal" && !p.workDir?.trim()) m.push("工作仓库目录");
+function missing(p: Profile): { key: keyof Profile; label: string }[] {
+  const m: { key: keyof Profile; label: string }[] = [];
+  if (!p.name.trim()) m.push({ key: "name", label: "名称" });
+  if (!p.repoName.trim()) m.push({ key: "repoName", label: "包名前缀" });
+  if (!p.baseBranch.trim()) m.push({ key: "baseBranch", label: "主线分支" });
+  if (!p.transferDir.trim()) m.push({ key: "transferDir", label: "传输目录" });
+  if (!p.mirrorDir?.trim()) m.push({ key: "mirrorDir", label: "镜像仓库目录" });
+  if (p.role === "internal" && !p.workDir?.trim()) m.push({ key: "workDir", label: "工作仓库目录" });
   return m;
 }
 
@@ -46,7 +46,7 @@ export function ProfileEditor({
 }: {
   initial: Profile;
   isNew: boolean;
-  onSave: (p: Profile) => void;
+  onSave: (p: Profile) => void | boolean | Promise<void | boolean>;
   onCancel: () => void;
   onDelete?: () => void;
 }) {
@@ -62,9 +62,48 @@ export function ProfileEditor({
   const [releasesText, setReleasesText] = useState(releasesOf(initial).join(", "));
   const miss = missing(p);
   const internal = p.role === "internal";
+  const [submitted, setSubmitted] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const dirty = JSON.stringify(p) !== JSON.stringify(initial) || releasesText !== releasesOf(initial).join(", ");
+  const summary = useRef<HTMLDivElement>(null);
+  const errorFor = (key: keyof Profile) => submitted && miss.some((m) => m.key === key) ? "请填写此项" : undefined;
+  async function save() {
+    setSubmitted(true);
+    if (miss.length) {
+      requestAnimationFrame(() => summary.current?.focus());
+      return;
+    }
+    setSaving(true);
+    setSaveError("");
+    try {
+      const result = await onSave({
+        ...p,
+        name: p.name.trim(), repoName: p.repoName.trim(), baseBranch: p.baseBranch.trim(),
+        transferDir: p.transferDir.trim(), mirrorDir: p.mirrorDir?.trim(), workDir: p.workDir?.trim(),
+        releaseBranches: parseBranchList(releasesText),
+        devRepos: [...new Set(devRepos.map((d) => d.trim()).filter(Boolean))],
+      });
+      if (result === false) setSaveError("保存失败，请检查错误提示后重试。填写内容已保留。");
+    } catch (error) { setSaveError(`保存失败：${String(error)}`); }
+    finally { setSaving(false); }
+  }
 
   return (
-    <Card className="animate-enter max-w-4xl gap-0 p-0">
+    <Card className="form-page animate-enter gap-0 p-0">
+      <AlertDialog.Backdrop isOpen={discardOpen} onOpenChange={setDiscardOpen}>
+        <AlertDialog.Container>
+          <AlertDialog.Dialog>
+            <AlertDialog.Header><AlertDialog.Heading>放弃未保存的修改？</AlertDialog.Heading></AlertDialog.Header>
+            <AlertDialog.Body>当前填写的内容尚未保存。</AlertDialog.Body>
+            <AlertDialog.Footer>
+              <Button variant="tertiary" onPress={() => setDiscardOpen(false)}>继续编辑</Button>
+              <Button variant="danger" onPress={onCancel}>放弃修改</Button>
+            </AlertDialog.Footer>
+          </AlertDialog.Dialog>
+        </AlertDialog.Container>
+      </AlertDialog.Backdrop>
       <Card.Header className="space-y-3 px-8 pt-8 pb-6">
         <SectionLabel>{isNew ? "New profile" : "Edit profile"}</SectionLabel>
         <Card.Title className="font-display text-3xl leading-tight font-normal">
@@ -79,7 +118,18 @@ export function ProfileEditor({
       </Card.Header>
 
       <Card.Content className="flex flex-col gap-8 px-8 pb-8">
-        <RadioGroup
+        {submitted && miss.length > 0 && (
+          <div ref={summary} role="alert" tabIndex={-1} className="rounded-xl border border-danger p-4 text-sm">
+            <p className="font-semibold">请补全以下 {miss.length} 项</p>
+            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
+              {miss.map(({ key, label }) => <li key={key}><a className="text-danger underline" href={`#profile-${key}`}
+                onClick={(event) => { event.preventDefault(); document.getElementById(`profile-${key}`)?.focus(); }}>{label}</a></li>)}
+            </ul>
+          </div>
+        )}
+        {saveError && <p role="alert" className="text-sm text-danger">{saveError}</p>}
+        <FormSection title="运行环境" description="选择这台电脑在同步流程中的角色。已有配置的角色不能更改。">
+        {isNew ? <RadioGroup
           value={p.role}
           onChange={(v) => set("role", v as Role)}
           isDisabled={!isNew}
@@ -107,12 +157,19 @@ export function ProfileEditor({
               </Radio.Content>
             </Radio>
           ))}
-        </RadioGroup>
+        </RadioGroup> : (
+          <div className="rounded-xl border border-border bg-default/50 p-4">
+            <p className="font-semibold">{internal ? "内网端" : "外网端"}</p>
+            <p className="mt-1 text-sm text-muted">{internal ? "连接 GitLab，导出内网包并接收回传。" : "导入内网包，在开发仓库中提交并回传。"}</p>
+          </div>
+        )}
+        </FormSection>
 
-        <div className="grid gap-5 md:grid-cols-2">
-          <TextInput label="名称" value={p.name} onChange={(v) => set("name", v)} placeholder="例如：订单服务" description="只用来在左侧列表里区分" />
+        <FormSection title="基本信息" description="名称用于区分项目，包名前缀和基准分支需要在内外网保持一致。">
+        <div className="form-fields">
+          <TextInput id="profile-name" error={errorFor("name")} label="名称" value={p.name} onChange={(v) => set("name", v)} placeholder="例如：订单服务" description="只用来在左侧列表里区分" />
           <TextInput
-            label="包名前缀"
+            id="profile-repoName" error={errorFor("repoName")} label="包名前缀"
             value={p.repoName}
             onChange={(v) => set("repoName", v)}
             placeholder="order-service"
@@ -120,7 +177,7 @@ export function ProfileEditor({
             mono
           />
           <TextInput
-            label="主线分支"
+            id="profile-baseBranch" error={errorFor("baseBranch")} label="主线分支"
             value={p.baseBranch}
             onChange={(v) => set("baseBranch", v)}
             description="feature/、bugfix/ 分支的基准，通常是 main 或 master"
@@ -134,11 +191,15 @@ export function ProfileEditor({
             description="hotfix/ 分支的基准，多个用逗号或空格分隔；两端要一致"
             mono
           />
-          <PathInput label="传输目录（U 盘）" value={p.transferDir} onChange={(v) => set("transferDir", v)} description="导出的包写到这里，导入时从这里列出" />
         </div>
 
+        </FormSection>
+
+        <FormSection title="仓库与传输路径" description="镜像用于存放同步数据，工作仓库用于开发。传输目录是两端交换包的位置。">
+        <div className="space-y-5">
+          <PathInput id="profile-transferDir" error={errorFor("transferDir")} label="传输目录（U 盘）" value={p.transferDir} onChange={(v) => set("transferDir", v)} description="导出的包写到这里，导入时从这里列出" />
         {internal ? (
-          <div className="grid gap-5 md:grid-cols-2">
+          <div className="grid gap-5">
             <TextInput
               label="GitLab 仓库地址"
               value={p.remoteUrl ?? ""}
@@ -148,14 +209,14 @@ export function ProfileEditor({
               mono
             />
             <PathInput
-              label="镜像仓库目录"
+              id="profile-mirrorDir" error={errorFor("mirrorDir")} label="镜像仓库目录"
               value={p.mirrorDir ?? ""}
               onChange={(v) => set("mirrorDir", v)}
               placeholder="D:\git-sync\project.git"
               description="git clone --mirror 的目标，只用来打包，不在这里推送"
             />
             <PathInput
-              label="工作仓库目录"
+              id="profile-workDir" error={errorFor("workDir")} label="工作仓库目录"
               value={p.workDir ?? ""}
               onChange={(v) => set("workDir", v)}
               placeholder="D:\work\project"
@@ -163,9 +224,9 @@ export function ProfileEditor({
             />
           </div>
         ) : (
-          <div className="grid gap-5 md:grid-cols-2">
+          <div className="grid gap-5">
             <PathInput
-              label="外网镜像目录"
+              id="profile-mirrorDir" error={errorFor("mirrorDir")} label="外网镜像目录"
               value={p.mirrorDir ?? ""}
               onChange={(v) => set("mirrorDir", v)}
               placeholder="~/mirrors/project.git"
@@ -174,7 +235,7 @@ export function ProfileEditor({
             <div className="flex flex-col gap-3">
               {devRepos.map((d, i) => (
                 <div key={i} className="flex items-end gap-2">
-                  <div className="flex-1">
+                  <div className="min-w-0 flex-1">
                     <PathInput
                       label={i === 0 ? "开发仓库目录" : `开发仓库 ${i + 1}`}
                       value={d}
@@ -198,35 +259,36 @@ export function ProfileEditor({
                 </Button>
               </div>
             </div>
+
+          </div>
+        )}
+        </div>
+        </FormSection>
+        {!internal && <FormSection title="提交身份" description="使用与内网账号一致的姓名和邮箱，确保回传提交的作者信息正确。">
+          <div className="form-fields">
             <TextInput label="提交用户名" value={p.userName ?? ""} onChange={(v) => set("userName", v)} description="与内网账号一致，推送后作者才正确" />
             <TextInput label="提交邮箱" value={p.userEmail ?? ""} onChange={(v) => set("userEmail", v)} />
           </div>
-        )}
+        </FormSection>}
       </Card.Content>
 
       <Card.Footer className="flex flex-wrap items-center gap-3 border-t border-border px-8 py-5">
         {onDelete && (
-          <Button variant="danger-soft" onPress={onDelete}>
+          <Button variant="danger-soft" onPress={onDelete} isDisabled={saving}>
             删除配置
           </Button>
         )}
-        <span className="flex-1" />
-        {miss.length > 0 && <span className="text-sm text-muted">还需填写：{miss.join("、")}</span>}
-        <Button variant="tertiary" onPress={onCancel}>
+        <span className="min-w-0 flex-1" />
+        {miss.length > 0 && <span className="text-sm text-muted">还需填写：{miss.map((m) => m.label).join("、")}</span>}
+        <Button variant="tertiary" onPress={() => dirty ? setDiscardOpen(true) : onCancel()} isDisabled={saving}>
           取消
         </Button>
         <Button
           variant="primary"
-          isDisabled={miss.length > 0}
-          onPress={() =>
-            onSave({
-              ...p,
-              releaseBranches: parseBranchList(releasesText),
-              devRepos: devRepos.map((d) => d.trim()).filter(Boolean),
-            })
-          }
+          isDisabled={saving}
+          onPress={save}
         >
-          保存
+          {saving ? "保存中…" : "保存"}
         </Button>
       </Card.Footer>
     </Card>

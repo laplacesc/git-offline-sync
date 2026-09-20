@@ -87,6 +87,8 @@ export interface RepoStatus {
   isBare: boolean;
   isMirror: boolean;
   currentBranch: string | null;
+  /** 所有工作树，包括 detached HEAD */
+  worktrees: Worktree[];
   /** 有未提交修改的工作树（含主工作树） */
   dirtyTrees: Worktree[];
   /** 主工作树上未完成的操作 */

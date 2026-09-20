@@ -1,5 +1,5 @@
 import { createContext, ReactNode, useCallback, useContext, useRef, useState } from "react";
-import { AlertDialog, Button, toast } from "@heroui/react";
+import { AlertDialog, Button, Spinner, toast } from "@heroui/react";
 
 export type NoticeKind = "ok" | "warn" | "error";
 
@@ -13,6 +13,8 @@ export interface ConfirmOptions {
 interface Runner {
   /** 当前正在执行的操作名，null 表示空闲 */
   busy: string | null;
+  error: string | null;
+  dismissError: () => void;
   notify: (kind: NoticeKind, text: string) => void;
   /** 串行执行一个操作：期间所有按钮禁用，失败时弹出错误提示并返回 undefined */
   run: <T>(label: string, fn: () => Promise<T>) => Promise<T | undefined>;
@@ -24,6 +26,7 @@ const Ctx = createContext<Runner | null>(null);
 
 export function RunnerProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const busyRef = useRef(false);
 
   const notify = useCallback((kind: NoticeKind, text: string) => {
@@ -37,9 +40,11 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       if (busyRef.current) return undefined;
       busyRef.current = true;
       setBusy(label);
+      setError(null);
       try {
         return await fn();
       } catch (e) {
+        setError(`${label}失败：${String(e)}`);
         toast.danger(`${label}失败`, { description: String(e), timeout: 0 });
         return undefined;
       } finally {
@@ -62,7 +67,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <Ctx.Provider value={{ busy, notify, run, confirm }}>
+    <Ctx.Provider value={{ busy, error, dismissError: () => setError(null), notify, run, confirm }}>
       {children}
       <AlertDialog.Backdrop isOpen={!!dialog} onOpenChange={(o) => !o && close(false)}>
         <AlertDialog.Container>
@@ -84,6 +89,20 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
         </AlertDialog.Container>
       </AlertDialog.Backdrop>
     </Ctx.Provider>
+  );
+}
+
+export function OperationStatus() {
+  const { busy, error, dismissError } = useRunner();
+  if (!busy && !error) return null;
+  return (
+    <div className="border-b border-border bg-surface px-5 py-3">
+      {busy && <p role="status" className="flex items-center gap-2 text-sm"><Spinner size="sm" />正在{busy}，请稍候…</p>}
+      {error && <div role="alert" className="flex items-start gap-3 text-sm">
+        <p className="min-w-0 flex-1 break-all text-danger">{error}</p>
+        <Button size="sm" variant="ghost" onPress={dismissError}>关闭错误提示</Button>
+      </div>}
+    </div>
   );
 }
 

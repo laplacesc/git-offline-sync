@@ -4,7 +4,7 @@ import { Alert, Checkbox, Chip, Table } from "@heroui/react";
 import type { Selection } from "@heroui/react";
 import { api, BranchInfo, InProgressOp, OpOutcome, RepoStatus, shortSha } from "./api";
 import { useRunner } from "./runner";
-import { ActionButton, Code, Empty, Notice } from "./ui";
+import { ActionButton, Code, Empty, Notice, TextInput } from "./ui";
 
 /**
  * 应用窗口回到前台时调用 reload。
@@ -77,7 +77,8 @@ export function useRepoStatus(path: string | undefined, baseBranch: string, rele
   useEffect(() => {
     reload();
   }, [reload]);
-  return { status, loading, error, reload };
+  // 切换仓库后的首帧不能继续展示旧仓库的分支和操作。
+  return { status: status?.path === path ? status : null, loading, error, reload };
 }
 
 /**
@@ -137,6 +138,7 @@ export function BranchTable({
   onSelect,
   multi,
   isSelectable,
+  onRebase,
   emptyText = "没有本地分支",
 }: {
   branches: BranchInfo[];
@@ -144,27 +146,47 @@ export function BranchTable({
   onSelect: (names: string[]) => void;
   multi?: boolean;
   isSelectable?: (b: BranchInfo) => boolean;
+  onRebase?: (b: BranchInfo) => void;
   emptyText?: string;
 }) {
+  const [query, setQuery] = useState("");
+  // Table 不会替受控调用方清理已删除的 key；空表也必须同步清空选择。
+  useEffect(() => {
+    const available = new Set(branches.filter((b) => !isSelectable || isSelectable(b)).map((b) => b.name));
+    const remaining = selected.filter((name) => available.has(name));
+    if (remaining.length !== selected.length) onSelect(remaining);
+  }, [branches, selected, onSelect, isSelectable]);
+
   if (branches.length === 0) return <Empty>{emptyText}</Empty>;
 
+  const visible = branches.filter((b) => b.name.toLowerCase().includes(query.trim().toLowerCase()));
+  const visibleNames = new Set(visible.map((b) => b.name));
+  const hiddenSelected = multi ? selected.filter((name) => !visibleNames.has(name)) : [];
   const disabledKeys = isSelectable ? branches.filter((b) => !isSelectable(b)).map((b) => b.name) : [];
   const onSelectionChange = (keys: Selection) => {
     if (keys === "all") {
-      onSelect(branches.filter((b) => !disabledKeys.includes(b.name)).map((b) => b.name));
+      onSelect([...hiddenSelected, ...visible.filter((b) => !disabledKeys.includes(b.name)).map((b) => b.name)]);
     } else {
-      onSelect([...keys].map(String));
+      onSelect([...hiddenSelected, ...[...keys].map(String).filter((name) => visibleNames.has(name))]);
     }
   };
 
   return (
-    <Table variant="secondary">
+    <div className="min-w-0 space-y-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <TextInput label="查找分支" value={query} onChange={setQuery} placeholder="输入分支名" className="min-w-0 flex-1 sm:max-w-sm" />
+        <span role="status" className="pb-3 text-sm text-muted">{visible.length} / {branches.length} 个分支 · 已选 {selected.length} 个</span>
+        {query && <ActionButton variant="ghost" onPress={() => setQuery("")}>清除搜索</ActionButton>}
+        {selected.length > 0 && <ActionButton variant="ghost" onPress={() => onSelect([])}>清空选择</ActionButton>}
+      </div>
+      {query && multi && <p className="text-xs text-muted">全选仅作用于当前搜索结果，其他已选分支会保留。</p>}
+      {visible.length === 0 ? <Empty>没有匹配的分支，请修改搜索条件。</Empty> : <Table variant="secondary">
       <Table.ScrollContainer>
         <Table.Content
           aria-label="本地分支"
           selectionMode={multi ? "multiple" : "single"}
           selectionBehavior="toggle"
-          selectedKeys={new Set(selected)}
+          selectedKeys={new Set(selected.filter((name) => visibleNames.has(name)))}
           onSelectionChange={onSelectionChange}
           disabledKeys={disabledKeys}
         >
@@ -174,9 +196,10 @@ export function BranchTable({
             <Table.Column className="whitespace-nowrap">提交</Table.Column>
             <Table.Column className="whitespace-nowrap">基准</Table.Column>
             <Table.Column className="whitespace-nowrap">相对基准</Table.Column>
+            {onRebase && <Table.Column className="whitespace-nowrap">操作</Table.Column>}
           </Table.Header>
           <Table.Body>
-            {branches.map((b) => (
+            {visible.map((b) => (
               <Table.Row
                 key={b.name}
                 id={b.name}
@@ -215,12 +238,20 @@ export function BranchTable({
                     <span className={b.behind > 0 ? "font-semibold text-warning" : "text-muted"}>↓{b.behind}</span>
                   </span>
                 </Table.Cell>
+                {onRebase && (
+                  <Table.Cell>
+                    <ActionButton size="sm" variant="outline" onPress={() => onRebase(b)} aria-label={`Rebase ${b.name}`}>
+                      Rebase…
+                    </ActionButton>
+                  </Table.Cell>
+                )}
               </Table.Row>
             ))}
           </Table.Body>
         </Table.Content>
       </Table.ScrollContainer>
-    </Table>
+    </Table>}
+    </div>
   );
 }
 
@@ -245,6 +276,25 @@ export function DirtyTreesNotice({ status, suffix }: { status: RepoStatus | null
   );
 }
 
+/** 未绑定分支的工作树无法出现在分支表里，单独展示，避免遗漏。 */
+export function DetachedWorktreesNotice({ status }: { status: RepoStatus | null }) {
+  const trees = (status?.worktrees ?? []).filter((w) => !w.bare && !w.branch);
+  if (trees.length === 0) return null;
+  return (
+    <Notice tone="warning" title="以下 worktree 未绑定分支（detached HEAD）">
+      {trees.map((w) => (
+        <span key={w.path} className="block font-mono text-xs break-all">
+          {w.path}
+        </span>
+      ))}
+      <p className="mt-2">
+        如需回传或推送其中的提交，请先在对应目录中运行 <Code>git switch -c feature/你的分支名</Code>，
+        再刷新列表。若正在 rebase，请先完成或中止该操作。
+      </p>
+    </Notice>
+  );
+}
+
 /** 路径的最后一段，用于在分支表里简短标出 worktree */
 function baseName(p: string) {
   return p.split(/[/\\]/).filter(Boolean).pop() ?? p;
@@ -260,9 +310,11 @@ function breakAfterSlash(name: string) {
 function SelectionBox({ label }: { label: string }) {
   return (
     <Checkbox slot="selection" aria-label={label}>
-      <Checkbox.Control>
-        <Checkbox.Indicator />
-      </Checkbox.Control>
+      <Checkbox.Content>
+        <Checkbox.Control>
+          <Checkbox.Indicator />
+        </Checkbox.Control>
+      </Checkbox.Content>
     </Checkbox>
   );
 }

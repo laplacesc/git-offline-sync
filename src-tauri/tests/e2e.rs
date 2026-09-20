@@ -79,6 +79,39 @@ fn isolate_git_env(root: &Path) {
 }
 
 #[test]
+fn manually_created_worktrees_are_visible_in_status() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let root = if cfg!(windows) {
+        tmp.path().to_path_buf()
+    } else {
+        tmp.path().canonicalize().unwrap()
+    };
+    isolate_git_env(&root);
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    sh(&work, &["init", "-q"]);
+    commit(&work, "a.txt", "initial\n", "initial");
+    let detached = root.join("detached");
+    sh(&work, &["worktree", "add", "--detach", detached.to_str().unwrap()]);
+    let attached = root.join("attached");
+    sh(&work, &["worktree", "add", "-b", "feature/manual", attached.to_str().unwrap()]);
+
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let st = repo::status(&g, &work, "main", &[]).unwrap();
+    let json = serde_json::to_value(&st).unwrap();
+    let trees = json["worktrees"].as_array().expect("状态必须包含干净的 detached worktree，界面才能展示");
+    assert_eq!(trees.len(), 3);
+    let tree = trees.iter().find(|w| w["branch"].is_null()).unwrap();
+    assert_same_path(tree["path"].as_str(), &detached);
+    assert_eq!(tree["main"], false);
+    assert!(st.dirty_trees.is_empty());
+    let branch = st.branches.iter().find(|b| b.name == "feature/manual").unwrap();
+    assert_same_path(branch.worktree.as_deref(), &attached);
+}
+
+#[test]
 fn full_round_trip() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -617,5 +650,26 @@ fn release_hotfix_round_trip() {
     assert_eq!(
         repo::get_sync_base(&g, &work, "hotfix/login").as_deref(),
         Some("main")
+    );
+
+    // 外网开发分支也能从主线迁移到发布分支，包括独立 worktree。
+    let wt = root.join("feature-release");
+    sync::create_branch(&g, &ext, "feature/to-release", "main", Some(&wt)).unwrap();
+    commit(&wt, "feature.txt", "feature\n", "feat: release feature");
+    let current = repo::current_branch(&g, &ext);
+    let rb = sync::rebase_onto(&g, &ext, "feature/to-release", "release/1.0", false).unwrap();
+    assert!(rb.ok, "{:?}", rb);
+    assert_same_path(rb.worktree.as_deref(), &wt);
+    assert_eq!(repo::current_branch(&g, &ext), current);
+    assert!(wt.join("r1.txt").exists());
+    assert!(wt.join("feature.txt").exists());
+    assert!(!wt.join("m.txt").exists(), "不能把主线独有的提交带到发布分支");
+    assert_eq!(
+        sync::list_commits(&g, &ext, "origin/release/1.0", "feature/to-release").unwrap().len(),
+        1
+    );
+    assert_eq!(
+        repo::get_sync_base(&g, &ext, "feature/to-release").as_deref(),
+        Some("release/1.0")
     );
 }

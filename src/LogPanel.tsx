@@ -47,20 +47,21 @@ export function LogPanel({
   setOpen: (v: boolean) => void;
 }) {
   const bodyRef = useRef<HTMLDivElement>(null);
+  const [following, setFollowing] = useState(true);
   const errors = lines.filter((l) => l.kind === "error").length;
 
   useEffect(() => {
     const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [lines, open]);
+    if (el && following) el.scrollTop = el.scrollHeight;
+  }, [lines, open, following]);
 
   return (
     <section
       aria-label="命令日志"
       className={
-        "relative flex shrink-0 flex-col overflow-hidden border-t border-border bg-default/60 transition-[height] duration-300 " +
-        // 收起时 = 44px 标题栏 + 1px 上边框；展开时固定高度，不随窗口变高而浪费空间
-        (open ? "h-52" : "h-[45px]")
+        "relative flex shrink-0 flex-col overflow-hidden border-t border-border bg-default/60 " +
+        // 展开高度随窗口调整，始终为主要工作区保留空间。
+        (open ? "h-[clamp(150px,26vh,260px)]" : "h-[45px]")
       }
     >
       <div className="flex h-11 shrink-0 items-center gap-3 px-4">
@@ -70,6 +71,7 @@ export function LogPanel({
           className="text-muted hover:text-foreground"
           onPress={() => setOpen(!open)}
           aria-expanded={open}
+          aria-controls="git-log-output"
         >
           <span className={"inline-block transition-transform duration-200 " + (open ? "rotate-90" : "")}>›</span>
           <span className="font-mono text-[11px] tracking-[0.15em] text-accent uppercase">命令日志</span>
@@ -83,6 +85,9 @@ export function LogPanel({
           </Chip>
         )}
         <span className="flex-1" />
+        {open && <Button size="sm" variant="ghost" aria-pressed={following} onPress={() => setFollowing(!following)}>
+          {following ? "暂停跟随" : "跟随最新"}
+        </Button>}
         {open && lines.length > 0 && (
           <Button size="sm" variant="ghost" className="text-muted hover:text-foreground" onPress={clear}>
             清空
@@ -90,11 +95,14 @@ export function LogPanel({
         )}
       </div>
       {open && (
-        <ScrollShadow ref={bodyRef} hideScrollBar={false} className="flex-1 px-5 pb-3 font-mono text-[12px] leading-relaxed">
+        <ScrollShadow id="git-log-output" aria-label="命令输出" tabIndex={0} ref={bodyRef} onScroll={(event) => {
+          const el = event.currentTarget;
+          if (el.scrollHeight - el.scrollTop - el.clientHeight > 24) setFollowing(false);
+        }} hideScrollBar={false} className="flex-1 px-5 pb-3 font-mono text-[12px] leading-relaxed">
           {lines.length === 0 && <p className="py-2 text-muted">执行操作后，这里会显示每条 git 命令及其输出。</p>}
           {lines.map((l, i) => (
             <div key={i} className="flex gap-3 break-all whitespace-pre-wrap">
-              <span className="shrink-0 text-muted/60">{time(l.ts)}</span>
+              <span className="shrink-0 text-muted">{time(l.ts)}</span>
               <span className={TEXT[l.kind]}>
                 {l.kind === "cmd" ? "$ " : ""}
                 {l.text}
