@@ -18,7 +18,7 @@ import {
   shortSha,
 } from "./api";
 import { useRunner } from "./runner";
-import { BranchTable, InProgressBanner, useRefreshOnFocus, useRepoStatus } from "./repoBits";
+import { BranchTable, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus } from "./repoBits";
 import {
   ActionButton,
   BaseSelect,
@@ -118,16 +118,34 @@ export function InternalView({ profile }: { profile: Profile }) {
     reloadAll();
   };
 
+  // 补丁可以应用到独立 worktree，不抢工作仓库当前检出的分支
+  const [patchWorktree, setPatchWorktree] = useState(false);
+  const [patchWtPath, setPatchWtPath] = useState("");
+  const browsePatchWorktree = async () => {
+    const p = await open({ directory: true, multiple: false });
+    if (typeof p === "string") setPatchWtPath(p);
+  };
+
   const importPatch = async (pkg: PackageInfo) => {
     setImportRes(null);
     const { name: branch, base: patchOnto } = patchDefaults(pkg);
     if (!branch) return notify("warn", "请填写导入到的分支名");
+    const wt = patchWorktree ? patchWtPath.trim() : undefined;
+    if (patchWorktree && !wt) return notify("warn", "请选择 worktree 目录");
     const r = await run("应用补丁", () =>
-      api.importPatches({ workDir, patchDir: pkg.payloadPath, branch, baseBranch: patchOnto, fetchUpstream: true }),
+      api.importPatches({
+        workDir,
+        patchDir: pkg.payloadPath,
+        branch,
+        baseBranch: patchOnto,
+        fetchUpstream: true,
+        worktreePath: wt,
+      }),
     );
     if (r) {
       setPatchOutcome(r);
       setSelected([branch]);
+      if (wt) setPatchWtPath("");
     }
     reloadAll();
   };
@@ -356,6 +374,27 @@ export function InternalView({ profile }: { profile: Profile }) {
             })}
           </div>
         )}
+        {backPkgs.some((p) => p.manifest?.kind === "patch") && (
+          <>
+            <Check checked={patchWorktree} onChange={setPatchWorktree}>
+              应用到独立 worktree（不切换工作仓库当前的分支）
+            </Check>
+            {patchWorktree && (
+              <div className="flex flex-wrap items-end gap-3">
+                <TextInput
+                  label="worktree 目录"
+                  value={patchWtPath}
+                  onChange={setPatchWtPath}
+                  mono
+                  className="max-w-lg min-w-64 flex-1"
+                />
+                <ActionButton size="sm" variant="outline" onPress={browsePatchWorktree}>
+                  浏览…
+                </ActionButton>
+              </div>
+            )}
+          </>
+        )}
         {importRes && (
           <div className="flex flex-col gap-3">
             {importRes.warnings.map((w) => (
@@ -385,15 +424,14 @@ export function InternalView({ profile }: { profile: Profile }) {
         description="基于各分支自己的基准（主线或发布分支）整理，确认提交后推送到 GitLab"
         actions={<RefreshButton onPress={reloadAll} />}
       >
-        <InProgressBanner
-          repo={workDir}
+        <InProgressBanners
           status={work.status}
           onDone={(o) => {
             if (o) setOpRes(o);
             reloadAll();
           }}
         />
-        {work.status?.dirty && <Notice tone="warning" title="工作区有未提交的修改，rebase 前请先提交或 stash。" />}
+        <DirtyTreesNotice status={work.status} suffix="rebase 前请先提交或 stash。" />
         <BranchTable
           branches={(work.status?.branches ?? []).filter((b) => !candidates.includes(b.name))}
           emptyText="还没有开发分支（主线和发布分支不在这里列出）"

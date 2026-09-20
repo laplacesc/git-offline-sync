@@ -33,6 +33,20 @@ pub struct BranchInfo {
     pub ahead: u32,
     pub behind: u32,
     pub current: bool,
+    /// 该分支被哪个 linked worktree 检出（没有则为 None）
+    pub worktree: Option<String>,
+}
+
+/// 某个工作树上未完成的操作。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InProgressOp {
+    /// 该工作树的路径，「继续 / 中止」必须发到这里
+    pub path: String,
+    pub branch: Option<String>,
+    /// "rebase" / "am" / "merge"
+    pub op: String,
+    pub main: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -44,9 +58,17 @@ pub struct RepoStatus {
     pub is_bare: bool,
     pub is_mirror: bool,
     pub current_branch: Option<String>,
-    pub dirty: bool,
-    /// 正在进行的 rebase / am（需要解决冲突或中止）
+    /// 有未提交修改的工作树（含主工作树）。分支常常是在 linked worktree
+    /// 里开发的，只看主工作树会漏掉那里的改动。
+    pub dirty_trees: Vec<Worktree>,
+    /// 主工作树上正在进行的 rebase / am（需要解决冲突或中止）
     pub in_progress: Option<String>,
+    /// 所有工作树（含主工作树）上未完成的操作。
+    ///
+    /// rebase / am 的标记文件是每个 worktree 独立的，只看主工作树会漏掉
+    /// linked worktree 里卡住的操作——那样界面就给不出「继续 / 中止」，
+    /// 用户只能去终端解决。
+    pub in_progress_trees: Vec<InProgressOp>,
     pub branches: Vec<BranchInfo>,
     pub remote_url: Option<String>,
 }
@@ -55,6 +77,11 @@ pub fn is_nonempty_dir(p: &Path) -> bool {
     fs::read_dir(p).map(|mut d| d.next().is_some()).unwrap_or(false)
 }
 
+/// 当前工作树自己的 git 目录。在 linked worktree 里是 `.git/worktrees/<name>`，
+/// 正因如此它能区分出 rebase / am / merge 的标记文件属于哪个工作树（见 [`in_progress`]）。
+///
+/// 同步状态文件不在这里：它存在镜像目录的 `offline-sync/state.json`，
+/// 由 [`load_state`] / [`save_state`] 直接按镜像路径读写。
 pub fn git_dir(g: &Git, repo: &Path) -> Result<PathBuf> {
     let out = g.query(repo, args!["rev-parse", "--absolute-git-dir"])?;
     Ok(PathBuf::from(out.trim()))
@@ -73,6 +100,96 @@ pub fn is_mirror(g: &Git, repo: &Path) -> bool {
     )
     .map(|o| o.ok() && o.stdout.trim() == "true")
     .unwrap_or(false)
+}
+
+/// 标记外网镜像的 git config 键。外网镜像不是 `clone --mirror` 的产物
+/// （那会留下一个指向 bundle 文件的 `remote.origin`），所以用自己的标记。
+const ROLE_KEY: &str = "offlinesync.role";
+
+pub fn mark_ext_mirror(g: &Git, dir: &Path) -> Result<()> {
+    g.run(dir, args!["config", ROLE_KEY, "mirror"])?;
+    Ok(())
+}
+
+/// 目录是不是本工具建的外网镜像（bare + `offlinesync.role=mirror`）。
+pub fn is_ext_mirror(g: &Git, dir: &Path) -> bool {
+    let role = g
+        .exec(Some(dir), &args!["config", "--get", ROLE_KEY], None, false)
+        .ok()
+        .filter(|o| o.ok())
+        .map(|o| o.stdout.trim().to_string())
+        .unwrap_or_default();
+    role == "mirror" && is_bare(g, dir).unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Worktree {
+    pub path: String,
+    /// 检出的分支（detached HEAD 时为 None）
+    pub branch: Option<String>,
+    pub bare: bool,
+    /// 主工作树（`git worktree list` 的第一条）
+    pub main: bool,
+}
+
+/// 解析 `git worktree list --porcelain`：主仓库和所有 linked worktree。
+pub fn list_worktrees(g: &Git, repo: &Path) -> Result<Vec<Worktree>> {
+    let out = g.query(repo, args!["worktree", "list", "--porcelain"])?;
+    let mut all: Vec<Worktree> = Vec::new();
+    let mut cur: Option<Worktree> = None;
+    for line in out.lines() {
+        let line = line.trim_end();
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(w) = cur.take() {
+                all.push(w);
+            }
+            cur = Some(Worktree {
+                path: path.to_string(),
+                branch: None,
+                bare: false,
+                main: all.is_empty(),
+            });
+        } else if let Some(w) = cur.as_mut() {
+            if line == "bare" {
+                w.bare = true;
+            } else if let Some(b) = line.strip_prefix("branch ") {
+                w.branch = Some(b.trim_start_matches("refs/heads/").to_string());
+            }
+        }
+    }
+    if let Some(w) = cur.take() {
+        all.push(w);
+    }
+    Ok(all)
+}
+
+/// 有未提交修改的工作树（含主工作树）。
+///
+/// 只看主工作树会漏掉：分支很可能是在某个 linked worktree 里开发的，
+/// 那里的改动同样不会被导出。取不到状态的工作树（目录已删、尚未 prune）跳过。
+pub fn dirty_worktrees(g: &Git, repo: &Path) -> Vec<Worktree> {
+    list_worktrees(g, repo)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|w| !w.bare)
+        .filter(|w| {
+            g.query(
+                Path::new(&w.path),
+                args!["status", "--porcelain", "--untracked-files=no"],
+            )
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// 分支被哪个 **linked** worktree 检出。主工作树不算：那里可以直接 `git switch`。
+pub fn linked_worktree_for(g: &Git, repo: &Path, branch: &str) -> Option<Worktree> {
+    list_worktrees(g, repo)
+        .ok()?
+        .into_iter()
+        .find(|w| !w.main && !w.bare && w.branch.as_deref() == Some(branch))
 }
 
 pub fn current_branch(g: &Git, repo: &Path) -> Option<String> {
@@ -327,6 +444,40 @@ pub fn resolve_base(
     }
 }
 
+/// 扫描所有工作树上未完成的 rebase / am / merge。
+///
+/// 每个工作树的标记文件在它自己的 git 目录里（linked worktree 是
+/// `.git/worktrees/<name>/`），所以必须逐个问 `git rev-parse --absolute-git-dir`，
+/// 不能只看主工作树。取不到状态的工作树（目录已被删、尚未 prune）直接跳过。
+pub fn in_progress_all(g: &Git, repo: &Path) -> Vec<InProgressOp> {
+    list_worktrees(g, repo)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|w| !w.bare)
+        .filter_map(|w| {
+            let gd = git_dir(g, Path::new(&w.path)).ok()?;
+            let op = in_progress(&gd)?;
+            Some(InProgressOp {
+                // rebase 期间 HEAD 是 detached，`git worktree list` 不报分支名，
+                // 而这正是最该告诉用户"哪个分支卡住了"的时刻：从 rebase 状态里补。
+                branch: w.branch.or_else(|| rebasing_branch(&gd)),
+                path: w.path,
+                op,
+                main: w.main,
+            })
+        })
+        .collect()
+}
+
+/// 正在被 rebase / am 的分支名，取自 `<git_dir>/rebase-*/head-name`。
+fn rebasing_branch(git_dir: &Path) -> Option<String> {
+    ["rebase-merge", "rebase-apply"]
+        .iter()
+        .find_map(|d| fs::read_to_string(git_dir.join(d).join("head-name")).ok())
+        .map(|s| s.trim().trim_start_matches("refs/heads/").to_string())
+        .filter(|s| !s.is_empty() && s != "detached HEAD")
+}
+
 pub fn in_progress(git_dir: &Path) -> Option<String> {
     if git_dir.join("rebase-merge").exists() {
         return Some("rebase".into());
@@ -379,11 +530,9 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
 
     if !st.is_bare {
         st.current_branch = current_branch(g, path);
-        st.dirty = !g
-            .query(path, args!["status", "--porcelain", "--untracked-files=no"])?
-            .trim()
-            .is_empty();
         st.in_progress = in_progress(&git_dir(g, path)?);
+        st.in_progress_trees = in_progress_all(g, path);
+        st.dirty_trees = dirty_worktrees(g, path);
     }
 
     let refs = list_refs(g, path, &["refs/heads"])?;
@@ -400,6 +549,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
                 ahead: 0,
                 behind: 0,
                 current: false,
+                worktree: None,
             })
             .collect();
         return Ok(st);
@@ -408,6 +558,12 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
     // 工作仓库：基准记录一次读出，领先/落后按基准分组批量计算
     let prefix = "refs/remotes/origin/";
     let recorded = all_sync_bases(g, path);
+    let in_worktree: HashMap<String, String> = list_worktrees(g, path)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|w| !w.main && !w.bare)
+        .filter_map(|w| w.branch.clone().map(|b| (b, w.path)))
+        .collect();
     let mut counts: HashMap<String, HashMap<String, (u32, u32)>> = HashMap::new();
     let mut counts_for = |base: &str| -> HashMap<String, (u32, u32)> {
         counts
@@ -443,6 +599,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
         let (ahead, behind) = counts_for(&base).get(&short).copied().unwrap_or((0, 0));
         st.branches.push(BranchInfo {
             current: st.current_branch.as_deref() == Some(short.as_str()),
+            worktree: in_worktree.get(&short).cloned(),
             name: short,
             sha,
             base,
@@ -486,10 +643,13 @@ pub struct InternalState {
     pub last_export_at: Option<u64>,
 }
 
-/// 外网开发仓库的同步状态（存于 `.git/offline-sync`）。
+/// 外网镜像仓库的同步状态（存于 `<mirror>/offline-sync`）。
+///
+/// `back_seq` 也放在镜像里：多个开发仓库 / 多个 worktree 都从这里领回传包序号，
+/// 否则各自计数会撞号，内网导入时会判定序号不连续。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExternalState {
+pub struct MirrorState {
     pub repo_id: Option<String>,
     pub last_in_seq: u32,
     pub back_seq: u32,

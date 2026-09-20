@@ -15,7 +15,7 @@ export function blankProfile(role: Role, id: string): Profile {
     remoteUrl: "",
     mirrorDir: "",
     workDir: "",
-    repoDir: "",
+    devRepos: [],
     userName: "",
     userEmail: "",
   };
@@ -27,12 +27,8 @@ function missing(p: Profile): string[] {
   if (!p.repoName.trim()) m.push("包名前缀");
   if (!p.baseBranch.trim()) m.push("主线分支");
   if (!p.transferDir.trim()) m.push("传输目录");
-  if (p.role === "internal") {
-    if (!p.mirrorDir?.trim()) m.push("镜像仓库目录");
-    if (!p.workDir?.trim()) m.push("工作仓库目录");
-  } else if (!p.repoDir?.trim()) {
-    m.push("开发仓库目录");
-  }
+  if (!p.mirrorDir?.trim()) m.push("镜像仓库目录");
+  if (p.role === "internal" && !p.workDir?.trim()) m.push("工作仓库目录");
   return m;
 }
 
@@ -56,6 +52,12 @@ export function ProfileEditor({
 }) {
   const [p, setP] = useState<Profile>(initial);
   const set = <K extends keyof Profile>(k: K, v: Profile[K]) => setP((x) => ({ ...x, [k]: v }));
+  // 至少显示一行，保存时把空行去掉
+  const devRepos = p.devRepos?.length ? p.devRepos : [""];
+  const setDev = (i: number, v: string) =>
+    set("devRepos", devRepos.map((d, j) => (j === i ? v : d)));
+  const addDev = () => set("devRepos", [...devRepos, ""]);
+  const removeDev = (i: number) => set("devRepos", devRepos.filter((_, j) => j !== i));
   // 发布分支按原文编辑（允许输入中途的逗号），保存时再拆分
   const [releasesText, setReleasesText] = useState(releasesOf(initial).join(", "));
   const miss = missing(p);
@@ -163,13 +165,39 @@ export function ProfileEditor({
         ) : (
           <div className="grid gap-5 md:grid-cols-2">
             <PathInput
-              label="开发仓库目录"
-              value={p.repoDir ?? ""}
-              onChange={(v) => set("repoDir", v)}
-              placeholder="~/code/project"
-              description="首次导入全量包时克隆到这里（目录需不存在或为空）"
+              label="外网镜像目录"
+              value={p.mirrorDir ?? ""}
+              onChange={(v) => set("mirrorDir", v)}
+              placeholder="~/mirrors/project.git"
+              description="内网包导入到这里（裸仓库）。开发仓库以它为 origin，不要在这里开发"
             />
-            <div className="hidden md:block" />
+            <div className="flex flex-col gap-3">
+              {devRepos.map((d, i) => (
+                <div key={i} className="flex items-end gap-2">
+                  <div className="flex-1">
+                    <PathInput
+                      label={i === 0 ? "开发仓库目录" : `开发仓库 ${i + 1}`}
+                      value={d}
+                      onChange={(v) => setDev(i, v)}
+                      placeholder="~/code/project"
+                      description={
+                        i === 0 ? "从镜像克隆出来的工作仓库，可以在里面开 worktree" : undefined
+                      }
+                    />
+                  </div>
+                  {devRepos.length > 1 && (
+                    <Button size="sm" variant="ghost" onPress={() => removeDev(i)}>
+                      移除
+                    </Button>
+                  )}
+                </div>
+              ))}
+              <div>
+                <Button size="sm" variant="ghost" onPress={addDev}>
+                  + 再加一个开发仓库
+                </Button>
+              </div>
+            </div>
             <TextInput label="提交用户名" value={p.userName ?? ""} onChange={(v) => set("userName", v)} description="与内网账号一致，推送后作者才正确" />
             <TextInput label="提交邮箱" value={p.userEmail ?? ""} onChange={(v) => set("userEmail", v)} />
           </div>
@@ -187,7 +215,17 @@ export function ProfileEditor({
         <Button variant="tertiary" onPress={onCancel}>
           取消
         </Button>
-        <Button variant="primary" isDisabled={miss.length > 0} onPress={() => onSave({ ...p, releaseBranches: parseBranchList(releasesText) })}>
+        <Button
+          variant="primary"
+          isDisabled={miss.length > 0}
+          onPress={() =>
+            onSave({
+              ...p,
+              releaseBranches: parseBranchList(releasesText),
+              devRepos: devRepos.map((d) => d.trim()).filter(Boolean),
+            })
+          }
+        >
           保存
         </Button>
       </Card.Footer>

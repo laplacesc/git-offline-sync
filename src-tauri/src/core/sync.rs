@@ -13,7 +13,7 @@ use serde::Serialize;
 use super::error::{invalid, Result, SyncError};
 use super::git::Git;
 use super::manifest::{BundleKind, Manifest, RefEntry, FORMAT};
-use super::repo::{self, CommitInfo, ExternalState, InternalState};
+use super::repo::{self, CommitInfo, InternalState, MirrorState};
 use crate::args;
 
 pub const MIN_GIT: (u32, u32) = (2, 25);
@@ -58,6 +58,9 @@ pub struct OpOutcome {
     pub conflict: bool,
     pub files: Vec<String>,
     pub message: String,
+    /// 操作实际执行所在的工作树。分支被 linked worktree 检出时，
+    /// 冲突要在那个目录里解决，"继续 / 中止"也必须发到那里。
+    pub worktree: Option<String>,
 }
 
 impl OpOutcome {
@@ -68,6 +71,50 @@ impl OpOutcome {
             ..Default::default()
         }
     }
+
+    /// 标记操作实际发生在哪个 worktree（主工作树传 None）。
+    fn at(mut self, worktree: Option<String>) -> Self {
+        self.worktree = worktree;
+        self
+    }
+}
+
+/// 冲突消息里指明操作在哪个 worktree；主工作树不加后缀。
+fn at_worktree(wt: &Option<String>) -> String {
+    wt.as_ref().map(|p| format!("（在 {p}）")).unwrap_or_default()
+}
+
+/// `git bundle create` + `bundle verify`，两端导出共用。
+///
+/// 返回 `Some(NothingToSync)` 表示没有可打包的提交，调用方直接返回它。
+/// 任何失败都会删掉半成品：此时 manifest 还没写，残包会被 `list_packages`
+/// 当成「未知」类型的可导入包列在界面上。
+fn create_and_verify_bundle(
+    g: &Git,
+    cwd: &Path,
+    bundle: &Path,
+    a: Vec<std::ffi::OsString>,
+    empty_msg: &str,
+) -> Result<Option<ExportOutcome>> {
+    let out = g.exec(Some(cwd), &a, None, true)?;
+    if !out.ok() {
+        let _ = fs::remove_file(bundle);
+        if out.stderr.contains("empty bundle") {
+            return Ok(Some(ExportOutcome::NothingToSync {
+                message: empty_msg.into(),
+            }));
+        }
+        return Err(SyncError::Git {
+            cmd: "git bundle create".into(),
+            code: out.code,
+            stderr: out.stderr.trim().to_string(),
+        });
+    }
+    if let Err(e) = g.run(cwd, args!["bundle", "verify", bundle]) {
+        let _ = fs::remove_file(bundle);
+        return Err(e);
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,7 +128,8 @@ pub struct RefChange {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportInResult {
-    pub cloned: bool,
+    /// 本次导入新建了外网镜像（首次导入）
+    pub created: bool,
     pub seq: Option<u32>,
     pub changes: Vec<RefChange>,
 }
@@ -240,6 +288,7 @@ pub fn continue_op(g: &Git, repo: &Path) -> Result<OpOutcome> {
             conflict: true,
             files: conflict_files(g, repo),
             message: out.stderr.trim().to_string(),
+            worktree: None,
         })
     }
 }
@@ -319,21 +368,11 @@ pub fn export_out(
         a.extend(base.iter().map(Into::into));
     }
 
-    let out = g.exec(Some(mirror), &a, None, true)?;
-    if !out.ok() {
-        let _ = fs::remove_file(&bundle);
-        if out.stderr.contains("empty bundle") {
-            return Ok(ExportOutcome::NothingToSync {
-                message: "内网没有新提交，无需同步".into(),
-            });
-        }
-        return Err(SyncError::Git {
-            cmd: "git bundle create".into(),
-            code: out.code,
-            stderr: out.stderr.trim().to_string(),
-        });
+    if let Some(nothing) =
+        create_and_verify_bundle(g, mirror, &bundle, a, "内网没有新提交，无需同步")?
+    {
+        return Ok(nothing);
     }
-    g.run(mirror, args!["bundle", "verify", &bundle])?;
 
     let ref_entries: Vec<RefEntry> = refs
         .iter()
@@ -411,11 +450,35 @@ pub fn import_back(
 
     g.run(work, args!["bundle", "verify", bundle])?;
     let heads = parse_list_heads(&g.query(work, args!["bundle", "list-heads", bundle])?);
-    let current = repo::current_branch(g, work);
+    // 分支名 → 检出它的工作树路径。不能只看主工作树的 HEAD：
+    // 被 linked worktree 占用的分支同样 fetch 不进去，git 会报
+    // "refusing to fetch into branch ... checked out at ..."，
+    // 那条消息不含 non-fast-forward/rejected，会被当成未知错误抛出，
+    // 而此时循环里前面的分支已经导入了，留下一次半完成的导入。
+    let checked_out: std::collections::HashMap<String, String> = repo::list_worktrees(g, work)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|w| !w.bare)
+        .filter_map(|w| w.branch.clone().map(|b| (b, w.path)))
+        .collect();
     let seq_tag = manifest
         .as_ref()
         .map(|m| format!("{:04}", m.seq))
         .unwrap_or_else(|| now_secs().to_string());
+
+    // 先把所有被检出的分支一次查清再动手：中途失败会留下一次半完成的导入
+    let blocked: Vec<String> = heads
+        .iter()
+        .filter_map(|(name, _)| name.strip_prefix("refs/heads/"))
+        .filter_map(|b| checked_out.get(b).map(|w| (b, w)))
+        .map(|(b, w)| format!("{b}（在 {w}）"))
+        .collect();
+    if !blocked.is_empty() {
+        return invalid(format!(
+            "这些分支已被检出，无法直接导入，请先在对应工作树切换到其他分支：{}",
+            blocked.join("、")
+        ));
+    }
 
     let mut branches = Vec::new();
     for (name, sha) in heads {
@@ -423,11 +486,6 @@ pub fn import_back(
             continue;
         };
         let mut local = branch.to_string();
-        if current.as_deref() == Some(branch) {
-            return invalid(format!(
-                "分支 {branch} 当前已检出，无法直接导入，请先切换到其他分支"
-            ));
-        }
         let out = g.exec(
             Some(work),
             &args!["fetch", bundle, format!("refs/heads/{branch}:refs/heads/{branch}")],
@@ -485,6 +543,7 @@ pub fn import_back(
 }
 
 /// 外网 → 内网：以 patch 目录方式导入（`git am --3way`）。
+#[allow(clippy::too_many_arguments)]
 pub fn import_patches(
     g: &Git,
     work: &Path,
@@ -492,8 +551,15 @@ pub fn import_patches(
     branch: &str,
     base_branch: &str,
     fetch_upstream: bool,
+    worktree_path: Option<&Path>,
 ) -> Result<OpOutcome> {
-    ensure_worktree_clean(g, work)?;
+    // 建成独立 worktree 时不碰主工作树，也就不要求它干净；
+    // 只有要在主工作树上 switch 时才需要它干净。
+    if worktree_path.is_none() {
+        ensure_worktree_clean(g, work)?;
+    } else if repo::is_bare(g, work)? {
+        return invalid("这是裸仓库（镜像），请选择工作仓库");
+    }
     validate_branch_name(g, work, branch)?;
     if repo::rev_exists(g, work, &format!("refs/heads/{branch}")) {
         return invalid(format!("分支 {branch} 已存在，请换一个名字"));
@@ -509,22 +575,39 @@ pub fn import_patches(
     if fetch_upstream {
         g.run(work, args!["fetch", "origin", "--prune"])?;
     }
-    g.run(
-        work,
-        args!["switch", "-c", branch, format!("origin/{base_branch}")],
-    )?;
+    let base = format!("origin/{base_branch}");
+    // 补丁应用到哪个目录：给了 worktree 就在那里建分支并 am，
+    // 不抢主工作树（内网工作仓库可能正开着别的分支）。
+    let target: PathBuf = match worktree_path {
+        Some(wt) => {
+            if repo::is_nonempty_dir(wt) {
+                return invalid(format!("worktree 目录非空：{}", wt.display()));
+            }
+            if let Some(parent) = wt.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            g.run(work, args!["worktree", "add", wt, "-b", branch, &base])?;
+            wt.to_path_buf()
+        }
+        None => {
+            g.run(work, args!["switch", "-c", branch, &base])?;
+            work.to_path_buf()
+        }
+    };
     repo::set_sync_base(g, work, branch, base_branch)?;
+    let wt_out = worktree_path.map(|p| p.to_string_lossy().into_owned());
     let mut a = args!["am", "--3way"];
     a.extend(patches.iter().map(Into::into));
-    let out = g.exec(Some(work), &a, None, true)?;
+    let out = g.exec(Some(&target), &a, None, true)?;
     if out.ok() {
-        Ok(OpOutcome::done(format!("已应用 {} 个补丁到 {branch}", patches.len())))
+        Ok(OpOutcome::done(format!("已应用 {} 个补丁到 {branch}", patches.len())).at(wt_out))
     } else {
         Ok(OpOutcome {
             ok: false,
             conflict: true,
-            files: conflict_files(g, work),
-            message: "补丁应用冲突：解决后点击“继续”，或点击“中止”".into(),
+            files: conflict_files(g, &target),
+            message: format!("补丁应用冲突{}：解决后点击“继续”，或点击“中止”", at_worktree(&wt_out)),
+            worktree: wt_out,
         })
     }
 }
@@ -540,7 +623,12 @@ pub fn rebase_onto(
     onto: &str,
     fetch_upstream: bool,
 ) -> Result<OpOutcome> {
-    ensure_worktree_clean(g, repo)?;
+    // 分支可能被某个 linked worktree 检出。那时不能（也不需要）switch：
+    // `git switch` 会直接报 "already used by worktree"。就地在那个目录 rebase。
+    let wt = repo::linked_worktree_for(g, repo, branch).map(|w| w.path);
+    let work: PathBuf = wt.as_deref().map_or_else(|| repo.to_path_buf(), PathBuf::from);
+
+    ensure_worktree_clean(g, &work)?;
     if fetch_upstream {
         g.run(repo, args!["fetch", "origin", "--prune"])?;
     }
@@ -550,25 +638,29 @@ pub fn rebase_onto(
     }
     let old = repo::get_sync_base(g, repo, branch)
         .filter(|b| b != onto && repo::rev_exists(g, repo, &format!("origin/{b}")));
-    g.run(repo, args!["switch", branch])?;
+    if wt.is_none() {
+        g.run(&work, args!["switch", branch])?;
+    }
     // 先写记录：冲突后“继续”完成时，记录也已经是新基准
     repo::set_sync_base(g, repo, branch, onto)?;
     let a = match &old {
         Some(b) => args!["rebase", "--onto", &target, format!("origin/{b}")],
         None => args!["rebase", &target],
     };
-    let out = g.exec(Some(repo), &a, None, true)?;
+    let out = g.exec(Some(&work), &a, None, true)?;
     if out.ok() {
         Ok(OpOutcome::done(match &old {
             Some(b) => format!("{branch} 已从 origin/{b} 移到最新的 {target}"),
             None => format!("{branch} 已基于最新的 {target}"),
-        }))
+        })
+        .at(wt))
     } else {
         Ok(OpOutcome {
             ok: false,
             conflict: true,
-            files: conflict_files(g, repo),
-            message: "rebase 冲突：解决后点击“继续”，或点击“中止”".into(),
+            files: conflict_files(g, &work),
+            message: format!("rebase 冲突{}：解决后点击“继续”，或点击“中止”", at_worktree(&wt)),
+            worktree: wt,
         })
     }
 }
@@ -592,15 +684,25 @@ pub fn push_branch(g: &Git, work: &Path, branch: &str, force_with_lease: bool) -
 // 外网端
 // ======================================================================
 
-fn origin_refs(g: &Git, repo: &Path) -> Result<BTreeMap<String, String>> {
-    Ok(repo::list_refs(g, repo, &["refs/remotes/origin", "refs/tags"])?
+/// 外网镜像里的全部引用。镜像是 bare 仓库，内网分支就放在 `refs/heads/*`，
+/// 与内网镜像的布局一致（`repo::base_ref_prefix` 据此自动选前缀）。
+fn mirror_refs(g: &Git, repo: &Path) -> Result<BTreeMap<String, String>> {
+    Ok(repo::list_refs(g, repo, &["refs/heads", "refs/tags"])?
         .into_iter()
-        .filter(|(n, _)| n != "refs/remotes/origin/HEAD")
         .collect())
 }
 
-/// 内网 → 外网：导入全量或增量包。目标目录不存在（或为空）时 clone，否则 fetch。
-pub fn import_in(g: &Git, bundle: &Path, repo_dir: &Path, allow_gap: bool) -> Result<ImportInResult> {
+/// 内网 → 外网：把包导入**外网镜像**（bare 仓库）。
+///
+/// 镜像不是开发仓库：它只是内网状态在外网的一份只读副本，开发仓库 clone 它、
+/// 把它当作 `origin`。这样 `origin` 始终是一个活的本地远端，
+/// `git fetch origin <任意分支>` 和 `git worktree add` 都能正常工作；
+/// 导入也不再碰开发仓库，不会和正在跑的 agent 抢工作区。
+///
+/// 首次和增量走同一条 fetch 路径，首次只是多一步 `git init --bare`。
+/// 刻意不用 `git clone --mirror <bundle>`：那会留下一个指向 U 盘上 bundle 文件的
+/// `remote.origin`，正是旧实现里 `couldn't find remote ref` 的成因。
+pub fn import_in(g: &Git, bundle: &Path, mirror_dir: &Path, allow_gap: bool) -> Result<ImportInResult> {
     let manifest = Manifest::read_for(bundle)?;
     if let Some(m) = &manifest {
         if matches!(m.kind, BundleKind::Back | BundleKind::Patch) {
@@ -608,46 +710,37 @@ pub fn import_in(g: &Git, bundle: &Path, repo_dir: &Path, allow_gap: bool) -> Re
         }
     }
 
-    // ---------- 首次：clone ----------
-    if !repo::is_nonempty_dir(repo_dir) {
-        if let Some(m) = &manifest {
-            if m.kind != BundleKind::Full {
-                return invalid("目标仓库不存在，首次导入必须使用全量包（full）");
-            }
+    // ---------- 首次：建空镜像 ----------
+    let created = !repo::is_ext_mirror(g, mirror_dir);
+    if created {
+        if repo::is_nonempty_dir(mirror_dir) {
+            return invalid(format!(
+                "目录不是外网镜像，也不是空目录：{}。\
+                 如果这是旧版本的开发仓库，请删除后重新导入全量包（旧仓库不再兼容）",
+                mirror_dir.display()
+            ));
         }
-        if let Some(parent) = repo_dir.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        g.run_nocwd(args!["clone", bundle, repo_dir])?;
-        let state = ExternalState {
-            repo_id: manifest.as_ref().map(|m| m.repo_id.clone()),
-            last_in_seq: manifest.as_ref().map(|m| m.seq).unwrap_or(0),
-            back_seq: 0,
-            last_import_at: Some(now_secs()),
-        };
-        repo::save_state(&repo::git_dir(g, repo_dir)?, &state)?;
-        let changes = origin_refs(g, repo_dir)?
-            .into_iter()
-            .map(|(name, sha)| RefChange {
-                name,
-                old: None,
-                new: Some(sha),
-            })
-            .collect();
-        return Ok(ImportInResult {
-            cloned: true,
-            seq: manifest.map(|m| m.seq),
-            changes,
-        });
+        fs::create_dir_all(mirror_dir)?;
+        g.run(mirror_dir, args!["init", "--bare"])?;
+        repo::mark_ext_mirror(g, mirror_dir)?;
     }
 
-    // ---------- 增量：fetch ----------
-    let gd = repo::git_dir(g, repo_dir)?;
-    let mut state: ExternalState = repo::load_state(&gd)?;
+    // 空镜像只能用全量包填。不能只看"这次新建了镜像"：
+    // 首次导入的 fetch 失败会留下一个已标记但没有引用的镜像，
+    // 那时再导增量包就会得到一个残缺的仓库。
+    if mirror_refs(g, mirror_dir)?.is_empty() {
+        if let Some(m) = &manifest {
+            if m.kind != BundleKind::Full {
+                return invalid("外网镜像还是空的，首次导入必须使用全量包（full）");
+            }
+        }
+    }
+
+    let mut state: MirrorState = repo::load_state(mirror_dir)?;
     if let Some(m) = &manifest {
         if let Some(rid) = &state.repo_id {
             if rid != &m.repo_id {
-                return invalid("该包与当前仓库不是同一个项目（根提交不同）");
+                return invalid("该包与当前镜像不是同一个项目（根提交不同）");
             }
         }
         if m.kind == BundleKind::Incr && state.last_in_seq > 0 {
@@ -666,28 +759,29 @@ pub fn import_in(g: &Git, bundle: &Path, repo_dir: &Path, allow_gap: bool) -> Re
         }
     }
 
-    g.run(repo_dir, args!["bundle", "verify", bundle])?;
-    let before = origin_refs(g, repo_dir)?;
+    g.run(mirror_dir, args!["bundle", "verify", bundle])?;
+    let before = mirror_refs(g, mirror_dir)?;
     g.run(
-        repo_dir,
+        mirror_dir,
         args![
             "fetch",
             "--no-tags",
             bundle,
-            "+refs/heads/*:refs/remotes/origin/*",
+            "+refs/heads/*:refs/heads/*",
             "+refs/tags/*:refs/tags/*"
         ],
     )?;
 
-    // 用 manifest 校正远程跟踪分支：增量包不含"指向旧提交的新分支"，也不含删除信息
+    // 用 manifest 校正：增量包不含"指向旧提交的新分支"，也不含删除信息。
+    // 这套校正只在镜像层做一次，开发仓库靠 `fetch --prune` 跟上。
     if let Some(m) = &manifest {
         let wanted: Vec<String> = m.refs.iter().map(|r| r.sha.clone()).collect();
         let have: std::collections::HashSet<String> =
-            repo::existing_objects(g, repo_dir, &wanted)?.into_iter().collect();
+            repo::existing_objects(g, mirror_dir, &wanted)?.into_iter().collect();
         let mut script = String::new();
         let mut keep = std::collections::HashSet::new();
         for (b, sha) in m.branches() {
-            let r = format!("refs/remotes/origin/{b}");
+            let r = format!("refs/heads/{b}");
             keep.insert(r.clone());
             if have.contains(sha) {
                 script.push_str(&format!("update {r} {sha}\n"));
@@ -698,13 +792,13 @@ pub fn import_in(g: &Git, bundle: &Path, repo_dir: &Path, allow_gap: bool) -> Re
                 script.push_str(&format!("update refs/tags/{t} {sha}\n"));
             }
         }
-        for (name, _) in origin_refs(g, repo_dir)? {
-            if name.starts_with("refs/remotes/origin/") && !keep.contains(&name) {
+        for (name, _) in mirror_refs(g, mirror_dir)? {
+            if name.starts_with("refs/heads/") && !keep.contains(&name) {
                 script.push_str(&format!("delete {name}\n"));
             }
         }
         if !script.is_empty() {
-            g.query_stdin(repo_dir, args!["update-ref", "--stdin"], &script)?;
+            g.query_stdin(mirror_dir, args!["update-ref", "--stdin"], &script)?;
         }
         state.last_in_seq = m.seq;
         if state.repo_id.is_none() {
@@ -712,9 +806,28 @@ pub fn import_in(g: &Git, bundle: &Path, repo_dir: &Path, allow_gap: bool) -> Re
         }
     }
     state.last_import_at = Some(now_secs());
-    repo::save_state(&gd, &state)?;
+    repo::save_state(mirror_dir, &state)?;
 
-    let after = origin_refs(g, repo_dir)?;
+    let after = mirror_refs(g, mirror_dir)?;
+
+    // 让镜像的 HEAD 指向一个真实存在的分支。`git init --bare` 的 HEAD 指向
+    // `init.defaultBranch`（可能是 master 或任何名字），如果它不存在，
+    // 从镜像 clone 出来的开发仓库不会检出任何分支。
+    // 优先用 manifest 的主线分支；没有 manifest（可以直接导入裸 bundle）
+    // 或该分支不存在时，退而取任意一个分支，总之不能让 HEAD 悬空。
+    let head_ok = repo::current_branch(g, mirror_dir)
+        .is_some_and(|b| after.contains_key(&format!("refs/heads/{b}")));
+    if !head_ok {
+        let wanted = manifest
+            .as_ref()
+            .map(|m| format!("refs/heads/{}", m.base_branch))
+            .filter(|h| after.contains_key(h))
+            .or_else(|| after.keys().find(|n| n.starts_with("refs/heads/")).cloned());
+        if let Some(head) = wanted {
+            g.run(mirror_dir, args!["symbolic-ref", "HEAD", &head])?;
+        }
+    }
+
     let mut changes = Vec::new();
     for (name, new) in &after {
         let old = before.get(name);
@@ -736,7 +849,7 @@ pub fn import_in(g: &Git, bundle: &Path, repo_dir: &Path, allow_gap: bool) -> Re
         }
     }
     Ok(ImportInResult {
-        cloned: false,
+        created,
         seq: manifest.map(|m| m.seq),
         changes,
     })
@@ -754,31 +867,128 @@ pub fn configure_repo(g: &Git, repo: &Path, name: &str, email: &str) -> Result<(
     Ok(())
 }
 
-pub fn create_branch(g: &Git, repo: &Path, name: &str, base_branch: &str) -> Result<()> {
+/// 推送到镜像的占位 URL。镜像是内网状态的只读副本，推进去会污染它，
+/// 于是把 push 地址设成一个不存在的远端，`git push` 会立刻失败。
+const PUSH_DISABLED: &str = "OFFLINE-SYNC-PUSH-TO-MIRROR-DISABLED";
+
+/// 从外网镜像克隆一个开发仓库。`origin` 指向本地镜像目录，永远有效。
+pub fn create_dev_repo(
+    g: &Git,
+    mirror_dir: &Path,
+    dev_dir: &Path,
+    name: &str,
+    email: &str,
+) -> Result<()> {
+    if !repo::is_ext_mirror(g, mirror_dir) {
+        return invalid(format!(
+            "{} 不是外网镜像，请先导入全量包",
+            mirror_dir.display()
+        ));
+    }
+    if repo::is_nonempty_dir(dev_dir) {
+        return invalid(format!("目录非空：{}", dev_dir.display()));
+    }
+    if let Some(parent) = dev_dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    g.run_nocwd(args!["clone", mirror_dir, dev_dir])?;
+    g.run(dev_dir, args!["remote", "set-url", "--push", "origin", PUSH_DISABLED])?;
+    configure_repo(g, dev_dir, name, email)?;
+    Ok(())
+}
+
+/// 两个路径是否指向同一个目录。优先比较 canonicalize 后的结果
+/// （消解软链接、`..` 和 macOS 的 /tmp → /private/tmp），失败时退回字符串比较。
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// 开发仓库从镜像同步：内网分支的新增、更新、删除都由这一步带过来。
+///
+/// 先确认 `origin` 真的指向本工具的镜像再动手：这一步带 `--prune --prune-tags`，
+/// 万一配置里的开发仓库路径填错、落到某个无关仓库上，会删掉那个仓库的本地 tag。
+pub fn sync_dev_repo(g: &Git, dev_dir: &Path, mirror_dir: &Path) -> Result<()> {
+    let origin = g
+        .exec(Some(dev_dir), &args!["config", "--get", "remote.origin.url"], None, false)
+        .ok()
+        .filter(|o| o.ok())
+        .map(|o| o.stdout.trim().to_string())
+        .unwrap_or_default();
+    if origin.is_empty() {
+        return invalid(format!("{} 没有配置 origin，不是从镜像克隆出来的", dev_dir.display()));
+    }
+    if !same_dir(Path::new(&origin), mirror_dir) {
+        return invalid(format!(
+            "{} 的 origin 指向 {}，不是外网镜像 {}。\
+             请检查配置里的开发仓库目录，或用「从镜像克隆」重新建一个",
+            dev_dir.display(),
+            origin,
+            mirror_dir.display()
+        ));
+    }
+    g.run(dev_dir, args!["fetch", "origin", "--prune", "--prune-tags", "--tags"])?;
+    Ok(())
+}
+
+/// 新建开发分支。给了 `worktree_path` 就建成独立 worktree（多分支并行开发），
+/// 否则在当前工作树上 `switch -c`。
+pub fn create_branch(
+    g: &Git,
+    repo: &Path,
+    name: &str,
+    base_branch: &str,
+    worktree_path: Option<&Path>,
+) -> Result<()> {
     validate_branch_name(g, repo, name)?;
     if repo::rev_exists(g, repo, &format!("refs/heads/{name}")) {
         return invalid(format!("分支 {name} 已存在"));
     }
     let base = format!("origin/{base_branch}");
     if !repo::rev_exists(g, repo, &base) {
-        return invalid(format!("找不到 {base}，请先导入内网包"));
+        return invalid(format!("找不到 {base}，请先导入内网包并同步开发仓库"));
     }
-    g.run(repo, args!["switch", "-c", name, base])?;
+    match worktree_path {
+        Some(wt) => {
+            if repo::is_nonempty_dir(wt) {
+                return invalid(format!("worktree 目录非空：{}", wt.display()));
+            }
+            if let Some(parent) = wt.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            g.run(repo, args!["worktree", "add", wt, "-b", name, base])?;
+        }
+        None => {
+            g.run(repo, args!["switch", "-c", name, base])?;
+        }
+    };
+    // syncBase 存在 git config 里，主仓库和所有 worktree 共享，写一次即可
     repo::set_sync_base(g, repo, name, base_branch)?;
     Ok(())
 }
 
+/// 未提交的修改会被导出漏掉。要查所有工作树，不只主工作树：
+/// 分支很可能是在某个 linked worktree 里开发的。
 fn dirty_warning(g: &Git, repo: &Path) -> Option<String> {
-    let s = g
-        .query(repo, args!["status", "--porcelain", "--untracked-files=no"])
-        .ok()?;
-    (!s.trim().is_empty()).then(|| "工作区有未提交的修改，这些修改不会被导出".to_string())
+    let dirty: Vec<String> = repo::dirty_worktrees(g, repo)
+        .into_iter()
+        .map(|w| match &w.branch {
+            Some(b) => format!("{b}（{}）", w.path),
+            None => w.path.clone(),
+        })
+        .collect();
+    (!dirty.is_empty())
+        .then(|| format!("以下工作树有未提交的修改，不会被导出：{}", dirty.join("、")))
 }
 
 /// 外网 → 内网：打包内网还没有的提交（`<branches> --not --remotes=origin`）。
+#[allow(clippy::too_many_arguments)]
 pub fn export_back(
     g: &Git,
     repo: &Path,
+    mirror_dir: &Path,
     branches: &[String],
     transfer_dir: &Path,
     repo_name: &str,
@@ -789,8 +999,8 @@ pub fn export_back(
         return invalid("请至少选择一个分支");
     }
     fs::create_dir_all(transfer_dir)?;
-    let gd = repo::git_dir(g, repo)?;
-    let mut state: ExternalState = repo::load_state(&gd)?;
+    // 回传序号由镜像统一分配：多个开发仓库 / worktree 各自计数会撞号
+    let mut state: MirrorState = repo::load_state(mirror_dir)?;
     let rid = match &state.repo_id {
         Some(r) => r.clone(),
         None => repo::repo_id(g, repo, &format!("refs/remotes/origin/{base_branch}"))?,
@@ -812,21 +1022,11 @@ pub fn export_back(
     }
     a.extend(args!["--not", "--remotes=origin"]);
 
-    let out = g.exec(Some(repo), &a, None, true)?;
-    if !out.ok() {
-        let _ = fs::remove_file(&bundle);
-        if out.stderr.contains("empty bundle") {
-            return Ok(ExportOutcome::NothingToSync {
-                message: "所选分支没有内网尚未包含的新提交".into(),
-            });
-        }
-        return Err(SyncError::Git {
-            cmd: "git bundle create".into(),
-            code: out.code,
-            stderr: out.stderr.trim().to_string(),
-        });
+    if let Some(nothing) =
+        create_and_verify_bundle(g, repo, &bundle, a, "所选分支没有内网尚未包含的新提交")?
+    {
+        return Ok(nothing);
     }
-    g.run(repo, args!["bundle", "verify", &bundle])?;
 
     let manifest = Manifest {
         format: FORMAT,
@@ -842,7 +1042,7 @@ pub fn export_back(
     };
     let mpath = manifest.write_for(&bundle)?;
     state.back_seq = seq;
-    repo::save_state(&gd, &state)?;
+    repo::save_state(mirror_dir, &state)?;
 
     Ok(ExportOutcome::Exported {
         kind: BundleKind::Back,
@@ -855,17 +1055,18 @@ pub fn export_back(
 }
 
 /// 外网 → 内网：导出 patch 目录（`git format-patch --binary origin/<base>..<branch>`）。
+#[allow(clippy::too_many_arguments)]
 pub fn export_patches(
     g: &Git,
     repo: &Path,
+    mirror_dir: &Path,
     branch: &str,
     transfer_dir: &Path,
     repo_name: &str,
     base_branch: &str,
     releases: &[String],
 ) -> Result<ExportOutcome> {
-    let gd = repo::git_dir(g, repo)?;
-    let mut state: ExternalState = repo::load_state(&gd)?;
+    let mut state: MirrorState = repo::load_state(mirror_dir)?;
     let rid = match &state.repo_id {
         Some(r) => r.clone(),
         None => repo::repo_id(g, repo, &format!("refs/remotes/origin/{base_branch}"))?,
@@ -909,7 +1110,7 @@ pub fn export_patches(
     };
     let mpath = manifest.write_for(&dir)?;
     state.back_seq = seq;
-    repo::save_state(&gd, &state)?;
+    repo::save_state(mirror_dir, &state)?;
 
     Ok(ExportOutcome::Exported {
         kind: BundleKind::Patch,

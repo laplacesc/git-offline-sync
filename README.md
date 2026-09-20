@@ -14,31 +14,39 @@ sequenceDiagram
         participant USB as bundle 文件
     end
     box rgba(15,157,107,0.08) 外网端（Mac，AI 开发）
+        participant XM as 外网镜像
         participant DEV as 开发仓库
     end
 
     GL->>MR: clone --mirror
     MR->>USB: bundle → proj-out-0001-full.bundle（首次全量）
-    USB->>DEV: clone
-    Note over DEV: 在 feature/xxx 上开发并提交
+    USB->>XM: fetch 到 refs/heads/*
+    XM->>DEV: clone（origin = 本地镜像目录）
+    Note over DEV: 在 feature/xxx 上开发并提交<br/>多分支并行时各开一个 worktree
     DEV->>USB: bundle → proj-back-0001.bundle
     USB->>WK: fetch
     WK->>WK: rebase 到分支的基准（origin/main 或发布分支），确认提交
     WK->>GL: push
     GL->>MR: remote update
     MR->>USB: bundle → proj-out-0002-incr.bundle（之后增量）
-    USB->>DEV: fetch
+    USB->>XM: fetch
+    XM->>DEV: fetch origin --prune
 ```
+
+外网端是**两层**：包只导入到*外网镜像*（裸仓库），开发仓库从镜像 clone、把它当 `origin`。
+这样 `origin` 始终是一个活着的本地远端，`git fetch origin <任意分支>`、`git worktree add`
+都能正常用；导入也不再碰开发仓库，不会和正在跑的 AI agent 抢工作区。
+一份镜像可以供多个开发仓库共用。
 
 ## 功能
 
 | 内网端 | 外网端 |
 |---|---|
-| 克隆镜像（`clone --mirror`） | 首次用全量包克隆，写入提交身份和 `core.autocrlf=input` |
+| 克隆镜像（`clone --mirror`） | 首次用全量包建立外网镜像，之后从镜像克隆开发仓库 |
 | 导出全量 / 增量包（自动 fetch、verify） | 按序号导入增量包，跳号或重复导入会被拦截 |
-| 导入回传 bundle，或用 `git am --3way` 应用 patch | 基于主线或发布分支新建分支，rebase 到它的基准 |
+| 导入回传 bundle，或用 `git am --3way` 应用 patch | 基于主线或发布分支新建分支，可建成独立 worktree |
 | rebase 到分支的基准，列出提交确认后推送 | 回传：bundle（只含内网没有的提交）或 patch |
-| 冲突时提供“继续 / 中止” | 冲突时提供“继续 / 中止” |
+| 冲突时提供“继续 / 中止” | 冲突时提供“继续 / 中止”，认得冲突在哪个 worktree |
 
 所有 git 命令及其输出实时显示在底部的“命令日志”中。
 
@@ -60,10 +68,14 @@ sequenceDiagram
 ## 安全措施
 
 - **禁止在镜像仓库中推送**：`--mirror` 仓库一推送就会覆盖、删除远程分支。推送只能在工作仓库中进行。
+- 外网开发仓库的 push 地址被设成一个无效占位符（`git remote set-url --push origin …`），
+  免得有人把本地分支推进外网镜像、污染那份只读副本。
 - 每个包旁边有一个 `*.manifest.json`，记录仓库身份（根提交）、序号和导出时的所有分支：
   - 导入包之前核对仓库身份，防止导错项目；
   - 增量包序号必须连续；
-  - 外网端据此同步“指向旧提交的新分支”和“已删除的分支”，这两种变化 bundle 本身无法表达。
+  - 外网镜像据此同步“指向旧提交的新分支”和“已删除的分支”，这两种变化 bundle 本身无法表达；
+    开发仓库靠 `fetch origin --prune` 跟上，不重复做这套校正。
+- 回传包序号由外网镜像统一分配，多个开发仓库、多个 worktree 同时导出也不会撞号。
 - 增量基线记录全部分支和 tag，不只是 `main`，其他分支的更新也不会漏。
 - 只打包 `refs/heads` 和 `refs/tags`，不会带上 GitLab 镜像里的 `refs/merge-requests` 等引用。
 - 回传分支如果与内网本地分支已经分叉（比如内网 rebase 过），会导入成 `<分支>-import-<序号>`，不会覆盖本地分支。
@@ -71,15 +83,35 @@ sequenceDiagram
 
 ## 常见问题
 
+### 从 1.0.x 升级：外网端要重新导入一次
+
+1.0.x 的外网仓库是直接 `git clone <bundle>` 出来的，`remote.origin.url` 指向 U 盘上
+首次那个全量包，之后再也不更新。按 ref 名 fetch 就会失败：
+
+```
+fatal: couldn't find remote ref refs/heads/hotfix/628108
+```
+
+新版本不兼容这种仓库，也不做迁移。升级后：
+
+1. 如果旧仓库里有还没回传的提交，**先导出回传包**；
+2. 在配置里填「外网镜像目录」和「开发仓库目录」（两个不同的目录）；
+3. 内网端重新导出一个全量包，外网端导入 → 建立镜像 → 从镜像克隆开发仓库；
+4. 旧的开发仓库目录可以删掉。
+
+把包导进一个已存在的旧仓库目录会被明确拒绝（“不是外网镜像”），不会把它改坏。
+
 ### macOS / Windows 上导入报 `cannot lock ref ... .lock': File exists`
 
 典型报错：
 
 ```
 git update-ref --stdin
-fatal: cannot lock ref 'refs/remotes/origin/ct_main_fr47363': Unable to create
-'.../.git/refs/remotes/origin/ct_main_fr47363.lock': File exists.
+fatal: cannot lock ref 'refs/heads/ct_main_fr47363': Unable to create
+'.../mirror.git/refs/heads/ct_main_fr47363.lock': File exists.
 ```
+
+（导入发生在外网镜像里，所以报错路径是镜像目录；开发仓库从镜像 fetch 时也会遇到同样的问题。）
 
 如果没有其他 git 进程在运行，原因通常是上游有**只差大小写的分支**，例如 `CT_MAIN_FR47363` 和 `ct_main_fr47363`。GitLab 服务器（Linux）区分大小写，这两个分支可以共存。macOS（APFS）和 Windows（NTFS）默认不区分大小写，而 git 默认的 `files` 格式把每个 ref 存成一个文件，两个分支会被当成同一个文件。导入时两者在同一个 `update-ref` 事务里加锁，第二个锁文件就会报 "File exists"。即使没有报错，两个分支也可能互相覆盖、读到错误的提交。重试无法解决。
 
@@ -91,18 +123,24 @@ git for-each-ref --format='%(refname)' | tr 'A-Z' 'a-z' | sort | uniq -d
 
 **解决方法：把仓库的 ref 存储格式迁移为 reftable。** reftable 不用文件名存 ref，不受文件系统大小写影响。迁移命令 `git refs migrate` 需要 git 2.46 及以上版本（`git --version` 查看）：
 
+外网镜像和开发仓库都要迁移（镜像是导入的落点，开发仓库会从它 fetch 到同名的远程跟踪分支）：
+
 ```sh
-cd <外网工作仓库>
-cp -R .git ../.git-backup        # 先备份
+cd <外网镜像>                     # 裸仓库，下面的 .git 换成 .
+cp -R . ../mirror-backup         # 先备份
 git rev-parse --show-ref-format  # 输出 files 表示需要迁移
 git refs migrate --ref-format=reftable
 git rev-parse --show-ref-format  # 应输出 reftable
+
+cd <开发仓库>
+cp -R .git ../.git-backup
+git refs migrate --ref-format=reftable
 ```
 
 迁移后在本工具里重新导入该包即可。注意：
 
 - reftable 仓库只能用 git 2.45 及以上版本读写，旧版 git 和部分 IDE 内置的 git 可能无法识别。
-- 如果要从零开始，可以直接用 reftable 格式克隆：`git clone --ref-format=reftable <包或地址> <目录>`（git 2.45 及以上）。
+- 如果要从零开始，可以让开发仓库直接用 reftable 格式克隆：`git clone --ref-format=reftable <镜像目录> <目录>`（git 2.45 及以上）。
 - 根本的解决办法是在上游删除或改名其中一个分支。
 
 ## 目录结构

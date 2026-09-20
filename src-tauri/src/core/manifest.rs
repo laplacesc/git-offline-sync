@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::error::Result;
+use super::error::{invalid, Result};
 
 pub const FORMAT: u32 = 1;
 
@@ -73,13 +73,24 @@ impl Manifest {
     }
 
     /// manifest 不存在时返回 None（允许导入手工打的 bundle）。
+    ///
+    /// `format` 比本版本新时直接拒绝：字段含义可能已经变了，
+    /// 按旧语义解读会静默出错，不如明确要求对端升级工具。
     pub fn read_for(payload: &Path) -> Result<Option<Manifest>> {
         let path = manifest_path_for(payload);
         if !path.exists() {
             return Ok(None);
         }
         let text = fs::read_to_string(&path)?;
-        Ok(Some(serde_json::from_str(&text)?))
+        let m: Manifest = serde_json::from_str(&text)?;
+        if m.format > FORMAT {
+            return invalid(format!(
+                "这个包的格式版本是 {}，本工具只支持到 {FORMAT}。\
+                 它由更新版本的工具（{}）生成，请先升级本机的 git-offline-sync",
+                m.format, m.tool_version
+            ));
+        }
+        Ok(Some(m))
     }
 
     pub fn branches(&self) -> impl Iterator<Item = (&str, &str)> {

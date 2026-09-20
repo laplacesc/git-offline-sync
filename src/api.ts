@@ -16,12 +16,13 @@ export interface Profile {
   releaseBranches?: string[];
   /** U 盘 / 传输目录 */
   transferDir: string;
+  /** 镜像仓库目录。内网端是 GitLab 的 `clone --mirror`，外网端是包导入的落点 */
+  mirrorDir?: string;
   // 内网端
   remoteUrl?: string;
-  mirrorDir?: string;
   workDir?: string;
-  // 外网端
-  repoDir?: string;
+  // 外网端：开发仓库，可以有多个，都以 mirrorDir 为 origin
+  devRepos?: string[];
   userName?: string;
   userEmail?: string;
 }
@@ -36,6 +37,8 @@ export interface Environment {
   os: string;
   git: { Ok: string } | { Err: string };
   configPath: string;
+  /** 应用版本，与导出包 manifest 里的 toolVersion 同源 */
+  version: string;
 }
 
 export interface CommitInfo {
@@ -56,6 +59,25 @@ export interface BranchInfo {
   ahead: number;
   behind: number;
   current: boolean;
+  /** 该分支被哪个 linked worktree 检出 */
+  worktree: string | null;
+}
+
+export interface Worktree {
+  path: string;
+  branch: string | null;
+  bare: boolean;
+  /** 主工作树 */
+  main: boolean;
+}
+
+/** 某个工作树上未完成的操作 */
+export interface InProgressOp {
+  /** 该工作树的路径，「继续 / 中止」必须发到这里 */
+  path: string;
+  branch: string | null;
+  op: string;
+  main: boolean;
 }
 
 export interface RepoStatus {
@@ -65,8 +87,12 @@ export interface RepoStatus {
   isBare: boolean;
   isMirror: boolean;
   currentBranch: string | null;
-  dirty: boolean;
+  /** 有未提交修改的工作树（含主工作树） */
+  dirtyTrees: Worktree[];
+  /** 主工作树上未完成的操作 */
   inProgress: string | null;
+  /** 所有工作树（含主工作树）上未完成的操作 */
+  inProgressTrees: InProgressOp[];
   branches: BranchInfo[];
   remoteUrl: string | null;
 }
@@ -117,6 +143,8 @@ export interface OpOutcome {
   conflict: boolean;
   files: string[];
   message: string;
+  /** 操作实际发生在哪个工作树：冲突的“继续 / 中止”要发到这里 */
+  worktree: string | null;
 }
 
 export interface RefChange {
@@ -126,7 +154,8 @@ export interface RefChange {
 }
 
 export interface ImportInResult {
-  cloned: boolean;
+  /** 本次导入新建了外网镜像（首次导入） */
+  created: boolean;
   seq: number | null;
   changes: RefChange[];
 }
@@ -151,7 +180,8 @@ export interface InternalState {
   lastExportAt: number | null;
 }
 
-export interface ExternalState {
+/** 外网镜像的同步状态（存在镜像目录里，多个开发仓库共享） */
+export interface MirrorState {
   repoId: string | null;
   lastInSeq: number;
   backSeq: number;
@@ -179,8 +209,8 @@ export const api = {
     invoke<RepoStatus>("repo_status", { path, baseBranch, releaseBranches }),
   internalState: (mirrorDir: string) =>
     invoke<InternalState>("sync_state", { path: mirrorDir, external: false }),
-  externalState: (repoDir: string) =>
-    invoke<ExternalState>("sync_state", { path: repoDir, external: true }),
+  mirrorState: (mirrorDir: string) =>
+    invoke<MirrorState>("sync_state", { path: mirrorDir, external: true }),
   listPackages: (dir: string) => invoke<PackageInfo[]>("list_packages", { dir }),
   listCommits: (repo: string, from: string, to: string) =>
     invoke<CommitInfo[]>("list_commits", { repo, from, to }),
@@ -207,19 +237,27 @@ export const api = {
     branch: string;
     baseBranch: string;
     fetchUpstream: boolean;
-  }) => invoke<OpOutcome>("import_patches", a),
+    /** 给了就把分支建成独立 worktree，不抢主工作树 */
+    worktreePath?: string;
+  }) => invoke<OpOutcome>("import_patches", { ...a, worktreePath: a.worktreePath ?? null }),
   pushBranch: (workDir: string, branch: string, forceWithLease: boolean) =>
     invoke<OpOutcome>("push_branch", { workDir, branch, forceWithLease }),
 
   // 外网端
-  importIn: (bundle: string, repoDir: string, allowGap: boolean) =>
-    invoke<ImportInResult>("import_in", { bundle, repoDir, allowGap }),
+  importIn: (bundle: string, mirrorDir: string, allowGap: boolean) =>
+    invoke<ImportInResult>("import_in", { bundle, mirrorDir, allowGap }),
+  createDevRepo: (mirrorDir: string, devDir: string, name: string, email: string) =>
+    invoke<void>("create_dev_repo", { mirrorDir, devDir, name, email }),
+  syncDevRepo: (devDir: string, mirrorDir: string) =>
+    invoke<void>("sync_dev_repo", { devDir, mirrorDir }),
+  listWorktrees: (repo: string) => invoke<Worktree[]>("list_worktrees", { repo }),
   configureRepo: (repo: string, name: string, email: string) =>
     invoke<void>("configure_repo", { repo, name, email }),
-  createBranch: (repo: string, name: string, baseBranch: string) =>
-    invoke<void>("create_branch", { repo, name, baseBranch }),
+  createBranch: (repo: string, name: string, baseBranch: string, worktreePath?: string) =>
+    invoke<void>("create_branch", { repo, name, baseBranch, worktreePath: worktreePath ?? null }),
   exportBack: (a: {
     repo: string;
+    mirrorDir: string;
     branches: string[];
     transferDir: string;
     repoName: string;
@@ -228,6 +266,7 @@ export const api = {
   }) => invoke<ExportOutcome>("export_back", a),
   exportPatches: (a: {
     repo: string;
+    mirrorDir: string;
     branch: string;
     transferDir: string;
     repoName: string;
@@ -247,11 +286,6 @@ export function formatTime(secs: number | null | undefined): string {
   const d = new Date(secs * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-export function joinPath(dir: string, name: string, os: string): string {
-  const sep = os === "windows" ? "\\" : "/";
-  return dir.replace(/[\\/]+$/, "") + sep + name;
 }
 
 export function newId(): string {
