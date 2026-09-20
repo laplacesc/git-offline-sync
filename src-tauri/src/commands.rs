@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::core::error::SyncError;
 use crate::core::git::{Git, LogEvent, LogKind};
-use crate::core::repo::{CommitInfo, RepoStatus};
+use crate::core::repo::{CommitInfo, RepoStatus, Worktree};
 use crate::core::sync::{self, ExportOutcome, ImportBackResult, ImportInResult, OpOutcome, PackageInfo};
 
 pub const LOG_EVENT: &str = "git-log";
@@ -100,6 +100,8 @@ pub struct Environment {
     pub os: String,
     pub git: Result<String, String>,
     pub config_path: String,
+    /// 应用版本，与包 manifest 里的 `toolVersion` 同源
+    pub version: String,
 }
 
 #[tauri::command]
@@ -110,6 +112,7 @@ pub async fn environment(app: AppHandle) -> CmdResult<Environment> {
         os: std::env::consts::OS.to_string(),
         git,
         config_path: cfg,
+        version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
 
@@ -128,14 +131,14 @@ pub async fn repo_status(
     .await
 }
 
-/// 读取同步状态：外网仓库读 `.git/offline-sync`，内网镜像读 `<mirror>/offline-sync`。
+/// 读取同步状态。两端都存在镜像目录里：`<mirror>/offline-sync/state.json`。
 #[tauri::command]
 pub async fn sync_state(app: AppHandle, path: String, external: bool) -> CmdResult<serde_json::Value> {
-    use crate::core::repo::{self, ExternalState, InternalState};
-    blocking(app, move |g| {
+    use crate::core::repo::{self, InternalState, MirrorState};
+    blocking(app, move |_| {
         let path = p(path);
         let v = if external {
-            let s: ExternalState = repo::load_state(&repo::git_dir(g, &path)?)?;
+            let s: MirrorState = repo::load_state(&path)?;
             serde_json::to_value(s)?
         } else {
             let s: InternalState = repo::load_state(&path)?;
@@ -227,6 +230,7 @@ pub async fn import_back(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn import_patches(
     app: AppHandle,
     work_dir: String,
@@ -234,9 +238,19 @@ pub async fn import_patches(
     branch: String,
     base_branch: String,
     fetch_upstream: bool,
+    worktree_path: Option<String>,
 ) -> CmdResult<OpOutcome> {
     blocking(app, move |g| {
-        sync::import_patches(g, &p(work_dir), &p(patch_dir), &branch, &base_branch, fetch_upstream)
+        let wt = worktree_path.filter(|s| !s.trim().is_empty()).map(p);
+        sync::import_patches(
+            g,
+            &p(work_dir),
+            &p(patch_dir),
+            &branch,
+            &base_branch,
+            fetch_upstream,
+            wt.as_deref(),
+        )
     })
     .await
 }
@@ -257,10 +271,34 @@ pub async fn push_branch(
 pub async fn import_in(
     app: AppHandle,
     bundle: String,
-    repo_dir: String,
+    mirror_dir: String,
     allow_gap: bool,
 ) -> CmdResult<ImportInResult> {
-    blocking(app, move |g| sync::import_in(g, &p(bundle), &p(repo_dir), allow_gap)).await
+    blocking(app, move |g| sync::import_in(g, &p(bundle), &p(mirror_dir), allow_gap)).await
+}
+
+#[tauri::command]
+pub async fn create_dev_repo(
+    app: AppHandle,
+    mirror_dir: String,
+    dev_dir: String,
+    name: String,
+    email: String,
+) -> CmdResult<()> {
+    blocking(app, move |g| {
+        sync::create_dev_repo(g, &p(mirror_dir), &p(dev_dir), &name, &email)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sync_dev_repo(app: AppHandle, dev_dir: String, mirror_dir: String) -> CmdResult<()> {
+    blocking(app, move |g| sync::sync_dev_repo(g, &p(dev_dir), &p(mirror_dir))).await
+}
+
+#[tauri::command]
+pub async fn list_worktrees(app: AppHandle, repo: String) -> CmdResult<Vec<Worktree>> {
+    blocking(app, move |g| crate::core::repo::list_worktrees(g, &p(repo))).await
 }
 
 #[tauri::command]
@@ -269,14 +307,26 @@ pub async fn configure_repo(app: AppHandle, repo: String, name: String, email: S
 }
 
 #[tauri::command]
-pub async fn create_branch(app: AppHandle, repo: String, name: String, base_branch: String) -> CmdResult<()> {
-    blocking(app, move |g| sync::create_branch(g, &p(repo), &name, &base_branch)).await
+pub async fn create_branch(
+    app: AppHandle,
+    repo: String,
+    name: String,
+    base_branch: String,
+    worktree_path: Option<String>,
+) -> CmdResult<()> {
+    blocking(app, move |g| {
+        let wt = worktree_path.filter(|s| !s.trim().is_empty()).map(p);
+        sync::create_branch(g, &p(repo), &name, &base_branch, wt.as_deref())
+    })
+    .await
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn export_back(
     app: AppHandle,
     repo: String,
+    mirror_dir: String,
     branches: Vec<String>,
     transfer_dir: String,
     repo_name: String,
@@ -287,6 +337,7 @@ pub async fn export_back(
         sync::export_back(
             g,
             &p(repo),
+            &p(mirror_dir),
             &branches,
             &p(transfer_dir),
             &repo_name,
@@ -298,9 +349,11 @@ pub async fn export_back(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn export_patches(
     app: AppHandle,
     repo: String,
+    mirror_dir: String,
     branch: String,
     transfer_dir: String,
     repo_name: String,
@@ -311,6 +364,7 @@ pub async fn export_patches(
         sync::export_patches(
             g,
             &p(repo),
+            &p(mirror_dir),
             &branch,
             &p(transfer_dir),
             &repo_name,

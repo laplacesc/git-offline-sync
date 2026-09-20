@@ -156,6 +156,10 @@ export function BaseSelect({
 }) {
   // 记录的基准不在配置档列表里时（如发布分支已从配置中移除），也要能显示
   const all = options.includes(value) || !value ? options : [...options, value];
+  function roleOf(branch: string) {
+    if (branch === mainline) return "主线";
+    return options.includes(branch) ? "发布" : "未配置";
+  }
   return (
     <Select
       className={className ?? "w-56"}
@@ -172,9 +176,7 @@ export function BaseSelect({
           {all.map((b) => (
             <ListBox.Item key={b} id={b} textValue={b}>
               <span className="font-mono text-[13px]">{b}</span>
-              <span className="ml-auto pr-6 pl-3 text-xs text-muted">
-                {b === mainline ? "主线" : options.includes(b) ? "发布" : "未配置"}
-              </span>
+              <span className="ml-auto pr-6 pl-3 text-xs text-muted">{roleOf(b)}</span>
               <ListBox.ItemIndicator />
             </ListBox.Item>
           ))}

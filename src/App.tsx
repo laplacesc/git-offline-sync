@@ -98,6 +98,15 @@ function Shell() {
   };
 
   const gitOk = !!env && "Ok" in env.git;
+  // git 检测的三态：env 还没回来 = 检测中；Ok = 可用；Err = 不可用
+  function gitIndicator() {
+    if (!env) return { dot: "bg-border", text: "检测中…" };
+    if ("Ok" in env.git) {
+      return { dot: "animate-pulse-dot bg-success", text: env.git.Ok.replace("git version ", "git ") };
+    }
+    return { dot: "bg-danger", text: "git 不可用" };
+  }
+  const gitBits = gitIndicator();
   const recommended: Role = env?.os === "windows" ? "internal" : "external";
   const selectedKeys: Selection = new Set(mode.kind === "view" && current ? [current.id] : []);
 
@@ -111,8 +120,11 @@ function Shell() {
           <span className="bg-gradient-accent grid size-9 place-items-center rounded-xl text-white shadow-accent">
             <AppGlyph className="size-5" />
           </span>
-          <div>
-            <div className="font-display text-lg leading-none">Git 离线同步</div>
+          <div className="min-w-0">
+            <div className="flex items-baseline gap-1.5">
+              <span className="font-display text-lg leading-none">Git 离线同步</span>
+              {env && <span className="font-mono text-[11px] leading-none text-muted">v{env.version}</span>}
+            </div>
             <div className="mt-1 font-mono text-[10px] tracking-[0.15em] text-muted uppercase">mirror · bundle</div>
           </div>
         </div>
@@ -162,10 +174,8 @@ function Shell() {
             className="justify-start gap-2 text-xs text-muted hover:text-foreground"
             onPress={() => setMode({ kind: "settings" })}
           >
-            <span className={"size-1.5 rounded-full " + (gitOk ? "animate-pulse-dot bg-success" : env ? "bg-danger" : "bg-border")} />
-            <span className="flex-1 truncate text-left font-mono">
-              {env ? ("Ok" in env.git ? env.git.Ok.replace("git version ", "git ") : "git 不可用") : "检测中…"}
-            </span>
+            <span className={"size-1.5 rounded-full " + gitBits.dot} />
+            <span className="flex-1 truncate text-left font-mono">{gitBits.text}</span>
             <span>⚙</span>
           </Button>
         </div>
@@ -380,6 +390,13 @@ function Settings({
         />
         <TextInput label="当前检测结果" value={env ? ("Ok" in env.git ? env.git.Ok : env.git.Err) : "—"} isReadOnly mono />
         <TextInput label="配置文件位置" value={env?.configPath ?? "—"} isReadOnly mono />
+        <TextInput
+          label="应用版本"
+          value={env ? `v${env.version}` : "—"}
+          isReadOnly
+          mono
+          description="导出包的 manifest 里会记下这个版本（toolVersion）"
+        />
       </Card.Content>
       <Card.Footer className="flex justify-end gap-3 border-t border-border px-8 py-5">
         <Button variant="tertiary" onPress={onCancel}>
