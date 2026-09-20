@@ -34,6 +34,28 @@ fn commit(dir: &Path, file: &str, content: &str, msg: &str) {
     sh(dir, &["commit", "-q", "-m", msg]);
 }
 
+/// 两个路径是否指向同一位置。
+///
+/// 不能直接比字符串：`git worktree list` 在 Windows 上返回长路径 + 正斜杠
+/// （`C:/Users/runneradmin/…`），而测试里的临时目录是 8.3 短名 + 反斜杠
+/// （`C:\Users\RUNNER~1\…`）。产品代码里的 `same_dir` 也是这样比的。
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// `same_path` 的断言版，失败时打印两边的原始值。
+fn assert_same_path(actual: Option<&str>, expected: &Path) {
+    let got = actual.unwrap_or_else(|| panic!("期望路径 {}，实际是 None", expected.display()));
+    assert!(
+        same_path(Path::new(got), expected),
+        "路径不一致：\n  实际 {got}\n  期望 {}",
+        expected.display()
+    );
+}
+
 fn exported(o: ExportOutcome) -> (BundleKind, u32, PathBuf) {
     match o {
         ExportOutcome::Exported { kind, seq, payload, .. } => (kind, seq, PathBuf::from(payload)),
@@ -161,10 +183,7 @@ fn full_round_trip() {
     assert_eq!(sh(&ext, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
     assert_eq!(sh(&ext, &["tag"]), "v1");
     // origin 是本地镜像目录，不是 U 盘上的 bundle 文件
-    assert_eq!(
-        PathBuf::from(sh(&ext, &["remote", "get-url", "origin"])),
-        extm
-    );
+    assert_same_path(Some(&sh(&ext, &["remote", "get-url", "origin"])), &extm);
     assert!(sh(&ext, &["remote", "get-url", "--push", "origin"]).contains("DISABLED"));
     // 推送到镜像被挡住
     assert!(!Command::new("git")
@@ -292,12 +311,12 @@ fn full_round_trip() {
     // 分支表标出它在哪个 worktree
     let st = repo::status(&g, &ext, "main", &[]).unwrap();
     let wb = st.branches.iter().find(|b| b.name == "feature/wt").unwrap();
-    assert_eq!(wb.worktree.as_deref().map(PathBuf::from), Some(wt.clone()));
+    assert_same_path(wb.worktree.as_deref(), &wt);
     // 回归：分支被 linked worktree 占用时也能 rebase。
     // 旧实现在这里 git switch 会报 already used by worktree。
     let rb = sync::rebase_onto(&g, &ext, "feature/wt", "main", false).unwrap();
     assert!(rb.ok, "{:?}", rb);
-    assert_eq!(rb.worktree.map(PathBuf::from), Some(wt.clone()));
+    assert_same_path(rb.worktree.as_deref(), &wt);
 
     // 同步开发仓库要校验 origin 指向镜像：指错仓库会 prune 掉别人的 tag
     sync::sync_dev_repo(&g, &ext, &extm).unwrap();
@@ -324,7 +343,7 @@ fn full_round_trip() {
     let stuck = st
         .in_progress_trees
         .iter()
-        .find(|t| Path::new(&t.path) == wt)
+        .find(|t| same_path(Path::new(&t.path), &wt))
         .expect("卡在 linked worktree 里的 rebase 必须被 status 发现");
     assert_eq!((stuck.op.as_str(), stuck.main), ("rebase", false));
     assert_eq!(stuck.branch.as_deref(), Some("feature/wt"));
@@ -370,7 +389,7 @@ fn full_round_trip() {
     )
     .unwrap();
     assert!(ip.ok, "{:?}", ip);
-    assert_eq!(ip.worktree.as_deref().map(PathBuf::from), Some(pwt.clone()));
+    assert_same_path(ip.worktree.as_deref(), &pwt);
     assert_eq!(
         sh(&work, &["rev-parse", "--abbrev-ref", "HEAD"]),
         before_head,
@@ -384,7 +403,7 @@ fn full_round_trip() {
     // 脏工作树要被 status 报出来（只看主工作树以外的也一样）
     let st = repo::status(&g, &work, "main", &[]).unwrap();
     assert!(
-        st.dirty_trees.iter().any(|w| Path::new(&w.path) == work),
+        st.dirty_trees.iter().any(|w| same_path(Path::new(&w.path), &work)),
         "主工作树的未提交改动应出现在 dirty_trees"
     );
     sh(&work, &["worktree", "remove", "--force", pwt.to_str().unwrap()]);
