@@ -154,7 +154,7 @@ src-tauri/src/core/     与界面无关的同步核心（可单独测试）
 src-tauri/src/commands.rs  Tauri 命令（在后台线程执行，日志以 git-log 事件推送）
 src-tauri/tests/e2e.rs     端到端测试：本地裸仓库模拟 GitLab，完整往返
 src/                    React 界面（全部使用 HeroUI v3 组件）
-  index.css             设计 token（Minimalist Modern）→ HeroUI 变量、组件定制、动效
+  index.css             灰阶浅深色主题、HeroUI 语义变量、桌面面板布局
   ui.tsx                基于 HeroUI 的应用级组合组件：StepCard、PathInput、Notice、PackageRow…
   runner.tsx            串行执行 + Toast 提示 + AlertDialog 确认框
 ```
@@ -162,8 +162,9 @@ src/                    React 界面（全部使用 HeroUI v3 组件）
 ### 界面约定
 
 - 组件统一使用 HeroUI v3（`@heroui/react`，基于 React Aria，需要 Tailwind CSS v4）。页面只使用 `ui.tsx` 里的组合组件或 HeroUI 原生组件，不写一次性样式。
+- 布局参考 [PI-Desktop](https://github.com/vastsa/PI-Desktop)：可收起的配置侧栏、固定顶栏、独立滚动工作区和底部日志面板。侧栏支持按名称或包名前缀搜索配置；流程导航可跳转并聚焦到对应步骤。
 - 颜色、圆角、阴影等设计 token 只在 `src/index.css` 的 `:root` 中定义，并映射为 HeroUI 语义变量（`--accent`、`--surface`、`--border` 等），修改主题只需改这一处。
-- 字体（Inter / Calistoga / JetBrains Mono）通过 `@fontsource` 打包进程序，内网离线也能正常显示。
+- 正文采用系统字体，路径与提交哈希使用随包分发的 JetBrains Mono，无需联网加载字体。在“设置 → 外观 → 主题”中可选择系统、浅色或深色，保存后生效并在下次启动时恢复；默认跟随系统。用背景明度区分面板，主操作使用黑白反色按钮；彩色仅用于成功、警告和错误等状态。
 - 动效只用 CSS 实现，系统开启“减少动态效果”时自动关闭。
 
 ### 应用图标

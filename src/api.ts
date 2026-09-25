@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 // ---------- 与 Rust 端对应的类型 ----------
 
 export type Role = "internal" | "external";
+export type Theme = "system" | "light" | "dark";
 
 export interface Profile {
   id: string;
@@ -28,6 +29,8 @@ export interface Profile {
 }
 
 export interface AppConfig {
+  /** Missing in older configs; defaults to following the system. */
+  theme?: Theme;
   gitPath?: string;
   profiles: Profile[];
   lastProfileId?: string;

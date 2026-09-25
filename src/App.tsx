@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Card, ListBox, Spinner, Toast } from "@heroui/react";
+import { Button, Card, Input, Label, ListBox, Select, Spinner, Toast } from "@heroui/react";
 import type { Selection } from "@heroui/react";
-import { api, AppConfig, Environment, newId, Profile, Role } from "./api";
+import { api, AppConfig, Environment, newId, Profile, Role, Theme } from "./api";
 import { ExternalView } from "./ExternalView";
 import { InternalView } from "./InternalView";
 import { LogPanel, useGitLog } from "./LogPanel";
 import { blankProfile, ProfileEditor } from "./ProfileEditor";
+import { Icon } from "./icons";
 import { OperationStatus, RunnerProvider, useRunner } from "./runner";
 import { AppGlyph, Code, FormSection, Notice, PathInput, SectionLabel, TextInput } from "./ui";
+import { useTheme } from "./theme";
 import "./index.css";
 
 /**
@@ -19,7 +21,7 @@ const IS_MAC = navigator.userAgent.includes("Mac");
 /** 标题栏拖动条：只在 macOS 显示，双击最大化 */
 function TitleBarDrag({ className = "" }: { className?: string }) {
   if (!IS_MAC) return null;
-  return <div data-tauri-drag-region className={"h-10 shrink-0 select-none " + className} />;
+  return <div data-tauri-drag-region className={"titlebar-drag " + className} />;
 }
 
 type Mode = { kind: "view" } | { kind: "edit"; profile: Profile; isNew: boolean } | { kind: "settings" };
@@ -27,10 +29,13 @@ type Mode = { kind: "view" } | { kind: "edit"; profile: Profile; isNew: boolean 
 function Shell() {
   const { busy, notify, confirm } = useRunner();
   const [config, setConfig] = useState<AppConfig | null>(null);
+  useTheme(config?.theme);
   const [env, setEnv] = useState<Environment | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [mode, setMode] = useState<Mode>({ kind: "view" });
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [profileSearch, setProfileSearch] = useState("");
   const contentRef = useRef<HTMLDivElement>(null);
   const pageKey = mode.kind === "edit" ? mode.profile.id : config?.lastProfileId;
   useEffect(() => {
@@ -124,172 +129,123 @@ function Shell() {
   const gitBits = gitIndicator();
   const recommended: Role = env?.os === "windows" ? "internal" : "external";
   const selectedKeys: Selection = new Set(mode.kind === "view" && current ? [current.id] : []);
+  const query = profileSearch.trim().toLocaleLowerCase();
+  const visibleProfiles = config.profiles.filter((p) => `${p.name} ${p.repoName}`.toLocaleLowerCase().includes(query));
+  let workspaceTitle = current?.name ?? "同步工作区";
+  if (mode.kind === "settings") workspaceTitle = "设置";
+  if (mode.kind === "edit") workspaceTitle = mode.isNew ? "新建同步配置" : "编辑同步配置";
 
   return (
-    <div className="app-shell grid h-full grid-cols-[248px_1fr]">
+    <div className="app-shell" data-sidebar-open={sidebarOpen} data-platform={IS_MAC ? "mac" : "other"}>
       <a href="#main-content" className="skip-link">跳到主要内容</a>
-      {/* ---------- 侧栏：白色表面 + 右侧细边框，左上角一抹淡蓝光晕 ---------- */}
-      <aside className="relative flex min-h-0 flex-col overflow-hidden border-r border-border bg-surface">
-        <div className="pointer-events-none absolute -top-28 -left-28 size-64 rounded-full bg-accent/[0.06] blur-[80px]" />
-        <TitleBarDrag className="relative" />
-        <div className={"app-brand relative flex items-center gap-3 px-5 pb-5 " + (IS_MAC ? "pt-1" : "pt-6")}>
-          <span className="bg-gradient-accent grid size-9 place-items-center rounded-xl text-white shadow-accent">
-            <AppGlyph className="size-5" />
-          </span>
-          <div className="min-w-0">
-            <div className="flex items-baseline gap-1.5">
-              <span className="text-sm font-semibold whitespace-nowrap leading-none">Git 离线同步</span>
-              {env && <span className="font-mono text-[11px] leading-none text-muted">v{env.version}</span>}
-            </div>
-            <div className="mt-1 font-mono text-[10px] tracking-[0.15em] text-muted uppercase">mirror · bundle</div>
+      <aside id="app-sidebar" className="app-sidebar" aria-label="工作区导航" hidden={!sidebarOpen}>
+        <TitleBarDrag />
+        <div className="app-brand">
+          <span className="brand-mark"><AppGlyph className="size-5" /></span>
+          <span className="font-semibold">Git 离线同步</span>
+        </div>
+        <div className="sidebar-tools">
+          <Button fullWidth variant="ghost" className="new-profile-button" onPress={() => startNew(recommended)} isDisabled={!!busy || mode.kind === "edit"}>
+            <Icon name="plus" />新建配置
+          </Button>
+          <div className="profile-search">
+            <Icon name="search" />
+            <Input aria-label="搜索同步配置" placeholder="搜索配置…" value={profileSearch} onChange={(event) => setProfileSearch(event.target.value)} />
           </div>
         </div>
-
-        <div className="app-profiles-title relative px-5 pb-2">
-          <SectionLabel>Profiles</SectionLabel>
-        </div>
-        <div className="app-profile-list relative min-h-0 flex-1 overflow-y-auto px-3">
-          {config.profiles.length === 0 ? (
-            <p className="px-2 py-2 text-sm text-muted">还没有配置</p>
+        <div className="app-profiles-title"><span>同步配置</span><span>{config.profiles.length}</span></div>
+        <div className="app-profile-list">
+          {visibleProfiles.length === 0 ? (
+            <p className="sidebar-empty" role="status">{config.profiles.length ? "没有匹配的配置" : "还没有配置，点击上方新建。"}</p>
           ) : (
             <ListBox
               aria-label="同步配置"
               disabledKeys={busy || mode.kind === "edit" ? config.profiles.map((p) => p.id) : []}
               selectionMode="single"
+              disallowEmptySelection
               selectedKeys={selectedKeys}
               onSelectionChange={(keys) => {
                 const id = keys === "all" ? undefined : [...keys][0];
                 if (id) select(String(id));
               }}
-              className="gap-1 bg-transparent p-0"
+              className="profile-listbox"
             >
-              {config.profiles.map((p) => (
-                <ListBox.Item
-                  key={p.id}
-                  id={p.id}
-                  textValue={p.name}
-                  className="rounded-lg px-3 py-2 text-foreground/80 data-[hovered=true]:bg-default data-[selected=true]:bg-accent/[0.08] data-[selected=true]:font-medium data-[selected=true]:text-accent"
-                >
-                  <span className={"size-2 shrink-0 rounded-full " + (p.role === "internal" ? "bg-[#fbbf24]" : "bg-accent-secondary")} />
-                  <span className="flex-1 truncate">{p.name}</span>
-                  <span className="font-mono text-[10px] tracking-wider text-muted uppercase">
-                    {p.role === "internal" ? "内网" : "外网"}
-                  </span>
+              {visibleProfiles.map((p) => (
+                <ListBox.Item key={p.id} id={p.id} textValue={p.name} className="profile-item">
+                  <Icon name="folder" />
+                  <span className="flex-1 truncate" title={p.name}>{p.name}</span>
+                  <span className="profile-role">{p.role === "internal" ? "内网" : "外网"}</span>
                 </ListBox.Item>
               ))}
             </ListBox>
           )}
         </div>
-
-        <div className="app-sidebar-actions relative space-y-2 border-t border-border p-3">
-          <Button fullWidth variant="outline" onPress={() => startNew(recommended)} isDisabled={!!busy || mode.kind === "edit"}>
-            ＋ 新建配置
-          </Button>
-          <Button
-            fullWidth
-            variant="ghost"
-            className="justify-start gap-2 text-xs text-muted hover:text-foreground"
-            isDisabled={!!busy || mode.kind === "edit"}
-            aria-label="打开设置"
-            onPress={() => setMode({ kind: "settings" })}
-          >
-            <span className={"size-1.5 rounded-full " + gitBits.dot} />
-            <span className="flex-1 truncate text-left font-mono">{gitBits.text}</span>
-            <span>设置</span>
+        <div className="app-sidebar-footer">
+          <div className="sidebar-environment">
+            <span className={"status-dot " + gitBits.dot} />
+            <span className="truncate">{gitBits.text}</span>
+            {env && <span className="ml-auto">v{env.version}</span>}
+          </div>
+          <Button fullWidth variant="ghost" className="settings-button" isDisabled={!!busy || mode.kind === "edit"}
+            aria-label="打开设置" aria-pressed={mode.kind === "settings"} onPress={() => setMode({ kind: "settings" })}>
+            <Icon name="settings" /><span>设置</span>
           </Button>
         </div>
       </aside>
 
-      {/* ---------- 主区域 ---------- */}
-      <main id="main-content" tabIndex={-1} className="flex min-h-0 min-w-0 flex-col">
+      <main id="main-content" tabIndex={-1} className="app-main">
+        <header className="workspace-toolbar" data-tauri-drag-region>
+          <Button isIconOnly size="sm" variant="ghost" className="sidebar-toggle" aria-label={sidebarOpen ? "收起侧栏" : "展开侧栏"}
+            aria-expanded={sidebarOpen} aria-controls="app-sidebar" onPress={() => setSidebarOpen(!sidebarOpen)}>
+            <Icon name="panel" />
+          </Button>
+          <div className="workspace-title" data-tauri-drag-region>
+            <span className="truncate" title={workspaceTitle} data-tauri-drag-region>{workspaceTitle}</span>
+            {mode.kind === "view" && current && <span className="role-badge">{current.role === "internal" ? "内网端" : "外网端"}</span>}
+          </div>
+          {mode.kind === "view" && current && <Button size="sm" variant="ghost" isDisabled={!!busy}
+            onPress={() => setMode({ kind: "edit", profile: current, isNew: false })}>
+            <Icon name="settings" />编辑配置
+          </Button>}
+        </header>
         <OperationStatus />
-        <TitleBarDrag />
-        <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto">
-          <div className={"workspace-content mx-auto w-full max-w-[1440px] px-4 lg:px-6 pb-8 " + (IS_MAC ? "pt-2" : "pt-8")}>
+        <div ref={contentRef} className="workspace-scroll">
+          <div className="workspace-content">
             {env && !gitOk && (
-              <div className="mb-6">
+              <div className="mb-5">
                 <Notice tone="danger" title="找不到可用的 git">
                   {"Err" in env.git ? env.git.Err : ""}。请安装 Git，或在设置中指定 git 可执行文件路径。
                 </Notice>
               </div>
             )}
-
-            {mode.kind === "edit" && (
-              <ProfileEditor
-                key={mode.profile.id}
-                initial={mode.profile}
-                isNew={mode.isNew}
-                onSave={saveProfile}
-                onCancel={() => setMode({ kind: "view" })}
-                onDelete={mode.isNew ? undefined : () => deleteProfile(mode.profile)}
-              />
-            )}
-
-            {mode.kind === "settings" && (
-              <Settings
-                config={config}
-                env={env}
-                onSave={async (c) => {
-                  if (!await persist(c)) return false;
-                  setEnv(await api.environment().catch(() => null));
-                  setMode({ kind: "view" });
-                  return true;
-                }}
-                onCancel={() => setMode({ kind: "view" })}
-              />
-            )}
-
-            {mode.kind === "view" &&
-              (current ? (
-                <>
-                  <header className="page-header mb-5 flex flex-wrap items-start justify-between gap-4">
-                    <div className="min-w-0 flex-1 space-y-2">
-                      <SectionLabel>{current.role === "internal" ? "Intranet side" : "Internet side"}</SectionLabel>
-                      <h1 className="font-display text-2xl leading-tight font-semibold tracking-[-0.02em]">
-                        {current.name}
-                        <span className="text-gradient"> · {current.role === "internal" ? "内网端" : "外网端"}</span>
-                      </h1>
-                      <p className="flex min-w-0 flex-wrap items-center gap-2 text-sm text-muted">
-                        <span className="shrink-0">主线</span>
-                        <Code className="shrink-0">{current.baseBranch}</Code>
-                        {(current.releaseBranches?.length ?? 0) > 0 && (
-                          <span className="shrink-0" title={current.releaseBranches?.join("\n")}>
-                            · 发布分支 {current.releaseBranches?.length} 个
-                          </span>
-                        )}
-                        <span className="ml-2 shrink-0">传输目录</span>
-                        <span className="min-w-0 truncate font-mono text-[12px] text-foreground" title={current.transferDir}>
-                          {current.transferDir}
-                        </span>
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-3">
-                      {busy && (
-                        <span className="inline-flex items-center gap-2 text-sm text-accent">
-                          <Spinner size="sm" /> {busy}…
-                        </span>
-                      )}
-                      <Button
-                        variant="outline"
-                        onPress={() => setMode({ kind: "edit", profile: current, isNew: false })}
-                        isDisabled={!!busy}
-                      >
-                        编辑配置
-                      </Button>
-                    </div>
-                  </header>
-                  {current.role === "internal" ? (
-                    <InternalView key={current.id} profile={current} />
-                  ) : (
-                    <ExternalView key={current.id} profile={current} />
-                  )}
-                </>
-              ) : (
-                <Welcome onNew={startNew} recommended={recommended} />
-              ))}
+            {mode.kind === "edit" && <ProfileEditor key={mode.profile.id} initial={mode.profile} isNew={mode.isNew}
+              onSave={saveProfile} onCancel={() => setMode({ kind: "view" })}
+              onDelete={mode.isNew ? undefined : () => deleteProfile(mode.profile)} />}
+            {mode.kind === "settings" && <Settings config={config} env={env}
+              onSave={async (c) => {
+                if (!await persist(c)) return false;
+                setEnv(await api.environment().catch(() => null));
+                setMode({ kind: "view" });
+                return true;
+              }} onCancel={() => setMode({ kind: "view" })} />}
+            {mode.kind === "view" && (current ? (
+              <>
+                <section className="workspace-summary" aria-label="当前同步配置">
+                  <div className="workspace-heading">
+                    <h1>同步工作区</h1>
+                    <p>{current.role === "internal" ? "管理镜像、导出内网包，并接收外网回传。" : "导入内网包，在开发仓库中工作，再将提交带回内网。"}</p>
+                  </div>
+                  <div className="workspace-metadata">
+                    <span className="branch-meta"><Icon name="branch" /><span className="sr-only">主线分支</span><Code>{current.baseBranch}</Code></span>
+                    {(current.releaseBranches?.length ?? 0) > 0 && <span title={current.releaseBranches?.join("\n")}>发布分支 {current.releaseBranches?.length} 个</span>}
+                    <span className="transfer-meta"><Icon name="folder" /><span className="sr-only">传输目录</span><span title={current.transferDir}>{current.transferDir}</span></span>
+                  </div>
+                </section>
+                {current.role === "internal" ? <InternalView key={current.id} profile={current} /> : <ExternalView key={current.id} profile={current} />}
+              </>
+            ) : <Welcome onNew={startNew} recommended={recommended} />)}
           </div>
         </div>
-
         <LogPanel lines={log.lines} clear={log.clear} open={logOpen} setOpen={setLogOpen} />
       </main>
     </div>
@@ -306,36 +262,37 @@ function Welcome({ onNew, recommended }: { onNew: (r: Role) => void; recommended
   ];
   return (
     <div className="welcome-layout">
-      <section className="min-w-0 space-y-6">
-        <SectionLabel>Offline git sync</SectionLabel>
-        <h1 className="text-3xl leading-tight font-semibold tracking-tight">让内网与外网的<br /><span className="text-accent">Git 开发保持同步</span></h1>
-        <p className="max-w-lg text-base leading-relaxed text-muted">通过 U 盘交换 Git 提交，在外网开发，在内网整理并推送。先为当前电脑创建一个同步配置。</p>
-        <div className="grid gap-3">
+      <section className="welcome-intro">
+        <span className="welcome-mark"><AppGlyph className="size-8" /></span>
+        <h1>从一个同步配置开始</h1>
+        <p>用 U 盘连接内网与外网的 Git 工作流。<br />选择当前电脑的角色，配置仓库和传输目录。</p>
+        <div className="welcome-roles">
           {(["internal", "external"] as Role[]).map((role) => (
-            <div key={role} className="rounded-xl border border-border bg-surface p-4">
-              <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-                <h2 className="font-semibold">{role === "internal" ? "内网端" : "外网端"}</h2>
-                {recommended === role && <span className="text-xs text-accent">适合当前系统</span>}
+            <div key={role} className="welcome-role">
+              <Icon name={role === "internal" ? "monitor" : "globe"} />
+              <div className="welcome-role-heading">
+                <h2>{role === "internal" ? "内网端" : "外网端"}</h2>
+                {recommended === role && <span className="role-badge">当前系统推荐</span>}
               </div>
-              <p className="mb-4 text-sm text-muted">{role === "internal" ? "可访问 GitLab，负责导出、接收回传和推送。" : "使用 AI 等开发工具，导入内网包并回传提交。"}</p>
-              <Button fullWidth variant={recommended === role ? "primary" : "outline"} onPress={() => onNew(role)}>
+              <p>{role === "internal" ? "连接 GitLab，导出内网包，接收回传并推送。" : "导入同步包，在开发仓库中提交，再回传到内网。"}</p>
+              <Button fullWidth variant={recommended === role ? "primary" : "secondary"} onPress={() => onNew(role)}>
                 新建{role === "internal" ? "内网端" : "外网端"}配置
               </Button>
             </div>
           ))}
         </div>
       </section>
-      <aside className="rounded-2xl border border-border bg-surface p-6">
-        <h2 className="mb-6 text-lg font-semibold">一次完整的同步</h2>
-        <ol className="space-y-6">
+      <section className="welcome-guide" aria-label="同步流程说明">
+        <h2>一次完整的同步</h2>
+        <ol>
           {steps.map(([title, description], i) => (
-            <li key={title} className="flex gap-4">
-              <span className="step-number shrink-0">{i + 1}</span>
-              <div className="min-w-0 space-y-1"><h3 className="font-medium">{title}</h3><p className="text-sm leading-relaxed text-muted">{description}</p></div>
+            <li key={title}>
+              <span className="step-number" aria-hidden="true">{i + 1}</span>
+              <div><h3>{title}</h3><p>{description}</p></div>
             </li>
           ))}
         </ol>
-      </aside>
+      </section>
     </div>
   );
 }
@@ -352,24 +309,46 @@ function Settings({
   onCancel: () => void;
 }) {
   const [gitPath, setGitPath] = useState(config.gitPath ?? "");
+  const [theme, setTheme] = useState<Theme>(config.theme ?? "system");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   async function save() {
     setSaving(true);
     setError("");
     try {
-      if (await onSave({ ...config, gitPath: gitPath.trim() || undefined }) === false) setError("保存失败，请检查错误提示后重试。");
+      if (await onSave({ ...config, theme, gitPath: gitPath.trim() || undefined }) === false) setError("保存失败，请检查错误提示后重试。");
     } catch (e) { setError(String(e)); }
     finally { setSaving(false); }
   }
   return (
-    <Card className="form-page animate-enter gap-0 p-0">
-      <Card.Header className="space-y-3 px-8 pt-8 pb-6">
-        <SectionLabel>Settings</SectionLabel>
-        <Card.Title className="font-display text-3xl font-normal">设置</Card.Title>
+    <Card className="form-page gap-0 p-0">
+      <Card.Header className="form-page-header">
+        <SectionLabel>应用偏好</SectionLabel>
+        <Card.Title className="text-xl font-semibold">设置</Card.Title>
       </Card.Header>
       <Card.Content className="flex flex-col gap-5 px-8 pb-8">
         {error && <p role="alert" className="text-danger">{error}</p>}
+        <FormSection title="外观" description="选择应用主题，保存后生效。系统模式会自动跟随系统的浅色或深色设置。">
+          <Select value={theme} onChange={(value) => {
+            if (value === "system" || value === "light" || value === "dark") setTheme(value);
+          }} isDisabled={saving} className="theme-select">
+            <Label>主题</Label>
+            <Select.Trigger aria-label="主题" className="theme-select-trigger">
+              <Select.Value />
+              <Select.Indicator />
+            </Select.Trigger>
+            <Select.Popover>
+              <ListBox>
+                {([{ value: "system", label: "系统" }, { value: "light", label: "浅色" }, { value: "dark", label: "深色" }] as const).map((option) => (
+                  <ListBox.Item key={option.value} id={option.value} textValue={option.label}>
+                    {option.label}
+                    <ListBox.ItemIndicator />
+                  </ListBox.Item>
+                ))}
+              </ListBox>
+            </Select.Popover>
+          </Select>
+        </FormSection>
         <FormSection title="Git 环境" description="默认自动检测 Git。只有自动检测失败或需要指定版本时，才填写可执行文件路径。">
         <PathInput
           label="git 可执行文件"

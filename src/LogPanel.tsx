@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Button, Chip, ScrollShadow } from "@heroui/react";
 import { LOG_EVENT, LogEvent, LogKind } from "./api";
+import { Icon } from "./icons";
 
 const MAX_LINES = 2000;
 
@@ -34,7 +35,7 @@ function time(ts: number) {
   return new Date(ts).toTimeString().slice(0, 8);
 }
 
-/** 命令日志：浅色次级表面，与主界面一致 */
+/** 可收起的命令面板，使用独立的日志滚动区域。 */
 export function LogPanel({
   lines,
   clear,
@@ -56,29 +57,19 @@ export function LogPanel({
   }, [lines, open, following]);
 
   return (
-    <section
-      aria-label="命令日志"
-      className={
-        "relative flex shrink-0 flex-col overflow-hidden border-t border-border bg-default/60 " +
-        // 展开高度随窗口调整，始终为主要工作区保留空间。
-        (open ? "h-[clamp(150px,26vh,260px)]" : "h-[45px]")
-      }
-    >
-      <div className="flex h-11 shrink-0 items-center gap-3 px-4">
+    <section aria-label="命令日志" className="log-panel" data-open={open}>
+      <div className="log-toolbar">
         <Button
           size="sm"
           variant="ghost"
-          className="text-muted hover:text-foreground"
+          className="log-toggle"
           onPress={() => setOpen(!open)}
           aria-expanded={open}
           aria-controls="git-log-output"
         >
-          <span className={"inline-block transition-transform duration-200 " + (open ? "rotate-90" : "")}>›</span>
-          <span className="font-mono text-[11px] tracking-[0.15em] text-accent uppercase">命令日志</span>
+          <Icon name="terminal" /><span>命令日志</span><Icon name="chevron" className="log-chevron" />
         </Button>
-        <Chip size="sm" variant="secondary" className="font-mono">
-          {lines.length}
-        </Chip>
+        <span className="log-count" aria-label={`${lines.length} 条日志`}>{lines.length}</span>
         {errors > 0 && (
           <Chip size="sm" variant="soft" color="danger">
             {errors} 个错误
@@ -98,7 +89,7 @@ export function LogPanel({
         <ScrollShadow id="git-log-output" aria-label="命令输出" tabIndex={0} ref={bodyRef} onScroll={(event) => {
           const el = event.currentTarget;
           if (el.scrollHeight - el.scrollTop - el.clientHeight > 24) setFollowing(false);
-        }} hideScrollBar={false} className="flex-1 px-5 pb-3 font-mono text-[12px] leading-relaxed">
+        }} hideScrollBar={false} className="log-output flex-1 px-5 pb-3 font-mono text-[12px] leading-relaxed">
           {lines.length === 0 && <p className="py-2 text-muted">执行操作后，这里会显示每条 git 命令及其输出。</p>}
           {lines.map((l, i) => (
             <div key={i} className="flex gap-3 break-all whitespace-pre-wrap">

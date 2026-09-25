@@ -57,7 +57,7 @@ function DevRepoRow({
     <div
       className={
         "flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl px-4 py-3 transition-shadow " +
-        (current && cloned ? "gradient-border shadow-accent" : "border border-border bg-surface")
+        (current && cloned ? "selected-surface" : "border border-border bg-surface")
       }
     >
       <div className="min-w-0 flex-1">

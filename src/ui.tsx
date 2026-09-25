@@ -63,41 +63,25 @@ export function RefreshButton({ onPress }: { onPress: () => unknown }) {
 
 export function WorkflowNav({ steps }: { steps: string[] }) {
   return (
-    <nav aria-label="同步流程" className="workflow-nav grid grid-cols-2 gap-1 rounded-xl border border-border bg-surface p-2">
+    <nav aria-label="同步流程" className="workflow-nav">
       {steps.map((title, i) => (
-        <a key={title} href={`#step-${i + 1}`} className="rounded-lg px-3 py-2 text-sm text-muted hover:bg-default hover:text-foreground"
+        <a key={title} href={`#step-${i + 1}`}
           onClick={(event) => {
             event.preventDefault();
             const target = document.getElementById(`step-${i + 1}`);
             target?.scrollIntoView({ block: "start" });
             target?.focus({ preventScroll: true });
           }}>
-          <span className="mr-2 font-mono text-accent">{i + 1}</span>{title}
+          <span className="workflow-nav-number">{i + 1}</span>{title}
         </a>
       ))}
     </nav>
   );
 }
 
-// ---------------------------------------------------------------------------
-// 区块标签：圆角胶囊 + 圆点 + 等宽大写文字（设计系统的 Section Label）
-// ---------------------------------------------------------------------------
-
-export function SectionLabel({
-  children,
-  pulse,
-}: {
-  children: ReactNode;
-  pulse?: boolean;
-}) {
-  return (
-    <span className="inline-flex w-fit items-center gap-2 self-start rounded-full border border-accent/30 bg-accent/5 px-3 py-1">
-      <span className={"size-1.5 rounded-full bg-accent " + (pulse ? "animate-pulse-dot" : "")} />
-      <span className="font-mono text-[11px] tracking-[0.15em] text-accent uppercase">
-        {children}
-      </span>
-    </span>
-  );
+/** Quiet section metadata, shared by configuration pages. */
+export function SectionLabel({ children }: { children: ReactNode }) {
+  return <span className="section-label">{children}</span>;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,19 +104,19 @@ export function StepCard({
   children: ReactNode;
 }) {
   return (
-    <Card id={`step-${step}`} tabIndex={-1} aria-label={title} className="workflow-step scroll-mt-4 gap-0 p-0">
-      <Card.Header className="flex flex-row flex-wrap items-start gap-3 px-5 pt-5 pb-4">
+    <Card id={`step-${step}`} tabIndex={-1} aria-label={title} className="workflow-step gap-0 p-0">
+      <Card.Header className="step-header">
         <div className="flex min-w-0 flex-1 gap-3">
-          <span className="step-number" aria-hidden="true">{String(step).padStart(2, "0")}</span>
+          <span className="step-number" aria-hidden="true">{step}</span>
           <div className="min-w-0 space-y-1">
             <span className="sr-only">{label}</span>
-            <Card.Title className="text-base font-semibold">{title}</Card.Title>
-            {description && <Card.Description className="text-sm leading-relaxed text-muted">{description}</Card.Description>}
+            <Card.Title>{title}</Card.Title>
+            {description && <Card.Description className="text-muted">{description}</Card.Description>}
           </div>
         </div>
         {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
       </Card.Header>
-      <Card.Content className="flex min-w-0 flex-col gap-4 px-5 pb-5">{children}</Card.Content>
+      <Card.Content className="step-content">{children}</Card.Content>
     </Card>
   );
 }
@@ -390,7 +374,7 @@ export function Code({ children, className = "" }: { children: ReactNode; classN
   );
 }
 
-/** 传输目录中的一个包。highlight = 下一个应导入的包（渐变描边），dim = 已处理 */
+/** 传输目录中的一个包。highlight = 下一个应导入的包，dim = 已处理。 */
 export function PackageRow({
   kind,
   title,
@@ -410,7 +394,7 @@ export function PackageRow({
     <div
       className={
         "flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl px-4 py-3 transition-shadow " +
-        (highlight ? "gradient-border shadow-accent " : "border border-border bg-surface ") +
+        (highlight ? "selected-surface " : "border border-border bg-surface ") +
         (dim ? "opacity-55" : "")
       }
     >

@@ -91,7 +91,7 @@ export function ProfileEditor({
   }
 
   return (
-    <Card className="form-page animate-enter gap-0 p-0">
+    <Card className="form-page gap-0 p-0">
       <AlertDialog.Backdrop isOpen={discardOpen} onOpenChange={setDiscardOpen}>
         <AlertDialog.Container>
           <AlertDialog.Dialog>
@@ -104,16 +104,10 @@ export function ProfileEditor({
           </AlertDialog.Dialog>
         </AlertDialog.Container>
       </AlertDialog.Backdrop>
-      <Card.Header className="space-y-3 px-8 pt-8 pb-6">
-        <SectionLabel>{isNew ? "New profile" : "Edit profile"}</SectionLabel>
-        <Card.Title className="font-display text-3xl leading-tight font-normal">
-          {isNew ? (
-            <>
-              新建<span className="text-gradient">同步配置</span>
-            </>
-          ) : (
-            initial.name
-          )}
+      <Card.Header className="form-page-header">
+        <SectionLabel>{isNew ? "连接内网与外网" : "同步配置"}</SectionLabel>
+        <Card.Title className="text-xl leading-tight font-semibold">
+          {isNew ? "新建同步配置" : initial.name}
         </Card.Title>
       </Card.Header>
 
@@ -141,10 +135,7 @@ export function ProfileEditor({
             <Radio
               key={r.id}
               value={r.id}
-              className={
-                "rounded-xl border p-4 transition-all duration-200 " +
-                (p.role === r.id ? "gradient-border shadow-accent" : "border-border hover:border-accent/30")
-              }
+              className="role-option"
             >
               <Radio.Content className="items-start gap-3">
                 <Radio.Control className="mt-0.5">
