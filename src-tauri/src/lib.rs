@@ -50,6 +50,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // 记住上次的窗口尺寸、位置与最大化状态
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        // 检查 / 下载 / 安装更新（GitHub Releases 上的 latest.json），安装后重启
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             STARTED.get_or_init(Instant::now);
             // 默认尺寸本身也可能放不下（小屏 + 高缩放）

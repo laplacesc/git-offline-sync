@@ -46,5 +46,16 @@
     },
     "shortDescription": "用 git bundle 在离线内网与外网之间同步仓库"
   },
-  "mainBinaryName": "git-offline-sync"
+  "mainBinaryName": "git-offline-sync",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ2N0M1Qzk5RDlEQkU5RDUKUldUVjZkdlptVng4MWhna0g0cXU2eTJrWTJZQmR4L3ptSlFuaHoyOER0aXdKTWFUUlBKYTRDREcK",
+      "endpoints": [
+        "https://github.com/laplacesc/git-offline-sync/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
 }

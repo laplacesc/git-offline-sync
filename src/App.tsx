@@ -10,6 +10,8 @@ import { Icon } from "./icons";
 import { OperationStatus, RunnerProvider, useRunner } from "./runner";
 import { AppGlyph, Code, FormSection, Notice, PathInput, SectionLabel, TextInput } from "./ui";
 import { useTheme } from "./theme";
+import { UpdatePanel, VersionChip } from "./UpdatePanel";
+import { startAutoCheck } from "./updater";
 import "./index.css";
 
 /**
@@ -33,6 +35,7 @@ function Shell() {
   const [env, setEnv] = useState<Environment | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  useEffect(() => startAutoCheck(), []);
   const [mode, setMode] = useState<Mode>({ kind: "view" });
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [profileSearch, setProfileSearch] = useState("");
@@ -184,7 +187,9 @@ function Shell() {
           <div className="sidebar-environment">
             <span className={"status-dot " + gitBits.dot} />
             <span className="truncate">{gitBits.text}</span>
-            {env && <span className="ml-auto">v{env.version}</span>}
+            <span className="ml-auto" />
+            <VersionChip version={env?.version} isDisabled={!!busy || mode.kind === "edit"}
+              onOpenUpdates={() => setMode({ kind: "settings" })} />
           </div>
           <Button fullWidth variant="ghost" className="settings-button" isDisabled={!!busy || mode.kind === "edit"}
             aria-label="打开设置" aria-pressed={mode.kind === "settings"} onPress={() => setMode({ kind: "settings" })}>
@@ -362,6 +367,9 @@ function Settings({
               : "例如 /usr/bin/git 或 /Library/Developer/CommandLineTools/usr/bin/git"
           }
         />
+        </FormSection>
+        <FormSection title="版本更新" description="从 GitHub Releases 检查新版本，下载完成后重启即可更新。内网离线环境无法检查，可在外网下载安装包后拷贝安装。">
+          <UpdatePanel currentVersion={env?.version} />
         </FormSection>
         <FormSection title="诊断信息" description="检查 Git 状态、配置位置和应用版本。这些信息由应用自动读取。">
         <div className="space-y-5">

@@ -285,3 +285,15 @@
 .theme-select { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 16px; width: 100%; }
 .theme-select-trigger { width: 160px; max-width: 65%; flex-shrink: 0; background: var(--surface-secondary); box-shadow: none; }
 .theme-select-trigger[data-hovered="true"] { background: var(--default); }
+
+/* ---------- 版本更新 ---------- */
+.version-chip { display: inline-flex; align-items: center; gap: 5px; border-radius: 6px; padding: 2px 6px; color: inherit; font: inherit; white-space: nowrap; cursor: pointer; }
+.version-chip:hover:not(:disabled) { background: var(--hover); color: var(--foreground); }
+.version-chip:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.version-chip.has-update { color: var(--foreground); font-weight: 500; }
+.version-chip:disabled { cursor: default; opacity: .6; }
+.update-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--success); }
+.update-panel { display: flex; flex-direction: column; gap: 14px; }
+.update-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; }
+.update-notes summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.update-notes pre { max-height: 220px; overflow: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
