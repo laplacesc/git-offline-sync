@@ -92,8 +92,8 @@ jobs:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
       - run: pnpm check:version
-      # Arguments after -- are forwarded to cargo by the Tauri CLI.
-      - run: pnpm tauri build --ci --config src-tauri/tauri.release.conf.json ${{ matrix.args }} -- --locked
+      # exec preserves the -- separator so Tauri forwards --locked to Cargo on Windows too.
+      - run: pnpm exec tauri build --ci --config src-tauri/tauri.release.conf.json ${{ matrix.args }} -- --locked
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
