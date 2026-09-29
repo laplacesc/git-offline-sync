@@ -63,9 +63,10 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 /// 锁放在仓库的同级目录，避免首次 clone 时目标被锁文件变成非空。
-/// 锁文件保留，锁由操作系统随句柄/进程退出释放，不能删除后重建绕过活跃锁。
+/// 锁文件保留，正常 drop 时显式解锁，异常退出时由操作系统释放。
+/// 不能删除后重建锁文件，否则会绕过活跃锁。
 pub struct OperationLock {
-    _file: File,
+    file: File,
 }
 
 impl OperationLock {
@@ -106,7 +107,15 @@ impl OperationLock {
                 directory.display()
             ))
         })?;
-        Ok(Self { _file: file })
+        Ok(Self { file })
+    }
+}
+
+impl Drop for OperationLock {
+    fn drop(&mut self) {
+        // A forked child may still hold this open file description until exec.
+        // Closing only our handle would leave the lock held during that window.
+        let _ = self.file.unlock();
     }
 }
 
@@ -146,6 +155,74 @@ mod tests {
         assert!(OperationLock::acquire(&repo).is_err());
         drop(lock);
         assert!(OperationLock::acquire(&repo).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_releases_on_drop_while_child_is_before_exec() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::{net::UnixStream, process::CommandExt};
+        use std::process::Command;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let lock = OperationLock::acquire(&repo).unwrap();
+        let lock_fd = lock.file.as_raw_fd();
+        let (mut parent, child) = UnixStream::pair().unwrap();
+        // Bound both sides of the handshake even if setup or an assertion fails.
+        parent
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        child
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        std::thread::scope(|scope| {
+            let spawned = scope.spawn(move || {
+                let mut command = Command::new("/bin/sh");
+                command.args(["-c", "exit 0"]);
+                // SAFETY: after fork the callback uses only async-signal-safe
+                // syscalls and stack data, never allocation or Rust locks.
+                unsafe {
+                    command.pre_exec(move || {
+                        // CLOEXEC does not close the inherited lock until exec.
+                        let flags = libc::fcntl(lock_fd, libc::F_GETFD);
+                        if flags < 0 || flags & libc::FD_CLOEXEC == 0 {
+                            return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+                        }
+                        let fd = child.as_raw_fd();
+                        let mut byte = 1_u8;
+                        if libc::write(fd, (&byte as *const u8).cast(), 1) != 1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if libc::read(fd, (&mut byte as *mut u8).cast(), 1) != 1 {
+                            return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                        }
+                        Ok(())
+                    });
+                }
+                command.spawn().unwrap().wait().unwrap()
+            });
+
+            let mut ready = [0];
+            parent.read_exact(&mut ready).unwrap();
+            assert_eq!(ready, [1]);
+            assert!(OperationLock::acquire(&repo).is_err());
+            drop(lock);
+            // Capture the result while the child still holds the inherited fd.
+            // Release/reap it before asserting, including on the failing path.
+            let reacquired = OperationLock::acquire(&repo);
+            parent.write_all(&[1]).unwrap();
+            assert!(spawned.join().unwrap().success());
+            let reacquired = reacquired.unwrap_or_else(|e| {
+                panic!("drop must release the lock before the child execs: {e}")
+            });
+            assert!(OperationLock::acquire(&repo).is_err());
+            drop(reacquired);
+            assert!(OperationLock::acquire(&repo).is_ok());
+        });
     }
 
     #[test]
