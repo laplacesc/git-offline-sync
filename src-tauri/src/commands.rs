@@ -9,20 +9,44 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::core::error::SyncError;
-use crate::core::git::{Git, LogEvent, LogKind};
+use crate::core::git::{redact, Git, LogEvent, LogKind, OperationGuard, OperationRegistry};
 use crate::core::repo::{CommitInfo, RepoStatus, Worktree};
-use crate::core::sync::{self, ExportOutcome, ImportBackResult, ImportInResult, OpOutcome, PackageInfo};
+use crate::core::sync::{
+    self, ExportOutcome, ImportBackResult, ImportInResult, OpOutcome, PackageInfo,
+};
 
 pub const LOG_EVENT: &str = "git-log";
 
 #[derive(Default)]
 pub struct AppState {
     pub git_path: Mutex<Option<String>>,
+    pub operations: OperationRegistry,
 }
 
 type CmdResult<T> = Result<T, String>;
 
 async fn blocking<T, F>(app: AppHandle, f: F) -> CmdResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&Git) -> Result<T, SyncError> + Send + 'static,
+{
+    execute(app, None, f).await
+}
+
+async fn mutating<T, F>(app: AppHandle, f: F) -> CmdResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&Git) -> Result<T, SyncError> + Send + 'static,
+{
+    let guard = app
+        .state::<AppState>()
+        .operations
+        .start()
+        .map_err(|e| e.to_string())?;
+    execute(app, Some(guard), f).await
+}
+
+async fn execute<T, F>(app: AppHandle, operation: Option<OperationGuard>, f: F) -> CmdResult<T>
 where
     T: Send + 'static,
     F: FnOnce(&Git) -> Result<T, SyncError> + Send + 'static,
@@ -38,12 +62,17 @@ where
         let logger = move |e: LogEvent| {
             let _ = emitter.emit(LOG_EVENT, e);
         };
-        let git = Git::new(git_path.as_deref(), &logger);
+        let mut git = Git::new(git_path.as_deref(), &logger);
+        if let Some(guard) = &operation {
+            git = git.with_control(guard.control.clone());
+        }
         let res = f(&git);
         if let Err(e) = &res {
             git.emit(LogKind::Error, e.to_string());
         }
-        res.map_err(|e| e.to_string())
+        let result = res.map_err(|e| redact(&e.to_string()));
+        drop(operation);
+        result
     })
     .await
     .map_err(|e| format!("后台任务失败：{e}"))?
@@ -76,8 +105,7 @@ fn apply_git_path(app: &AppHandle, cfg: &serde_json::Value) {
 pub fn load_config(app: AppHandle) -> CmdResult<serde_json::Value> {
     let path = config_path(&app)?;
     let cfg = if path.exists() {
-        let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&text).map_err(|e| format!("配置文件损坏：{e}"))?
+        crate::core::storage::read_json(&path).map_err(|e| e.to_string())?
     } else {
         serde_json::json!({ "profiles": [] })
     };
@@ -88,8 +116,7 @@ pub fn load_config(app: AppHandle) -> CmdResult<serde_json::Value> {
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: serde_json::Value) -> CmdResult<()> {
     let path = config_path(&app)?;
-    let text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    fs::write(path, text).map_err(|e| e.to_string())?;
+    crate::core::storage::write_json(&path, &config).map_err(|e| e.to_string())?;
     apply_git_path(&app, &config);
     Ok(())
 }
@@ -131,9 +158,43 @@ pub async fn repo_status(
     .await
 }
 
+#[tauri::command]
+pub fn active_operation(app: AppHandle) -> Option<u64> {
+    app.state::<AppState>().operations.active_id()
+}
+
+/// 取消变更操作，不终止后台只读查询；原操作完成前仍占用执行槽。
+#[tauri::command]
+pub fn cancel_operation(app: AppHandle, id: u64) -> bool {
+    app.state::<AppState>().operations.cancel(id)
+}
+
+/// 仓库选择列表只需要一次 rev-parse，不扫描分支与工作树。
+#[tauri::command]
+pub async fn probe_repo(app: AppHandle, path: String) -> CmdResult<bool> {
+    blocking(app, move |g| {
+        let path = p(path);
+        if !path.exists() {
+            return Ok(false);
+        }
+        Ok(g.exec(
+            Some(&path),
+            &crate::args!["rev-parse", "--is-bare-repository"],
+            None,
+            false,
+        )?
+        .ok())
+    })
+    .await
+}
+
 /// 读取同步状态。两端都存在镜像目录里：`<mirror>/offline-sync/state.json`。
 #[tauri::command]
-pub async fn sync_state(app: AppHandle, path: String, external: bool) -> CmdResult<serde_json::Value> {
+pub async fn sync_state(
+    app: AppHandle,
+    path: String,
+    external: bool,
+) -> CmdResult<serde_json::Value> {
     use crate::core::repo::{self, InternalState, MirrorState};
     blocking(app, move |_| {
         let path = p(path);
@@ -155,18 +216,23 @@ pub async fn list_packages(app: AppHandle, dir: String) -> CmdResult<Vec<Package
 }
 
 #[tauri::command]
-pub async fn list_commits(app: AppHandle, repo: String, from: String, to: String) -> CmdResult<Vec<CommitInfo>> {
+pub async fn list_commits(
+    app: AppHandle,
+    repo: String,
+    from: String,
+    to: String,
+) -> CmdResult<Vec<CommitInfo>> {
     blocking(app, move |g| sync::list_commits(g, &p(repo), &from, &to)).await
 }
 
 #[tauri::command]
 pub async fn abort_op(app: AppHandle, repo: String) -> CmdResult<OpOutcome> {
-    blocking(app, move |g| sync::abort(g, &p(repo))).await
+    mutating(app, move |g| sync::abort(g, &p(repo))).await
 }
 
 #[tauri::command]
 pub async fn continue_op(app: AppHandle, repo: String) -> CmdResult<OpOutcome> {
-    blocking(app, move |g| sync::continue_op(g, &p(repo))).await
+    mutating(app, move |g| sync::continue_op(g, &p(repo))).await
 }
 
 #[tauri::command]
@@ -177,7 +243,7 @@ pub async fn rebase_onto(
     base_branch: String,
     fetch_upstream: bool,
 ) -> CmdResult<OpOutcome> {
-    blocking(app, move |g| {
+    mutating(app, move |g| {
         sync::rebase_onto(g, &p(repo), &branch, &base_branch, fetch_upstream)
     })
     .await
@@ -187,7 +253,7 @@ pub async fn rebase_onto(
 
 #[tauri::command]
 pub async fn init_mirror(app: AppHandle, url: String, mirror_dir: String) -> CmdResult<()> {
-    blocking(app, move |g| sync::init_mirror(g, &url, &p(mirror_dir))).await
+    mutating(app, move |g| sync::init_mirror(g, &url, &p(mirror_dir))).await
 }
 
 #[tauri::command]
@@ -201,7 +267,7 @@ pub async fn export_out(
     fetch_upstream: bool,
     force_full: bool,
 ) -> CmdResult<ExportOutcome> {
-    blocking(app, move |g| {
+    mutating(app, move |g| {
         sync::export_out(
             g,
             &p(mirror_dir),
@@ -223,7 +289,7 @@ pub async fn import_back(
     base_branch: String,
     release_branches: Vec<String>,
 ) -> CmdResult<ImportBackResult> {
-    blocking(app, move |g| {
+    mutating(app, move |g| {
         sync::import_back(g, &p(work_dir), &p(bundle), &base_branch, &release_branches)
     })
     .await
@@ -240,7 +306,7 @@ pub async fn import_patches(
     fetch_upstream: bool,
     worktree_path: Option<String>,
 ) -> CmdResult<OpOutcome> {
-    blocking(app, move |g| {
+    mutating(app, move |g| {
         let wt = worktree_path.filter(|s| !s.trim().is_empty()).map(p);
         sync::import_patches(
             g,
@@ -262,7 +328,10 @@ pub async fn push_branch(
     branch: String,
     force_with_lease: bool,
 ) -> CmdResult<OpOutcome> {
-    blocking(app, move |g| sync::push_branch(g, &p(work_dir), &branch, force_with_lease)).await
+    mutating(app, move |g| {
+        sync::push_branch(g, &p(work_dir), &branch, force_with_lease)
+    })
+    .await
 }
 
 // ---------------- 外网端 ----------------
@@ -274,7 +343,10 @@ pub async fn import_in(
     mirror_dir: String,
     allow_gap: bool,
 ) -> CmdResult<ImportInResult> {
-    blocking(app, move |g| sync::import_in(g, &p(bundle), &p(mirror_dir), allow_gap)).await
+    mutating(app, move |g| {
+        sync::import_in(g, &p(bundle), &p(mirror_dir), allow_gap)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -285,7 +357,7 @@ pub async fn create_dev_repo(
     name: String,
     email: String,
 ) -> CmdResult<()> {
-    blocking(app, move |g| {
+    mutating(app, move |g| {
         sync::create_dev_repo(g, &p(mirror_dir), &p(dev_dir), &name, &email)
     })
     .await
@@ -293,7 +365,10 @@ pub async fn create_dev_repo(
 
 #[tauri::command]
 pub async fn sync_dev_repo(app: AppHandle, dev_dir: String, mirror_dir: String) -> CmdResult<()> {
-    blocking(app, move |g| sync::sync_dev_repo(g, &p(dev_dir), &p(mirror_dir))).await
+    mutating(app, move |g| {
+        sync::sync_dev_repo(g, &p(dev_dir), &p(mirror_dir))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -302,8 +377,16 @@ pub async fn list_worktrees(app: AppHandle, repo: String) -> CmdResult<Vec<Workt
 }
 
 #[tauri::command]
-pub async fn configure_repo(app: AppHandle, repo: String, name: String, email: String) -> CmdResult<()> {
-    blocking(app, move |g| sync::configure_repo(g, &p(repo), &name, &email)).await
+pub async fn configure_repo(
+    app: AppHandle,
+    repo: String,
+    name: String,
+    email: String,
+) -> CmdResult<()> {
+    mutating(app, move |g| {
+        sync::configure_repo(g, &p(repo), &name, &email)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -314,7 +397,7 @@ pub async fn create_branch(
     base_branch: String,
     worktree_path: Option<String>,
 ) -> CmdResult<()> {
-    blocking(app, move |g| {
+    mutating(app, move |g| {
         let wt = worktree_path.filter(|s| !s.trim().is_empty()).map(p);
         sync::create_branch(g, &p(repo), &name, &base_branch, wt.as_deref())
     })
@@ -333,7 +416,7 @@ pub async fn export_back(
     base_branch: String,
     release_branches: Vec<String>,
 ) -> CmdResult<ExportOutcome> {
-    blocking(app, move |g| {
+    mutating(app, move |g| {
         sync::export_back(
             g,
             &p(repo),
@@ -360,7 +443,7 @@ pub async fn export_patches(
     base_branch: String,
     release_branches: Vec<String>,
 ) -> CmdResult<ExportOutcome> {
-    blocking(app, move |g| {
+    mutating(app, move |g| {
         sync::export_patches(
             g,
             &p(repo),
@@ -374,4 +457,3 @@ pub async fn export_patches(
     })
     .await
 }
-

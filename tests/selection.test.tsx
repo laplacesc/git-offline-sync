@@ -13,6 +13,7 @@ vi.mock("../src/runner", () => ({
 }));
 
 beforeEach(() => {
+  vi.spyOn(api, "probeRepo").mockResolvedValue(true);
   vi.stubGlobal("ResizeObserver", class {
     observe() {}
     unobserve() {}

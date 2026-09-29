@@ -3,8 +3,14 @@
   "private": true,
   "version": "2.0.3",
   "type": "module",
+  "packageManager": "pnpm@11.5.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
-    "test": "vitest run --environment jsdom",
+    "test": "pnpm test:release && vitest run --environment jsdom",
+    "test:release": "node --test scripts/release.test-node.mjs",
+    "check:version": "node scripts/check-version.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",

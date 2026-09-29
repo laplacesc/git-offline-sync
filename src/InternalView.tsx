@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Input } from "@heroui/react";
 import {
@@ -18,7 +18,7 @@ import {
   shortSha,
 } from "./api";
 import { useRunner } from "./runner";
-import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus } from "./repoBits";
+import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus, useRequestGeneration } from "./repoBits";
 import {
   ActionButton,
   BaseSelect,
@@ -44,22 +44,35 @@ export function InternalView({ profile }: { profile: Profile }) {
   const mirrorDir = profile.mirrorDir ?? "";
   const workDir = profile.workDir ?? "";
 
-  const mirror = useRepoStatus(mirrorDir, base, releases);
-  const work = useRepoStatus(workDir, base, releases);
-  const [state, setState] = useState<InternalState | null>(null);
-  const [packages, setPackages] = useState<PackageInfo[]>([]);
-  const [packageError, setPackageError] = useState<string | null>(null);
+  const mirror = useRepoStatus(mirrorDir, base, releases, false);
+  const work = useRepoStatus(workDir, base, releases, false);
+  const refreshKey = JSON.stringify([profile.id, mirrorDir, workDir, base, releases, profile.transferDir]);
+  const beginRefresh = useRequestGeneration(refreshKey);
+  const [snapshot, setSnapshot] = useState<{
+    key: string; state: InternalState | null; packages: PackageInfo[]; packageError: string | null;
+  } | null>(null);
+  const current = snapshot?.key === refreshKey ? snapshot : null;
+  const state = current?.state ?? null;
+  const packages = current?.packages ?? [];
+  const packageError = current?.packageError ?? null;
 
   const reloadAll = useCallback(async () => {
-    await Promise.all([mirror.reload(), work.reload()]);
-    setState(await api.internalState(mirrorDir).catch(() => null));
-    setPackages(await api.listPackages(profile.transferDir).then((items) => { setPackageError(null); return items; }).catch((error) => { setPackageError(String(error)); return []; }));
-  }, [mirror.reload, work.reload, mirrorDir, profile.transferDir]);
+    const isCurrent = beginRefresh();
+    if (!isCurrent()) return;
+    const [nextState, packageResult] = await Promise.all([
+      mirrorDir ? api.internalState(mirrorDir).catch(() => null) : null,
+      api.listPackages(profile.transferDir).then(
+        (packages) => ({ packages, packageError: null }),
+        (error) => ({ packages: [] as PackageInfo[], packageError: String(error) }),
+      ),
+      mirror.reload(),
+      work.reload(),
+    ]);
+    if (!isCurrent()) return;
+    setSnapshot({ key: refreshKey, state: nextState, ...packageResult });
+  }, [beginRefresh, refreshKey, mirror.reload, work.reload, mirrorDir, profile.transferDir]);
 
-  useEffect(() => {
-    reloadAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile.id]);
+  useEffect(() => { void reloadAll(); }, [reloadAll]);
   useRefreshOnFocus(reloadAll);
 
   // ---------- 1. 镜像 ----------
@@ -160,7 +173,9 @@ export function InternalView({ profile }: { profile: Profile }) {
   // ---------- 4. 检查并推送 ----------
   const [selected, setSelected] = useState<string[]>([]);
   const branch = selected[0];
-  const [commits, setCommits] = useState<CommitInfo[]>([]);
+  const [commitResult, setCommitResult] = useState<{
+    key: string; status: typeof work.status; commits: CommitInfo[]; error: string | null;
+  } | null>(null);
   const [fetchBeforeRebase, setFetchBeforeRebase] = useState(true);
   const [forceLease, setForceLease] = useState(false);
   const [opRes, setOpRes] = useState<OpOutcome | null>(null);
@@ -178,13 +193,28 @@ export function InternalView({ profile }: { profile: Profile }) {
 
   // 改基准时 rebase --onto 只搬运“旧基准..分支”的提交，列表也按旧基准显示
   const listFrom = changingBase && branchInfo ? branchInfo.base : onto;
+  const commitKey = JSON.stringify([profile.id, workDir, branch, listFrom]);
+  const beginCommits = useRequestGeneration(commitKey);
+  const currentCommits = !work.loading && commitResult?.key === commitKey && commitResult.status === work.status ? commitResult : null;
+  const commits = currentCommits?.commits ?? [];
+  const commitsReady = !!branch && !!work.status?.isRepo && !!currentCommits && !currentCommits.error;
+  const pushKey = JSON.stringify([commitKey, onto, forceLease]);
+  const pushContext = useRef({ key: pushKey, result: currentCommits, ready: commitsReady });
+  pushContext.current = { key: pushKey, result: currentCommits, ready: commitsReady };
   useEffect(() => {
-    if (!branch || !work.status?.isRepo) return setCommits([]);
-    api
-      .listCommits(workDir, `origin/${listFrom}`, `refs/heads/${branch}`)
-      .then(setCommits)
-      .catch(() => setCommits([]));
-  }, [branch, work.status, workDir, listFrom]);
+    const isCurrent = beginCommits();
+    setCommitResult(null);
+    if (!branch || !work.status?.isRepo || work.loading) return;
+    const status = work.status;
+    api.listCommits(workDir, `origin/${listFrom}`, `refs/heads/${branch}`).then(
+      (commits) => {
+        if (isCurrent()) setCommitResult({ key: commitKey, status, commits, error: null });
+      },
+      (error) => {
+        if (isCurrent()) setCommitResult({ key: commitKey, status, commits: [], error: String(error) });
+      },
+    );
+  }, [beginCommits, commitKey, branch, work.status, work.loading, workDir, listFrom]);
 
   const rebase = async () => {
     const r = await run("Rebase", () => api.rebaseOnto(workDir, branch, onto, fetchBeforeRebase));
@@ -194,6 +224,8 @@ export function InternalView({ profile }: { profile: Profile }) {
   };
 
   const push = async () => {
+    if (!commitsReady || changingBase || !branchInfo) return;
+    const approvedCommits = currentCommits;
     const ok = await confirm({
       title: `推送 ${branch}`,
       tone: forceLease ? "warning" : "accent",
@@ -210,6 +242,10 @@ export function InternalView({ profile }: { profile: Profile }) {
       ),
     });
     if (!ok) return;
+    if (!pushContext.current.ready || pushContext.current.key !== pushKey || pushContext.current.result !== approvedCommits) {
+      notify("warn", "分支或提交列表已更新，请重新检查后推送");
+      return;
+    }
     const r = await run("推送", () => api.pushBranch(workDir, branch, forceLease));
     if (r) setOpRes(r);
     reloadAll();
@@ -268,7 +304,7 @@ export function InternalView({ profile }: { profile: Profile }) {
         step={2}
         label="Export"
         title="导出到 U 盘"
-        description={state?.outSeq ? `将生成 #${state.outSeq + 1} 增量包，只含上次导出后的新提交` : "首次导出为全量包"}
+        description={state?.outSeq ? `下次导出 #${state.outSeq + 1}，通常为增量；仅引用变化时可能使用全量包` : "首次导出为全量包"}
       >
         <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
           <Check checked={fetchFirst} onChange={setFetchFirst}>
@@ -464,7 +500,13 @@ export function InternalView({ profile }: { profile: Profile }) {
                 <span className="font-normal text-warning"> · 落后 {branchInfo.behind} 个，建议先 rebase</span>
               )}
             </h4>
-            <CommitList commits={commits} empty={`没有相对 origin/${listFrom} 的新提交`} />
+            {currentCommits?.error ? (
+              <Notice tone="danger" title="读取提交列表失败，请刷新后重试">{currentCommits.error}</Notice>
+            ) : !currentCommits ? (
+              <p role="status" className="text-sm text-muted">正在读取提交列表…</p>
+            ) : (
+              <CommitList commits={commits} empty={`没有相对 origin/${listFrom} 的新提交`} />
+            )}
             <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
               <Check checked={fetchBeforeRebase} onChange={setFetchBeforeRebase}>
                 rebase 前 fetch origin
@@ -479,7 +521,7 @@ export function InternalView({ profile }: { profile: Profile }) {
               <ActionButton
                 variant="primary"
                 onPress={push}
-                isDisabled={!workReady || !!work.status?.inProgress || changingBase}
+                isDisabled={!workReady || !branchInfo || !commitsReady || !!work.status?.inProgress || changingBase}
               >
                 推送…
               </ActionButton>

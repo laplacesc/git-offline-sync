@@ -1,5 +1,6 @@
 import { createContext, ReactNode, useCallback, useContext, useRef, useState } from "react";
 import { AlertDialog, Button, Spinner, toast } from "@heroui/react";
+import { api } from "./api";
 
 export type NoticeKind = "ok" | "warn" | "error";
 
@@ -14,6 +15,8 @@ interface Runner {
   /** 当前正在执行的操作名，null 表示空闲 */
   busy: string | null;
   error: string | null;
+  cancelRequested: boolean;
+  requestCancel: () => Promise<void>;
   dismissError: () => void;
   notify: (kind: NoticeKind, text: string) => void;
   /** 串行执行一个操作：期间所有按钮禁用，失败时弹出错误提示并返回 undefined */
@@ -28,6 +31,9 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const busyRef = useRef(false);
+  const runSeq = useRef(0);
+  const cancelPending = useRef(false);
+  const [cancelRequested, setCancelRequested] = useState(false);
 
   const notify = useCallback((kind: NoticeKind, text: string) => {
     if (kind === "ok") toast.success(text);
@@ -39,6 +45,9 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
     async <T,>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
       if (busyRef.current) return undefined;
       busyRef.current = true;
+      ++runSeq.current;
+      cancelPending.current = false;
+      setCancelRequested(false);
       setBusy(label);
       setError(null);
       try {
@@ -50,10 +59,34 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       } finally {
         busyRef.current = false;
         setBusy(null);
+        setCancelRequested(false);
       }
     },
     [],
   );
+
+  const requestCancel = useCallback(async () => {
+    if (!busyRef.current || cancelPending.current) return;
+    const seq = runSeq.current;
+    cancelPending.current = true;
+    setCancelRequested(true);
+    try {
+      const id = await api.activeOperation();
+      if (seq !== runSeq.current || !busyRef.current) return;
+      const sent = id !== null && await api.cancelOperation(id);
+      if (seq !== runSeq.current || !busyRef.current) return;
+      if (!sent) {
+        cancelPending.current = false;
+        setCancelRequested(false);
+        notify("warn", "当前没有可停止的 Git 操作，请等待完成或稍后重试");
+      }
+    } catch (e) {
+      if (seq !== runSeq.current || !busyRef.current) return;
+      cancelPending.current = false;
+      setCancelRequested(false);
+      notify("error", `停止请求失败：${String(e)}`);
+    }
+  }, [notify]);
 
   // ---------- 确认框 ----------
   const [dialog, setDialog] = useState<(ConfirmOptions & { resolve: (v: boolean) => void }) | null>(null);
@@ -67,7 +100,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <Ctx.Provider value={{ busy, error, dismissError: () => setError(null), notify, run, confirm }}>
+    <Ctx.Provider value={{ busy, error, cancelRequested, requestCancel, dismissError: () => setError(null), notify, run, confirm }}>
       {children}
       <AlertDialog.Backdrop isOpen={!!dialog} onOpenChange={(o) => !o && close(false)}>
         <AlertDialog.Container>
@@ -93,11 +126,18 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
 }
 
 export function OperationStatus() {
-  const { busy, error, dismissError } = useRunner();
+  const { busy, error, dismissError, cancelRequested, requestCancel } = useRunner();
   if (!busy && !error) return null;
   return (
     <div className="border-b border-border bg-surface px-5 py-3">
-      {busy && <p role="status" className="flex items-center gap-2 text-sm"><Spinner size="sm" />正在{busy}，请稍候…</p>}
+      {busy && <div className="flex flex-wrap items-center gap-3" aria-busy="true">
+        <p role="status" className="flex min-w-0 flex-1 items-center gap-2 text-sm"><Spinner size="sm" />
+          {cancelRequested ? "已请求停止，正在等待 Git 退出并检查操作结果…" : `正在${busy}，请稍候…`}
+        </p>
+        <Button size="sm" variant="secondary" isDisabled={cancelRequested} onPress={requestCancel}>
+          {cancelRequested ? "等待停止" : "请求停止"}
+        </Button>
+      </div>}
       {error && <div role="alert" className="flex items-start gap-3 text-sm">
         <p className="min-w-0 flex-1 break-all text-danger">{error}</p>
         <Button size="sm" variant="ghost" onPress={dismissError}>关闭错误提示</Button>

@@ -40,45 +40,54 @@ export function useRefreshOnFocus(reload: () => unknown) {
   }, []);
 }
 
-/**
- * 读取仓库状态；path 为空时返回 null。
- * loading：正在读取；error：读取失败的原因（不再静默当作“仓库不存在”）。
- */
-export function useRepoStatus(path: string | undefined, baseBranch: string, releaseBranches: string[]) {
-  // 数组每次渲染都是新对象，用字符串作依赖
-  const releasesKey = releaseBranches.join("\n");
-  const [status, setStatus] = useState<RepoStatus | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // 只采用最后一次请求的结果，避免较慢的旧请求覆盖新结果
-  const seq = useRef(0);
-  const reload = useCallback(async () => {
-    const id = ++seq.current;
-    if (!path) {
-      setStatus(null);
-      setError(null);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      const st = await api.repoStatus(path, baseBranch, releasesKey ? releasesKey.split("\n") : []);
-      if (id !== seq.current) return;
-      setStatus(st);
-      setError(null);
-    } catch (e) {
-      if (id !== seq.current) return;
-      setStatus(null);
-      setError(String(e));
-    } finally {
-      if (id === seq.current) setLoading(false);
-    }
-  }, [path, baseBranch, releasesKey]);
+/** Start a request and test whether it still belongs to this mounted input. */
+export function useRequestGeneration(key: string) {
+  const currentKey = useRef(key);
+  currentKey.current = key;
+  const generation = useRef(0);
+  const mounted = useRef(true);
   useEffect(() => {
-    reload();
-  }, [reload]);
-  // 切换仓库后的首帧不能继续展示旧仓库的分支和操作。
-  return { status: status?.path === path ? status : null, loading, error, reload };
+    mounted.current = true;
+    return () => { mounted.current = false; generation.current += 1; };
+  }, [key]);
+  return useCallback(() => {
+    if (!mounted.current || currentKey.current !== key) return () => false;
+    const id = ++generation.current;
+    return () => mounted.current && currentKey.current === key && generation.current === id;
+  }, [key]);
+}
+
+/** Read status for this exact input; a view can own refreshes with autoLoad=false. */
+export function useRepoStatus(path: string | undefined, baseBranch: string, releaseBranches: string[], autoLoad = true) {
+  const releasesKey = JSON.stringify(releaseBranches);
+  const key = JSON.stringify([path, baseBranch, releasesKey]);
+  const beginRequest = useRequestGeneration(key);
+  const [result, setResult] = useState<{
+    key: string; status: RepoStatus | null; loading: boolean; error: string | null;
+  } | null>(null);
+  const reload = useCallback(async (): Promise<RepoStatus | null> => {
+    const isCurrent = beginRequest();
+    if (!isCurrent()) return null;
+    if (!path) {
+      setResult({ key, status: null, loading: false, error: null });
+      return null;
+    }
+    setResult((previous) => ({ key, status: previous?.key === key ? previous.status : null, loading: true, error: null }));
+    try {
+      const status = await api.repoStatus(path, baseBranch, JSON.parse(releasesKey) as string[]);
+      if (!isCurrent()) return null;
+      setResult({ key, status, loading: false, error: null });
+      return status;
+    } catch (error) {
+      if (isCurrent()) setResult({ key, status: null, loading: false, error: String(error) });
+      return null;
+    }
+  }, [path, baseBranch, releasesKey, key, beginRequest]);
+  useEffect(() => {
+    if (autoLoad) void reload();
+  }, [reload, autoLoad]);
+  const current = result?.key === key ? result : null;
+  return { status: current?.status ?? null, loading: current?.loading ?? !!path, error: current?.error ?? null, reload };
 }
 
 /**

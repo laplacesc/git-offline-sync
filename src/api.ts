@@ -182,6 +182,8 @@ export interface InternalState {
   repoId: string | null;
   outSeq: number;
   lastHeads: string[];
+  /** Older state files do not record exported ref names. */
+  lastRefs?: Record<string, string> | null;
   lastExportAt: number | null;
 }
 
@@ -205,13 +207,39 @@ export const LOG_EVENT = "git-log";
 
 // ---------- 命令 ----------
 
+// Only share in-flight reads, never cache completed results or mutations.
+const pendingReads = new Map<string, Promise<unknown>>();
+function readOnce<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  const key = JSON.stringify([command, args]);
+  const existing = pendingReads.get(key);
+  if (existing) return existing as Promise<T>;
+  const request = invoke<T>(command, args).finally(() => {
+    if (pendingReads.get(key) === request) pendingReads.delete(key);
+  });
+  pendingReads.set(key, request);
+  return request;
+}
+
+// Reads begun before or during a mutation must not satisfy its follow-up refresh.
+async function mutate<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  pendingReads.clear();
+  try {
+    return await invoke<T>(command, args);
+  } finally {
+    pendingReads.clear();
+  }
+}
+
 export const api = {
+  activeOperation: () => invoke<number | null>("active_operation"),
+  cancelOperation: (id: number) => invoke<boolean>("cancel_operation", { id }),
+  probeRepo: (path: string) => readOnce<boolean>("probe_repo", { path }),
   loadConfig: () => invoke<AppConfig>("load_config"),
-  saveConfig: (config: AppConfig) => invoke<void>("save_config", { config }),
+  saveConfig: (config: AppConfig) => mutate<null>("save_config", { config }),
   environment: () => invoke<Environment>("environment"),
 
   repoStatus: (path: string, baseBranch: string, releaseBranches: string[]) =>
-    invoke<RepoStatus>("repo_status", { path, baseBranch, releaseBranches }),
+    readOnce<RepoStatus>("repo_status", { path, baseBranch, releaseBranches }),
   internalState: (mirrorDir: string) =>
     invoke<InternalState>("sync_state", { path: mirrorDir, external: false }),
   mirrorState: (mirrorDir: string) =>
@@ -219,13 +247,13 @@ export const api = {
   listPackages: (dir: string) => invoke<PackageInfo[]>("list_packages", { dir }),
   listCommits: (repo: string, from: string, to: string) =>
     invoke<CommitInfo[]>("list_commits", { repo, from, to }),
-  abortOp: (repo: string) => invoke<OpOutcome>("abort_op", { repo }),
-  continueOp: (repo: string) => invoke<OpOutcome>("continue_op", { repo }),
+  abortOp: (repo: string) => mutate<OpOutcome>("abort_op", { repo }),
+  continueOp: (repo: string) => mutate<OpOutcome>("continue_op", { repo }),
   rebaseOnto: (repo: string, branch: string, baseBranch: string, fetchUpstream: boolean) =>
-    invoke<OpOutcome>("rebase_onto", { repo, branch, baseBranch, fetchUpstream }),
+    mutate<OpOutcome>("rebase_onto", { repo, branch, baseBranch, fetchUpstream }),
 
   // 内网端
-  initMirror: (url: string, mirrorDir: string) => invoke<void>("init_mirror", { url, mirrorDir }),
+  initMirror: (url: string, mirrorDir: string) => mutate<null>("init_mirror", { url, mirrorDir }),
   exportOut: (a: {
     mirrorDir: string;
     transferDir: string;
@@ -233,9 +261,9 @@ export const api = {
     baseBranch: string;
     fetchUpstream: boolean;
     forceFull: boolean;
-  }) => invoke<ExportOutcome>("export_out", a),
+  }) => mutate<ExportOutcome>("export_out", a),
   importBack: (workDir: string, bundle: string, baseBranch: string, releaseBranches: string[]) =>
-    invoke<ImportBackResult>("import_back", { workDir, bundle, baseBranch, releaseBranches }),
+    mutate<ImportBackResult>("import_back", { workDir, bundle, baseBranch, releaseBranches }),
   importPatches: (a: {
     workDir: string;
     patchDir: string;
@@ -244,22 +272,22 @@ export const api = {
     fetchUpstream: boolean;
     /** 给了就把分支建成独立 worktree，不抢主工作树 */
     worktreePath?: string;
-  }) => invoke<OpOutcome>("import_patches", { ...a, worktreePath: a.worktreePath ?? null }),
+  }) => mutate<OpOutcome>("import_patches", { ...a, worktreePath: a.worktreePath ?? null }),
   pushBranch: (workDir: string, branch: string, forceWithLease: boolean) =>
-    invoke<OpOutcome>("push_branch", { workDir, branch, forceWithLease }),
+    mutate<OpOutcome>("push_branch", { workDir, branch, forceWithLease }),
 
   // 外网端
   importIn: (bundle: string, mirrorDir: string, allowGap: boolean) =>
-    invoke<ImportInResult>("import_in", { bundle, mirrorDir, allowGap }),
+    mutate<ImportInResult>("import_in", { bundle, mirrorDir, allowGap }),
   createDevRepo: (mirrorDir: string, devDir: string, name: string, email: string) =>
-    invoke<void>("create_dev_repo", { mirrorDir, devDir, name, email }),
+    mutate<null>("create_dev_repo", { mirrorDir, devDir, name, email }),
   syncDevRepo: (devDir: string, mirrorDir: string) =>
-    invoke<void>("sync_dev_repo", { devDir, mirrorDir }),
+    mutate<null>("sync_dev_repo", { devDir, mirrorDir }),
   listWorktrees: (repo: string) => invoke<Worktree[]>("list_worktrees", { repo }),
   configureRepo: (repo: string, name: string, email: string) =>
-    invoke<void>("configure_repo", { repo, name, email }),
+    mutate<null>("configure_repo", { repo, name, email }),
   createBranch: (repo: string, name: string, baseBranch: string, worktreePath?: string) =>
-    invoke<void>("create_branch", { repo, name, baseBranch, worktreePath: worktreePath ?? null }),
+    mutate<null>("create_branch", { repo, name, baseBranch, worktreePath: worktreePath ?? null }),
   exportBack: (a: {
     repo: string;
     mirrorDir: string;
@@ -268,7 +296,7 @@ export const api = {
     repoName: string;
     baseBranch: string;
     releaseBranches: string[];
-  }) => invoke<ExportOutcome>("export_back", a),
+  }) => mutate<ExportOutcome>("export_back", a),
   exportPatches: (a: {
     repo: string;
     mirrorDir: string;
@@ -277,7 +305,7 @@ export const api = {
     repoName: string;
     baseBranch: string;
     releaseBranches: string[];
-  }) => invoke<ExportOutcome>("export_patches", a),
+  }) => mutate<ExportOutcome>("export_patches", a),
 };
 
 // ---------- 工具 ----------

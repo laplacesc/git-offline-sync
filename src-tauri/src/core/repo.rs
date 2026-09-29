@@ -76,7 +76,9 @@ pub struct RepoStatus {
 }
 
 pub fn is_nonempty_dir(p: &Path) -> bool {
-    fs::read_dir(p).map(|mut d| d.next().is_some()).unwrap_or(false)
+    fs::read_dir(p)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false)
 }
 
 /// 当前工作树自己的 git 目录。在 linked worktree 里是 `.git/worktrees/<name>`，
@@ -90,7 +92,9 @@ pub fn git_dir(g: &Git, repo: &Path) -> Result<PathBuf> {
 }
 
 pub fn is_bare(g: &Git, repo: &Path) -> Result<bool> {
-    Ok(g.query(repo, args!["rev-parse", "--is-bare-repository"])?.trim() == "true")
+    Ok(g.query(repo, args!["rev-parse", "--is-bare-repository"])?
+        .trim()
+        == "true")
 }
 
 pub fn is_mirror(g: &Git, repo: &Path) -> bool {
@@ -210,7 +214,12 @@ pub fn current_branch(g: &Git, repo: &Path) -> Option<String> {
 pub fn rev_exists(g: &Git, repo: &Path, rev: &str) -> bool {
     g.exec(
         Some(repo),
-        &args!["rev-parse", "--verify", "--quiet", format!("{rev}^{{commit}}")],
+        &args![
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            format!("{rev}^{{commit}}")
+        ],
         None,
         false,
     )
@@ -219,16 +228,22 @@ pub fn rev_exists(g: &Git, repo: &Path, rev: &str) -> bool {
 }
 
 pub fn rev_parse(g: &Git, repo: &Path, rev: &str) -> Result<String> {
-    Ok(g
-        .query(repo, args!["rev-parse", "--verify", format!("{rev}^{{commit}}")])?
-        .trim()
-        .to_string())
+    Ok(g.query(
+        repo,
+        args!["rev-parse", "--verify", format!("{rev}^{{commit}}")],
+    )?
+    .trim()
+    .to_string())
 }
 
 /// 仓库身份：基准分支最早的根提交。内外网两边历史相同则一致。
 pub fn repo_id(g: &Git, repo: &Path, base_ref: &str) -> Result<String> {
     let out = g.query(repo, args!["rev-list", "--max-parents=0", base_ref])?;
-    let mut roots: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let mut roots: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     roots.sort_unstable();
     match roots.first() {
         Some(r) => Ok(r.to_string()),
@@ -441,7 +456,10 @@ pub fn resolve_base(
         Some(b) => (b, false),
         None => {
             let prefix = base_ref_prefix(g, repo);
-            (infer_base(g, repo, branch, mainline, releases, prefix), true)
+            (
+                infer_base(g, repo, branch, mainline, releases, prefix),
+                true,
+            )
         }
     }
 }
@@ -528,7 +546,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
         )
         .ok()
         .filter(|o| o.ok())
-        .map(|o| o.stdout.trim().to_string());
+        .map(|o| super::git::redact(o.stdout.trim()));
 
     if !st.is_bare {
         st.worktrees = list_worktrees(g, path)?;
@@ -561,7 +579,8 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
     // 工作仓库：基准记录一次读出，领先/落后按基准分组批量计算
     let prefix = "refs/remotes/origin/";
     let recorded = all_sync_bases(g, path);
-    let in_worktree: HashMap<String, String> = st.worktrees
+    let in_worktree: HashMap<String, String> = st
+        .worktrees
         .iter()
         .filter(|w| !w.main && !w.bare)
         .filter_map(|w| w.branch.clone().map(|b| (b, w.path.clone())))
@@ -624,13 +643,13 @@ pub fn load_state<T: DeserializeOwned + Default>(dir: &Path) -> Result<T> {
     if !p.exists() {
         return Ok(T::default());
     }
-    Ok(serde_json::from_str(&fs::read_to_string(p)?)?)
+    super::storage::read_json(&p)
 }
 
 pub fn save_state<T: Serialize>(dir: &Path, state: &T) -> Result<()> {
     let d = dir.join(STATE_DIR);
     fs::create_dir_all(&d)?;
-    fs::write(d.join(STATE_FILE), serde_json::to_string_pretty(state)?)?;
+    super::storage::write_json(&d.join(STATE_FILE), state)?;
     Ok(())
 }
 
@@ -642,6 +661,9 @@ pub struct InternalState {
     pub out_seq: u32,
     /// 上次导出时的全部分支/tag 对象，用作下次增量的 `--not` 基线
     pub last_heads: Vec<String>,
+    /// 引用名和对象的完整快照；旧状态缺少此字段时，下次保守生成全量包。
+    #[serde(default)]
+    pub last_refs: Option<std::collections::BTreeMap<String, String>>,
     pub last_export_at: Option<u64>,
 }
 

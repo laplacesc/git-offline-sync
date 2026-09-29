@@ -17,7 +17,7 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   vi.stubGlobal("matchMedia", (query: string) => ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }));
   vi.spyOn(api, "loadConfig").mockResolvedValue({ profiles, lastProfileId: "orders" });
-  vi.spyOn(api, "saveConfig").mockResolvedValue(undefined);
+  vi.spyOn(api, "saveConfig").mockResolvedValue(null);
   vi.spyOn(api, "environment").mockResolvedValue({ os: "macos", git: { Ok: "git version 2.49.0" }, configPath: "/config.json", version: "2.0.1" });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });

@@ -20,7 +20,7 @@ sequenceDiagram
 
     GL->>MR: clone --mirror
     MR->>USB: bundle → proj-out-0001-full.bundle（首次全量）
-    USB->>XM: fetch 到 refs/heads/*
+    USB->>XM: 校验、解包对象、事务更新引用
     XM->>DEV: clone（origin = 本地镜像目录）
     Note over DEV: 在 feature/xxx 上开发并提交<br/>多分支并行时各开一个 worktree
     DEV->>USB: bundle → proj-back-0001.bundle
@@ -29,7 +29,7 @@ sequenceDiagram
     WK->>GL: push
     GL->>MR: remote update
     MR->>USB: bundle → proj-out-0002-incr.bundle（之后增量）
-    USB->>XM: fetch
+    USB->>XM: 校验、解包对象、事务更新引用
     XM->>DEV: fetch origin --prune
 ```
 
@@ -48,7 +48,9 @@ sequenceDiagram
 | rebase 到分支的基准，列出提交确认后推送 | 回传：bundle（只含内网没有的提交）或 patch |
 | 冲突时提供“继续 / 中止” | 冲突时提供“继续 / 中止”，认得冲突在哪个 worktree |
 
-所有 git 命令及其输出实时显示在底部的“命令日志”中。
+所有 git 命令及其输出实时显示在底部的“命令日志”中。日志、错误提示和仓库远程地址展示会隐藏 URL 中的用户名、密码及常见令牌查询参数；执行 Git 时仍使用原始地址。脱敏不是任意秘密检测，分享日志前仍需检查提交信息和路径等内容。
+
+长任务可点击“请求停止”。界面会等待原操作返回，不会立即解除忙碌状态；每条 Git 命令默认最多运行 30 分钟。停止或超时不等于回滚，已经完成的 fetch、文件写入或远程推送可能仍然生效，仓库也可能保留未完成的 rebase/am。操作结束后请刷新状态，按提示继续或中止冲突。
 
 ## 主线分支与发布分支
 
@@ -62,7 +64,8 @@ sequenceDiagram
 - 每个分支的基准记录在仓库配置 `branch.<分支>.syncBase` 中：外网新建分支时写入，回传包的 manifest 带上（`refs[].base`），内网导入时写回工作仓库。rebase、领先/落后、提交列表、patch 导出范围都按这个基准计算。
 - 没有记录的分支（手工创建的、旧版本导出的包）按前缀推断：`hotfix/` 在发布分支中选分叉点最近的一个，其他前缀用主线。分支表里会标出“推断”，rebase 一次后记录下来。
 - 前缀和基准不匹配（如从 `main` 拉 `hotfix/x`）只显示警告，不阻止操作。
-- 在内网“Rebase 并推送”里可以改基准：用 `git rebase --onto origin/<新基准> origin/<旧基准>`，只搬运分支自己的提交。
+- 在内网“Rebase 并推送”里可以改基准：用 `git rebase --onto origin/<新基准> origin/<旧基准>`，只搬运分支自己的提交。基准记录在 rebase 成功后才更新；冲突期间保留原记录，“继续”完成后确认新基准，“中止”不改变旧基准（包括原本未设置的情况）。
+- rebase 的恢复记录保存在实际工作树 Git 目录下的 `offline-sync-rebase.json`，linked worktree 各自独立；应用重新执行 rebase、继续或中止时会核对该记录。不要删除恢复记录来跳过未完成的操作。
 - 仓库身份（根提交）和增量导出基线仍然只看主线分支。
 
 ## 安全措施
@@ -70,11 +73,13 @@ sequenceDiagram
 - **禁止在镜像仓库中推送**：`--mirror` 仓库一推送就会覆盖、删除远程分支。推送只能在工作仓库中进行。
 - 外网开发仓库的 push 地址被设成一个无效占位符（`git remote set-url --push origin …`），
   免得有人把本地分支推进外网镜像、污染那份只读副本。
-- 每个包旁边有一个 `*.manifest.json`，记录仓库身份（根提交）、序号和导出时的所有分支：
-  - 导入包之前核对仓库身份，防止导错项目；
+- 每个包旁边有一个 `*.manifest.json`，记录仓库身份（根提交）、序号和导出时的分支、tag 快照：
+  - 导入前核对格式、文件名、引用、对象及仓库身份，防止导错项目或导入不一致的包；
   - 增量包序号必须连续；
-  - 外网镜像据此同步“指向旧提交的新分支”和“已删除的分支”，这两种变化 bundle 本身无法表达；
-    开发仓库靠 `fetch origin --prune` 跟上，不重复做这套校正。
+  - 外网镜像导入时先校验和解包对象，再用带旧值检查的引用事务同步分支与 tag，包括新增、回退和删除；
+    开发仓库靠 fetch 跟上，不重复做这套校正。
+- 只有引用变化、没有新对象时，导出会使用现有全量包格式传递快照，代价是包体积可能变大。旧状态没有引用快照时也保守生成全量包；没有提交或引用变化时不增加序号。
+- manifest 校验不是数字签名认证，不能防止攻击者同时修改包与描述文件；只导入可信来源的文件。
 - 回传包序号由外网镜像统一分配，多个开发仓库、多个 worktree 同时导出也不会撞号。
 - 增量基线记录全部分支和 tag，不只是 `main`，其他分支的更新也不会漏。
 - 只打包 `refs/heads` 和 `refs/tags`，不会带上 GitLab 镜像里的 `refs/merge-requests` 等引用。
@@ -150,7 +155,8 @@ src-tauri/src/core/     与界面无关的同步核心（可单独测试）
   git.rs                git 执行器：参数数组、实时日志、Windows 不弹黑窗、GIT_TERMINAL_PROMPT=0
   sync.rs               各个同步流程
   repo.rs               仓库状态、分支、提交、同步状态文件
-  manifest.rs           包描述文件
+  manifest.rs           包描述文件与结构校验
+  storage.rs            状态原子写入、备份、进程间文件锁
 src-tauri/src/commands.rs  Tauri 命令（在后台线程执行，日志以 git-log 事件推送）
 src-tauri/tests/e2e.rs     端到端测试：本地裸仓库模拟 GitLab，完整往返
 src/                    React 界面（全部使用 HeroUI v3 组件）
@@ -181,14 +187,20 @@ rm -rf src-tauri/icons/android src-tauri/icons/ios
 界面里的 logo（`ui.tsx` 中的 `AppGlyph`）和图标用的是同一个图形。
 
 同步状态保存位置：
-- 内网：`<镜像仓库>/offline-sync/state.json`
-- 外网：`<开发仓库>/.git/offline-sync/state.json`
+- 内网：`<内网镜像仓库>/offline-sync/state.json`
+- 外网：`<外网镜像仓库>/offline-sync/state.json`，多个开发仓库共享回传序号。
 
-界面配置保存在系统应用配置目录中，路径可在“设置”里查看。
+界面配置保存在系统应用配置目录中，路径可在“设置”里查看。配置和同步状态使用同目录临时文件原子替换，已有合法 JSON 会保存为同路径的 `.bak` 文件。读取损坏状态时会报错，不会自动回退备份；恢复前必须核对已导出、已传输的包序号，避免重复使用旧序号。
+
+镜像和传输目录的操作锁放在目录同级的 `.<目录名>.offline-sync.lock` 中，由操作系统在句柄关闭或进程退出时释放。锁文件保留不表示操作仍在运行；不要通过删除锁文件绕过正在运行的同步实例。
+
+导出先写入传输目录中的隐藏暂存目录 `.offline-sync-export-*`。进入发布阶段后，镜像中的 `offline-sync/export-pending.json` 记录目标包和待提交状态，包旁的 `.pending` 标记阻止列表展示及导入半成品。下一次在同一镜像导出时会先完成这份记录并返回原包、原序号；请保留暂存目录、恢复记录及标记，不要手动删除后重新分配序号。
 
 ## 开发
 
-需要 Node 22+、pnpm、Rust stable 和 Git ≥ 2.25。
+需要 Node ≥ 22.13、pnpm 11.5.0、Rust stable 和 Git ≥ 2.25。CI 固定使用 Node 24.19.0 和 Rust 1.98.1；本地建议使用相同版本。
+
+PR 和普通分支推送会在 Windows/macOS 上运行前端测试与构建，以及 Rust 测试、格式检查和 Clippy。`pnpm test` 同时包含离线发布脚本回归；`pnpm check:version` 核对 package、Cargo 和 Tauri 版本，标签构建还要求标签为精确的 `v<版本>`。
 
 ```bash
 pnpm install
@@ -203,7 +215,7 @@ cd src-tauri && cargo test        # 单元测试 + 端到端测试
 
 Tauri 不能交叉编译，Windows 包必须在 Windows 上构建：
 
-- **CI**：推送 `v*` 标签后，`.github/workflows/build.yml` 会在 Windows 和 macOS 上分别测试并打包，全部成功后自动创建或更新对应的 [GitHub Release](https://github.com/laplacesc/git-offline-sync/releases)，上传两种 Windows `.exe` 和 macOS Universal `.dmg`，并自动生成发布说明。标签包含 `-`（如 `v2.0.2-beta.1`）时标记为预发布。安装包也保留在 Actions 的 Artifacts 中。
+- **CI**：推送 `v*` 标签后，`.github/workflows/build.yml` 会在 Windows 和 macOS 上分别测试并打包。发布脚本先核对版本、两种 Windows `.exe`、macOS Universal `.dmg`、更新归档、签名格式和 `latest.json`，再上传到 [GitHub Release](https://github.com/laplacesc/git-offline-sync/releases) 草稿，逐个下载核对 SHA-256，全部通过后才公开。失败保留草稿供重试；已公开的同标签 Release 会被拒绝，不会被重置、覆盖或删除。标签包含 `-`（如 `v2.0.2-beta.1`）时标记为预发布。安装包也保留在 Actions 的 Artifacts 中。
 - **手动构建**：在 Actions 的 `build` 工作流中运行 `Run workflow`；选择分支时只构建并保存 Artifacts，选择 `v*` 标签时还会发布到对应 Release。
 - **Windows 安装包**：`...-with-webview2.exe` 内置 WebView2 离线安装包（装机无需联网，体积大，内网首选）；`...-no-webview2.exe` 不打包 WebView2（体积小，缺运行时时安装程序需联网下载）。
 - **本地**：在对应系统上执行 `pnpm tauri build`。

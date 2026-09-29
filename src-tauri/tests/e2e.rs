@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use git_offline_sync_lib::core::git::{Git, LogEvent};
-use git_offline_sync_lib::core::manifest::BundleKind;
+use git_offline_sync_lib::core::manifest::{manifest_path_for, BundleKind, Manifest};
 use git_offline_sync_lib::core::repo;
 use git_offline_sync_lib::core::sync::{self, ExportOutcome};
 
@@ -58,7 +58,9 @@ fn assert_same_path(actual: Option<&str>, expected: &Path) {
 
 fn exported(o: ExportOutcome) -> (BundleKind, u32, PathBuf) {
     match o {
-        ExportOutcome::Exported { kind, seq, payload, .. } => (kind, seq, PathBuf::from(payload)),
+        ExportOutcome::Exported {
+            kind, seq, payload, ..
+        } => (kind, seq, PathBuf::from(payload)),
         ExportOutcome::NothingToSync { message } => panic!("unexpected nothing-to-sync: {message}"),
     }
 }
@@ -93,21 +95,39 @@ fn manually_created_worktrees_are_visible_in_status() {
     sh(&work, &["init", "-q"]);
     commit(&work, "a.txt", "initial\n", "initial");
     let detached = root.join("detached");
-    sh(&work, &["worktree", "add", "--detach", detached.to_str().unwrap()]);
+    sh(
+        &work,
+        &["worktree", "add", "--detach", detached.to_str().unwrap()],
+    );
     let attached = root.join("attached");
-    sh(&work, &["worktree", "add", "-b", "feature/manual", attached.to_str().unwrap()]);
+    sh(
+        &work,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/manual",
+            attached.to_str().unwrap(),
+        ],
+    );
 
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
     let st = repo::status(&g, &work, "main", &[]).unwrap();
     let json = serde_json::to_value(&st).unwrap();
-    let trees = json["worktrees"].as_array().expect("状态必须包含干净的 detached worktree，界面才能展示");
+    let trees = json["worktrees"]
+        .as_array()
+        .expect("状态必须包含干净的 detached worktree，界面才能展示");
     assert_eq!(trees.len(), 3);
     let tree = trees.iter().find(|w| w["branch"].is_null()).unwrap();
     assert_same_path(tree["path"].as_str(), &detached);
     assert_eq!(tree["main"], false);
     assert!(st.dirty_trees.is_empty());
-    let branch = st.branches.iter().find(|b| b.name == "feature/manual").unwrap();
+    let branch = st
+        .branches
+        .iter()
+        .find(|b| b.name == "feature/manual")
+        .unwrap();
     assert_same_path(branch.worktree.as_deref(), &attached);
 }
 
@@ -146,7 +166,10 @@ fn full_round_trip() {
     let usb = root.join("usb");
     sync::init_mirror(&g, upstream.to_str().unwrap(), &mirror).unwrap();
     assert!(repo::is_mirror(&g, &mirror));
-    sh(&root, &["clone", "-q", upstream.to_str().unwrap(), "internal/work"]);
+    sh(
+        &root,
+        &["clone", "-q", upstream.to_str().unwrap(), "internal/work"],
+    );
 
     // 镜像目录非空时拒绝重复初始化
     assert!(sync::init_mirror(&g, upstream.to_str().unwrap(), &mirror).is_err());
@@ -171,7 +194,9 @@ fn full_round_trip() {
     let stale = root.join("external/stale");
     fs::create_dir_all(&stale).unwrap();
     fs::write(stale.join("x"), "x").unwrap();
-    let err = sync::import_in(&g, &full, &stale, false).unwrap_err().to_string();
+    let err = sync::import_in(&g, &full, &stale, false)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("不是外网镜像"), "{err}");
 
     // 空镜像（首次 fetch 失败留下的）不能用增量包填
@@ -189,7 +214,9 @@ fn full_round_trip() {
     fm["seq"] = 9.into();
     fm["payload"] = "proj-out-0009-incr.bundle".into();
     fs::write(usb.join("proj-out-0009-incr.manifest.json"), fm.to_string()).unwrap();
-    let err = sync::import_in(&g, &fake_incr, &empty, false).unwrap_err().to_string();
+    let err = sync::import_in(&g, &fake_incr, &empty, false)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("必须使用全量包"), "{err}");
 
     // 回归：没有 manifest 的裸 bundle 也能导入，镜像 HEAD 不能悬空。
@@ -235,15 +262,34 @@ fn full_round_trip() {
     sync::create_branch(&g, &ext, "feature/ai", "main", None).unwrap();
     commit(&ext, "b.txt", "from mac\n", "feat: b");
     let back = exported(
-        sync::export_back(&g, &ext, &extm, &["feature/ai".into()], &usb, "proj", "main", &[])
-            .unwrap(),
+        sync::export_back(
+            &g,
+            &ext,
+            &extm,
+            &["feature/ai".into()],
+            &usb,
+            "proj",
+            "main",
+            &[],
+        )
+        .unwrap(),
     );
     assert_eq!(back.0, BundleKind::Back);
 
     // 没有新提交时不生成空包
     sync::create_branch(&g, &ext, "empty", "main", None).unwrap();
     assert!(matches!(
-        sync::export_back(&g, &ext, &extm, &["empty".into()], &usb, "proj", "main", &[]).unwrap(),
+        sync::export_back(
+            &g,
+            &ext,
+            &extm,
+            &["empty".into()],
+            &usb,
+            "proj",
+            "main",
+            &[]
+        )
+        .unwrap(),
         ExportOutcome::NothingToSync { .. }
     ));
     sh(&ext, &["switch", "-q", "feature/ai"]);
@@ -271,7 +317,15 @@ fn full_round_trip() {
     assert!(sync::push_branch(&g, &mirror, "main", false).is_err());
 
     // ---------- 增量：含指向旧提交的新分支 ----------
-    sh(&seed, &["push", "-q", "origin", &format!("{first}:refs/heads/release")]);
+    sh(
+        &seed,
+        &[
+            "push",
+            "-q",
+            "origin",
+            &format!("{first}:refs/heads/release"),
+        ],
+    );
     let (kind, seq, incr) =
         exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false).unwrap());
     assert_eq!((kind, seq), (BundleKind::Incr, 2));
@@ -291,7 +345,9 @@ fn full_round_trip() {
     sh(&ext, &["fetch", "origin", "release"]);
 
     // 重复导入同一增量包被拒绝
-    let err = sync::import_in(&g, &incr, &extm, false).unwrap_err().to_string();
+    let err = sync::import_in(&g, &incr, &extm, false)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("已导入过"), "{err}");
 
     // 内网无变化 → 不生成空包
@@ -318,7 +374,9 @@ fn full_round_trip() {
     m["seq"] = 5.into();
     m["payload"] = "proj-out-0005-incr.bundle".into();
     fs::write(usb.join("proj-out-0005-incr.manifest.json"), m.to_string()).unwrap();
-    let err = sync::import_in(&g, &fake, &extm, false).unwrap_err().to_string();
+    let err = sync::import_in(&g, &fake, &extm, false)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("序号不连续"), "{err}");
 
     // 分支删除：镜像靠 manifest 校正，开发仓库靠 fetch --prune 跟上
@@ -357,18 +415,40 @@ fn full_round_trip() {
     assert!(err.contains("不是外网镜像"), "{err}");
     // 从 worktree 导出回传包，序号由镜像统一分配，不和主工作树撞号
     let w_back = exported(
-        sync::export_back(&g, &ext, &extm, &["feature/wt".into()], &usb, "proj", "main", &[])
-            .unwrap(),
+        sync::export_back(
+            &g,
+            &ext,
+            &extm,
+            &["feature/wt".into()],
+            &usb,
+            "proj",
+            "main",
+            &[],
+        )
+        .unwrap(),
     );
-    assert!(w_back.1 > back.1, "回传序号应递增：{} > {}", w_back.1, back.1);
+    assert!(
+        w_back.1 > back.1,
+        "回传序号应递增：{} > {}",
+        w_back.1,
+        back.1
+    );
 
     // 回归：linked worktree 里卡住的 rebase 必须能被 status 发现。
     // 它的标记文件在 .git/worktrees/<name>/，只看主工作树会漏掉，
     // 界面就给不出「继续 / 中止」，用户只能去终端解决。
     commit(&wt, "a.txt", "line1\nWORKTREE\n", "conflict from worktree");
     sh(&ext, &["switch", "-q", "main"]);
-    commit(&ext, "a.txt", "line1\nMAINTREE\n", "conflict from main tree");
-    sh(&ext, &["update-ref", "refs/remotes/origin/main", "refs/heads/main"]);
+    commit(
+        &ext,
+        "a.txt",
+        "line1\nMAINTREE\n",
+        "conflict from main tree",
+    );
+    sh(
+        &ext,
+        &["update-ref", "refs/remotes/origin/main", "refs/heads/main"],
+    );
     let rb = sync::rebase_onto(&g, &ext, "feature/wt", "main", false).unwrap();
     assert!(!rb.ok && rb.conflict, "{:?}", rb);
     let st = repo::status(&g, &ext, "main", &[]).unwrap();
@@ -381,10 +461,23 @@ fn full_round_trip() {
     assert_eq!((stuck.op.as_str(), stuck.main), ("rebase", false));
     assert_eq!(stuck.branch.as_deref(), Some("feature/wt"));
     // 中止要发到那个 worktree，发给主仓库不起作用
-    assert!(sync::abort(&g, &ext).unwrap().message.contains("没有需要中止"));
+    assert!(sync::abort(&g, &ext)
+        .unwrap()
+        .message
+        .contains("没有需要中止"));
     assert!(sync::abort(&g, &wt).unwrap().ok);
-    assert!(repo::status(&g, &ext, "main", &[]).unwrap().in_progress_trees.is_empty());
-    sh(&ext, &["update-ref", "refs/remotes/origin/main", "refs/heads/main~1"]);
+    assert!(repo::status(&g, &ext, "main", &[])
+        .unwrap()
+        .in_progress_trees
+        .is_empty());
+    sh(
+        &ext,
+        &[
+            "update-ref",
+            "refs/remotes/origin/main",
+            "refs/heads/main~1",
+        ],
+    );
     sh(&ext, &["reset", "-q", "--hard", "HEAD~1"]);
 
     // ---------- patch 回传 ----------
@@ -401,7 +494,9 @@ fn full_round_trip() {
     let ip = sync::import_patches(&g, &work, &pdir, "feature/patch", "main", true, None).unwrap();
     assert!(ip.ok, "{:?}", ip);
     assert_eq!(
-        sync::list_commits(&g, &work, "origin/main", "feature/patch").unwrap().len(),
+        sync::list_commits(&g, &work, "origin/main", "feature/patch")
+            .unwrap()
+            .len(),
         2
     );
 
@@ -436,10 +531,15 @@ fn full_round_trip() {
     // 脏工作树要被 status 报出来（只看主工作树以外的也一样）
     let st = repo::status(&g, &work, "main", &[]).unwrap();
     assert!(
-        st.dirty_trees.iter().any(|w| same_path(Path::new(&w.path), &work)),
+        st.dirty_trees
+            .iter()
+            .any(|w| same_path(Path::new(&w.path), &work)),
         "主工作树的未提交改动应出现在 dirty_trees"
     );
-    sh(&work, &["worktree", "remove", "--force", pwt.to_str().unwrap()]);
+    sh(
+        &work,
+        &["worktree", "remove", "--force", pwt.to_str().unwrap()],
+    );
     sh(&work, &["reset", "-q", "--hard"]);
     fs::remove_file(work.join("dirty.txt")).ok();
 
@@ -472,10 +572,15 @@ fn full_round_trip() {
     // 冲突中禁止其它操作
     assert!(sync::rebase_onto(&g, &work, "feature/ai", "main", false).is_err());
     assert!(sync::abort(&g, &work).unwrap().ok);
-    assert_eq!(repo::status(&g, &work, "main", &[]).unwrap().in_progress, None);
+    assert_eq!(
+        repo::status(&g, &work, "main", &[]).unwrap().in_progress,
+        None
+    );
 
     // 已检出分支不能直接导入（主工作树）
-    let err = sync::import_back(&g, &work, &cb, "main", &[]).unwrap_err().to_string();
+    let err = sync::import_back(&g, &work, &cb, "main", &[])
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("已被检出"), "{err}");
 
     // 回归：被 linked worktree 占用的分支同样要在动手前就拦住。
@@ -485,10 +590,18 @@ fn full_round_trip() {
     sh(&work, &["switch", "-q", "main"]);
     sh(&work, &["branch", "-f", "feature/conflict", "origin/main"]);
     let iwt = root.join("internal/wt-conflict");
-    sh(&work, &["worktree", "add", iwt.to_str().unwrap(), "feature/conflict"]);
-    let err = sync::import_back(&g, &work, &cb, "main", &[]).unwrap_err().to_string();
+    sh(
+        &work,
+        &["worktree", "add", iwt.to_str().unwrap(), "feature/conflict"],
+    );
+    let err = sync::import_back(&g, &work, &cb, "main", &[])
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("已被检出"), "{err}");
-    assert!(err.contains("wt-conflict"), "错误里要指出分支在哪个工作树：{err}");
+    assert!(
+        err.contains("wt-conflict"),
+        "错误里要指出分支在哪个工作树：{err}"
+    );
     sh(&work, &["worktree", "remove", iwt.to_str().unwrap()]);
 
     // 分叉的分支导入为新名字，不覆盖本地
@@ -509,10 +622,19 @@ fn full_round_trip() {
     fut["seq"] = 99.into();
     fut["payload"] = "proj-out-0099-full.bundle".into();
     fut["toolVersion"] = "99.0.0".into();
-    fs::write(usb.join("proj-out-0099-full.manifest.json"), fut.to_string()).unwrap();
-    let err = sync::import_in(&g, &future, &extm, true).unwrap_err().to_string();
+    fs::write(
+        usb.join("proj-out-0099-full.manifest.json"),
+        fut.to_string(),
+    )
+    .unwrap();
+    let err = sync::import_in(&g, &future, &extm, true)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("格式版本"), "{err}");
-    assert!(err.contains("99.0.0"), "错误里要指出是哪个版本生成的：{err}");
+    assert!(
+        err.contains("99.0.0"),
+        "错误里要指出是哪个版本生成的：{err}"
+    );
     fs::remove_file(usb.join("proj-out-0099-full.manifest.json")).unwrap();
     fs::remove_file(&future).unwrap();
 
@@ -554,13 +676,19 @@ fn release_hotfix_round_trip() {
     commit(&seed, "r2.txt", "r2\n", "release 2.0 fix");
     sh(&seed, &["switch", "-q", "main"]);
     commit(&seed, "m.txt", "m1\nm2\n", "more main work");
-    sh(&seed, &["push", "-q", "origin", "main", "release/1.0", "release/2.0"]);
+    sh(
+        &seed,
+        &["push", "-q", "origin", "main", "release/1.0", "release/2.0"],
+    );
 
     let mirror = root.join("internal/project.git");
     let work = root.join("internal/work");
     let usb = root.join("usb");
     sync::init_mirror(&g, upstream.to_str().unwrap(), &mirror).unwrap();
-    sh(&root, &["clone", "-q", upstream.to_str().unwrap(), "internal/work"]);
+    sh(
+        &root,
+        &["clone", "-q", upstream.to_str().unwrap(), "internal/work"],
+    );
     let (_, _, full) =
         exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false).unwrap());
 
@@ -578,7 +706,11 @@ fn release_hotfix_round_trip() {
     commit(&ext, "h.txt", "hotfix\n", "fix: login");
 
     let st = repo::status(&g, &ext, "main", &releases).unwrap();
-    let hb = st.branches.iter().find(|b| b.name == "hotfix/login").unwrap();
+    let hb = st
+        .branches
+        .iter()
+        .find(|b| b.name == "hotfix/login")
+        .unwrap();
     assert_eq!((hb.base.as_str(), hb.base_inferred), ("release/1.0", false));
     assert_eq!((hb.ahead, hb.behind), (1, 0));
 
@@ -595,10 +727,9 @@ fn release_hotfix_round_trip() {
         )
         .unwrap(),
     );
-    let m: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(back.with_extension("manifest.json")).unwrap(),
-    )
-    .unwrap();
+    let m: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(back.with_extension("manifest.json")).unwrap())
+            .unwrap();
     assert_eq!(m["refs"][0]["base"], "release/1.0");
 
     // ---------- 内网：导入后基准写入工作仓库，只列出 hotfix 自己的提交 ----------
@@ -609,7 +740,12 @@ fn release_hotfix_round_trip() {
     sh(&work, &["fetch", "-q", "origin"]);
     let ib = sync::import_back(&g, &work, &back, "main", &releases).unwrap();
     assert_eq!(ib.branches[0].base, "release/1.0");
-    assert_eq!(ib.branches[0].commits.len(), 1, "{:?}", ib.branches[0].commits);
+    assert_eq!(
+        ib.branches[0].commits.len(),
+        1,
+        "{:?}",
+        ib.branches[0].commits
+    );
     assert_eq!(
         repo::get_sync_base(&g, &work, "hotfix/login").as_deref(),
         Some("release/1.0")
@@ -618,7 +754,11 @@ fn release_hotfix_round_trip() {
     let rb = sync::rebase_onto(&g, &work, "hotfix/login", "release/1.0", true).unwrap();
     assert!(rb.ok, "{:?}", rb);
     let st = repo::status(&g, &work, "main", &releases).unwrap();
-    let hb = st.branches.iter().find(|b| b.name == "hotfix/login").unwrap();
+    let hb = st
+        .branches
+        .iter()
+        .find(|b| b.name == "hotfix/login")
+        .unwrap();
     assert_eq!((hb.ahead, hb.behind), (1, 0));
     // 没有带上 main 的提交
     assert!(!work.join("m.txt").exists());
@@ -626,9 +766,15 @@ fn release_hotfix_round_trip() {
     assert!(!sh(&upstream, &["rev-parse", "refs/heads/hotfix/login"]).is_empty());
 
     // ---------- 没有记录时按前缀推断 ----------
-    sh(&ext, &["switch", "-q", "-c", "hotfix/infer", "origin/release/2.0"]);
+    sh(
+        &ext,
+        &["switch", "-q", "-c", "hotfix/infer", "origin/release/2.0"],
+    );
     commit(&ext, "i.txt", "i\n", "fix: infer");
-    sh(&ext, &["switch", "-q", "-c", "feature/infer", "origin/main"]);
+    sh(
+        &ext,
+        &["switch", "-q", "-c", "feature/infer", "origin/main"],
+    );
     let st = repo::status(&g, &ext, "main", &releases).unwrap();
     let find = |n: &str| st.branches.iter().find(|b| b.name == n).unwrap().clone();
     let hi = find("hotfix/infer");
@@ -643,7 +789,9 @@ fn release_hotfix_round_trip() {
     let rb = sync::rebase_onto(&g, &work, "hotfix/login", "main", false).unwrap();
     assert!(rb.ok, "{:?}", rb);
     assert_eq!(
-        sync::list_commits(&g, &work, "origin/main", "hotfix/login").unwrap().len(),
+        sync::list_commits(&g, &work, "origin/main", "hotfix/login")
+            .unwrap()
+            .len(),
         1
     );
     assert!(!work.join("r1.txt").exists());
@@ -663,13 +811,454 @@ fn release_hotfix_round_trip() {
     assert_eq!(repo::current_branch(&g, &ext), current);
     assert!(wt.join("r1.txt").exists());
     assert!(wt.join("feature.txt").exists());
-    assert!(!wt.join("m.txt").exists(), "不能把主线独有的提交带到发布分支");
+    assert!(
+        !wt.join("m.txt").exists(),
+        "不能把主线独有的提交带到发布分支"
+    );
     assert_eq!(
-        sync::list_commits(&g, &ext, "origin/release/1.0", "feature/to-release").unwrap().len(),
+        sync::list_commits(&g, &ext, "origin/release/1.0", "feature/to-release")
+            .unwrap()
+            .len(),
         1
     );
     assert_eq!(
         repo::get_sync_base(&g, &ext, "feature/to-release").as_deref(),
         Some("release/1.0")
     );
+}
+
+#[test]
+fn rebase_journal_preserves_bases_through_abort_continue_and_recovery() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let root = test_root(&tmp);
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let work = root.join("work");
+    fs::create_dir(&work).unwrap();
+    sh(&work, &["init", "-q", "-b", "main"]);
+    commit(&work, "a", "base\n", "base");
+    sh(&work, &["switch", "-q", "-c", "release"]);
+    commit(&work, "a", "release\n", "release");
+    sh(
+        &work,
+        &["update-ref", "refs/remotes/origin/release", "HEAD"],
+    );
+    sh(&work, &["switch", "-q", "main"]);
+    commit(&work, "a", "main\n", "main");
+    sh(&work, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let wt = root.join("topic-tree");
+    sync::create_branch(&g, &work, "topic", "release", Some(&wt)).unwrap();
+    commit(&wt, "a", "topic\n", "topic conflict");
+    let old_head = sh(&wt, &["rev-parse", "HEAD"]);
+    let gd = repo::git_dir(&g, &wt).unwrap();
+    let journal = gd.join("offline-sync-rebase.json");
+    let rb = sync::rebase_onto(&g, &work, "topic", "main", false).unwrap();
+    assert!(rb.conflict && !rb.ok);
+    assert_same_path(rb.worktree.as_deref(), &wt);
+    assert!(journal.exists());
+    assert!(!repo::git_dir(&g, &work)
+        .unwrap()
+        .join("offline-sync-rebase.json")
+        .exists());
+    let context: serde_json::Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+    assert_eq!(context["oldBase"], "release");
+    assert_eq!(context["newBase"], "main");
+    assert_eq!(
+        repo::get_sync_base(&g, &work, "topic").as_deref(),
+        Some("release")
+    );
+    sync::abort(&g, &wt).unwrap();
+    assert_eq!(sh(&wt, &["rev-parse", "HEAD"]), old_head);
+    assert_eq!(
+        repo::get_sync_base(&g, &work, "topic").as_deref(),
+        Some("release")
+    );
+    assert!(!journal.exists());
+
+    assert!(
+        sync::rebase_onto(&g, &work, "topic", "main", false)
+            .unwrap()
+            .conflict
+    );
+    fs::write(wt.join("a"), "resolved\n").unwrap();
+    sh(&wt, &["add", "a"]);
+    assert!(sync::continue_op(&g, &wt).unwrap().ok);
+    assert_eq!(
+        repo::get_sync_base(&g, &work, "topic").as_deref(),
+        Some("main")
+    );
+    assert!(!journal.exists());
+
+    // Aborting an unrecorded branch must preserve absence, not invent a base.
+    let unset = root.join("unset-tree");
+    sh(
+        &work,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "unset",
+            unset.to_str().unwrap(),
+            "release",
+        ],
+    );
+    commit(&unset, "a", "unset topic\n", "unset conflict");
+    assert!(
+        sync::rebase_onto(&g, &work, "unset", "main", false)
+            .unwrap()
+            .conflict
+    );
+    sync::abort(&g, &unset).unwrap();
+    assert_eq!(repo::get_sync_base(&g, &work, "unset"), None);
+
+    // No journal: operations started in Git (and older app versions) still work.
+    let manual = Command::new("git")
+        .args(["rebase", "--onto", "origin/main", "origin/release"])
+        .current_dir(&unset)
+        .output()
+        .unwrap();
+    assert!(!manual.status.success());
+    assert!(!repo::git_dir(&g, &unset)
+        .unwrap()
+        .join("offline-sync-rebase.json")
+        .exists());
+    fs::write(unset.join("a"), "manual resolution\n").unwrap();
+    sh(&unset, &["add", "a"]);
+    assert!(sync::continue_op(&g, &unset).unwrap().ok);
+    assert_eq!(repo::get_sync_base(&g, &work, "unset"), None);
+
+    // Git succeeded but the config commit failed. Continuing with no active Git
+    // operation must replay the completed journal, then remove it.
+    let recovery = root.join("recovery-tree");
+    sync::create_branch(&g, &work, "recovery", "release", Some(&recovery)).unwrap();
+    commit(
+        &recovery,
+        "independent",
+        "independent\n",
+        "nonconflicting topic",
+    );
+    let config_lock = repo::git_dir(&g, &work).unwrap().join("config.lock");
+    fs::write(&config_lock, "fault injection").unwrap();
+    assert!(sync::rebase_onto(&g, &work, "recovery", "main", false).is_err());
+    let recovery_journal = repo::git_dir(&g, &recovery)
+        .unwrap()
+        .join("offline-sync-rebase.json");
+    assert!(recovery_journal.exists());
+    assert!(repo::in_progress(&repo::git_dir(&g, &recovery).unwrap()).is_none());
+    assert_eq!(
+        repo::get_sync_base(&g, &work, "recovery").as_deref(),
+        Some("release")
+    );
+    fs::remove_file(config_lock).unwrap();
+    sync::continue_op(&g, &recovery).unwrap();
+    assert_eq!(
+        repo::get_sync_base(&g, &work, "recovery").as_deref(),
+        Some("main")
+    );
+    assert!(!recovery_journal.exists());
+    assert_eq!(
+        sh(&work, &["status", "--porcelain"]),
+        "",
+        "metadata locks must not pollute the working tree"
+    );
+    assert_eq!(sh(&recovery, &["status", "--porcelain"]), "");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let failed = root.join("failed-tree");
+        sync::create_branch(&g, &work, "failed", "release", Some(&failed)).unwrap();
+        commit(&failed, "independent", "another\n", "hook blocked topic");
+        let hook = repo::git_dir(&g, &work).unwrap().join("hooks/pre-rebase");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            sync::rebase_onto(&g, &work, "failed", "main", false).is_err(),
+            "hook failure must not be reported as a conflict"
+        );
+        assert_eq!(
+            repo::get_sync_base(&g, &work, "failed").as_deref(),
+            Some("release")
+        );
+        assert!(!repo::git_dir(&g, &failed)
+            .unwrap()
+            .join("offline-sync-rebase.json")
+            .exists());
+    }
+}
+
+fn test_root(tmp: &tempfile::TempDir) -> PathBuf {
+    let root = if cfg!(windows) {
+        tmp.path().to_path_buf()
+    } else {
+        tmp.path().canonicalize().unwrap()
+    };
+    isolate_git_env(&root);
+    root
+}
+
+fn snapshot_fixture(root: &Path, g: &Git) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let seed = root.join("seed");
+    fs::create_dir(&seed).unwrap();
+    sh(&seed, &["init", "-q", "-b", "main"]);
+    commit(&seed, "a", "one\n", "one");
+    sh(&seed, &["branch", "keep"]);
+    sh(&seed, &["tag", "v1"]);
+    commit(&seed, "a", "two\n", "two");
+    let mirror = root.join("mirror.git");
+    sync::init_mirror(g, seed.to_str().unwrap(), &mirror).unwrap();
+    let usb = root.join("usb");
+    let full =
+        exported(sync::export_out(g, &mirror, &usb, "test", "main", false, false).unwrap()).2;
+    let ext = root.join("external.git");
+    sync::import_in(g, &full, &ext, false).unwrap();
+    (seed, mirror, usb, ext, full)
+}
+
+#[test]
+fn ref_only_changes_and_legacy_state_are_synced_once() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let root = test_root(&tmp);
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let (_, mirror, usb, ext, _) = snapshot_fixture(&root, &g);
+    let old = sh(&mirror, &["rev-parse", "main~1"]);
+    let tip = sh(&mirror, &["rev-parse", "main"]);
+    let commands = [
+        vec!["update-ref", "refs/heads/old-commit", &old],
+        vec!["update-ref", "refs/heads/old-commit", &tip],
+        vec!["update-ref", "-d", "refs/heads/old-commit"],
+        vec!["update-ref", "refs/tags/v1", &tip],
+        vec!["update-ref", "-d", "refs/tags/v1"],
+        vec!["update-ref", "refs/tags/old-tag", &old],
+        vec!["update-ref", "refs/heads/main", &old],
+    ];
+    for (index, command) in commands.iter().enumerate() {
+        sh(&mirror, command);
+        let (kind, seq, bundle) =
+            exported(sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap());
+        assert_eq!(
+            kind,
+            BundleKind::Full,
+            "refs-only must stay format-1 compatible"
+        );
+        assert_eq!(seq, index as u32 + 2);
+        sync::import_in(&g, &bundle, &ext, false).unwrap();
+        assert_eq!(
+            repo::list_refs(&g, &ext, &["refs/heads", "refs/tags"]).unwrap(),
+            repo::list_refs(&g, &mirror, &["refs/heads", "refs/tags"]).unwrap()
+        );
+        assert!(matches!(
+            sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap(),
+            ExportOutcome::NothingToSync { .. }
+        ));
+    }
+    // Legacy state has object tips but no ref names. Migrate with one full export,
+    // not a full export on every unchanged invocation.
+    let state_path = mirror.join("offline-sync/state.json");
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("lastRefs");
+    fs::write(&state_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(
+        exported(sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap()).0,
+        BundleKind::Full
+    );
+    assert!(matches!(
+        sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap(),
+        ExportOutcome::NothingToSync { .. }
+    ));
+}
+
+#[test]
+fn malformed_manifests_never_change_or_delete_refs() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let root = test_root(&tmp);
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let (_, _, usb, ext, full) = snapshot_fixture(&root, &g);
+    let before = repo::list_refs(&g, &ext, &["refs/heads", "refs/tags"]).unwrap();
+    let state_before = fs::read(ext.join("offline-sync/state.json")).unwrap();
+    let bad = usb.join("bad.bundle");
+    fs::copy(&full, &bad).unwrap();
+    let mut template = serde_json::to_value(Manifest::read_for(&full).unwrap().unwrap()).unwrap();
+    template["payload"] = "bad.bundle".into();
+    let mut variants = Vec::new();
+    for (key, value) in [
+        ("payload", serde_json::json!("../escape.bundle")),
+        ("format", serde_json::json!(0)),
+        ("seq", serde_json::json!(0)),
+        ("baseBranch", serde_json::json!("main\ninject")),
+        ("repoId", serde_json::json!("not-a-sha")),
+        ("refs", serde_json::json!([])),
+    ] {
+        let mut m = template.clone();
+        m[key] = value;
+        variants.push(m);
+    }
+    for name in [
+        "refs/heads/bad\ndelete refs/heads/keep",
+        "refs/heads/a.lock",
+        "refs/heads/a..b",
+        "refs/heads/a//b",
+        "refs/remotes/origin/main",
+    ] {
+        let mut m = template.clone();
+        m["refs"][0]["name"] = name.into();
+        variants.push(m);
+    }
+    let mut duplicate = template.clone();
+    duplicate["refs"]
+        .as_array_mut()
+        .unwrap()
+        .push(template["refs"][0].clone());
+    variants.push(duplicate);
+    let mut missing = template.clone();
+    missing["refs"].as_array_mut().unwrap().push(serde_json::json!({"name":"refs/heads/missing", "sha":"1111111111111111111111111111111111111111"}));
+    variants.push(missing);
+    let mut wrong_type = template.clone();
+    let blob = sh(&ext, &["rev-parse", "main:a"]);
+    wrong_type["refs"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"name":"refs/heads/not-a-commit", "sha":blob}));
+    variants.push(wrong_type);
+    let mut injected_sha = template.clone();
+    injected_sha["refs"][0]["sha"] =
+        "1111111111111111111111111111111111111111\ndelete refs/heads/keep".into();
+    variants.push(injected_sha);
+    let mut mismatch = template.clone();
+    mismatch["refs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|r| r["name"] != "refs/heads/keep");
+    variants.push(mismatch);
+    for (index, m) in variants.iter().enumerate() {
+        fs::write(manifest_path_for(&bad), serde_json::to_vec(m).unwrap()).unwrap();
+        assert!(
+            sync::import_in(&g, &bad, &ext, true).is_err(),
+            "variant {index} unexpectedly accepted"
+        );
+        assert_eq!(
+            repo::list_refs(&g, &ext, &["refs/heads", "refs/tags"]).unwrap(),
+            before,
+            "variant {index} altered refs"
+        );
+        assert_eq!(
+            fs::read(ext.join("offline-sync/state.json")).unwrap(),
+            state_before
+        );
+    }
+    // A corrupt sidecar must not make the bundle look like a valid manual package.
+    fs::write(manifest_path_for(&bad), "{").unwrap();
+    assert!(!sync::list_packages(&usb)
+        .unwrap()
+        .iter()
+        .any(|p| Path::new(&p.payload_path) == bad));
+}
+
+#[test]
+fn import_transaction_and_state_failures_are_retryable() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let root = test_root(&tmp);
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let (seed, mirror, usb, ext, _) = snapshot_fixture(&root, &g);
+    commit(&seed, "new", "new\n", "new objects");
+    sh(&seed, &["branch", "added"]);
+    sh(&seed, &["branch", "-D", "keep"]);
+    sh(&seed, &["tag", "-d", "v1"]);
+    let (kind, _, incr) =
+        exported(sync::export_out(&g, &mirror, &usb, "test", "main", true, false).unwrap());
+    assert_eq!(kind, BundleKind::Incr);
+    let before = repo::list_refs(&g, &ext, &["refs/heads", "refs/tags"]).unwrap();
+    // Lock failure in one ref must abort additions, updates AND deletions together.
+    let lock = ext.join("refs/heads/main.lock");
+    fs::write(&lock, "fault injection").unwrap();
+    assert!(sync::import_in(&g, &incr, &ext, false).is_err());
+    assert_eq!(
+        repo::list_refs(&g, &ext, &["refs/heads", "refs/tags"]).unwrap(),
+        before
+    );
+    fs::remove_file(lock).unwrap();
+    // An invalid HEAD is repaired before committing the sequence. A lock failure
+    // here must also leave the incremental package retryable.
+    sh(
+        &ext,
+        &["symbolic-ref", "HEAD", "refs/heads/already-missing"],
+    );
+    fs::write(ext.join("HEAD.lock"), "fault injection").unwrap();
+    assert!(sync::import_in(&g, &incr, &ext, false).is_err());
+    assert_eq!(
+        repo::load_state::<repo::MirrorState>(&ext)
+            .unwrap()
+            .last_in_seq,
+        1
+    );
+    fs::remove_file(ext.join("HEAD.lock")).unwrap();
+    // Fail the state backup after the ref transaction has succeeded.
+    let backup = ext.join("offline-sync/state.json.bak");
+    fs::create_dir(&backup).unwrap();
+    assert!(sync::import_in(&g, &incr, &ext, false).is_err());
+    assert_eq!(
+        sh(&ext, &["rev-parse", "main"]),
+        sh(&seed, &["rev-parse", "main"])
+    );
+    assert_eq!(
+        repo::load_state::<repo::MirrorState>(&ext)
+            .unwrap()
+            .last_in_seq,
+        1
+    );
+    fs::remove_dir(backup).unwrap();
+    sync::import_in(&g, &incr, &ext, false).unwrap();
+    assert_eq!(
+        repo::load_state::<repo::MirrorState>(&ext)
+            .unwrap()
+            .last_in_seq,
+        2
+    );
+    assert!(!repo::rev_exists(&g, &ext, "keep"));
+    assert_eq!(sh(&ext, &["tag"]), "");
+}
+
+#[test]
+fn interrupted_export_is_hidden_and_finishes_with_the_same_sequence() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let root = test_root(&tmp);
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let (seed, mirror, usb, ext, _) = snapshot_fixture(&root, &g);
+    commit(&seed, "next", "next\n", "next");
+    let backup = mirror.join("offline-sync/state.json.bak");
+    fs::create_dir(&backup).unwrap();
+    assert!(sync::export_out(&g, &mirror, &usb, "test", "main", true, false).is_err());
+    let pending = usb.join("test-out-0002-incr.bundle");
+    assert!(pending.exists());
+    assert!(mirror.join("offline-sync/export-pending.json").exists());
+    assert!(Manifest::read_for(&pending).is_err());
+    assert_eq!(sync::list_packages(&usb).unwrap().len(), 1);
+    assert_eq!(
+        repo::load_state::<repo::InternalState>(&mirror)
+            .unwrap()
+            .out_seq,
+        1
+    );
+    fs::remove_dir(backup).unwrap();
+    let (_, seq, recovered) =
+        exported(sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap());
+    assert_eq!(seq, 2);
+    assert_eq!(recovered, pending);
+    assert!(!mirror.join("offline-sync/export-pending.json").exists());
+    assert_eq!(sync::list_packages(&usb).unwrap().len(), 2);
+    sync::import_in(&g, &recovered, &ext, false).unwrap();
+    assert!(matches!(
+        sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap(),
+        ExportOutcome::NothingToSync { .. }
+    ));
 }

@@ -18,7 +18,7 @@ import {
   shortSha,
 } from "./api";
 import { useRunner } from "./runner";
-import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus } from "./repoBits";
+import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus, useRequestGeneration } from "./repoBits";
 import {
   ActionButton,
   BaseSelect,
@@ -47,7 +47,7 @@ function DevRepoRow({
 }: {
   path: string;
   current: boolean;
-  cloned: boolean;
+  cloned: boolean | undefined;
   stale: boolean;
   onSelect: () => void;
   onSync: () => void;
@@ -65,11 +65,12 @@ function DevRepoRow({
           {path}
         </div>
         <div className="text-xs text-muted">
-          {cloned ? (current ? "当前操作的仓库" : "已克隆") : "尚未克隆"}
+          {cloned === undefined ? "正在检查…" : cloned ? (current ? "当前操作的仓库" : "已克隆") : "尚未克隆"}
+          {cloned && stale && <span className="ml-2 text-warning">待同步</span>}
         </div>
       </div>
       <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-        {cloned ? (
+        {cloned === undefined ? null : cloned ? (
           <>
             {!current && (
               <ActionButton size="sm" variant="secondary" onPress={onSelect}>
@@ -101,41 +102,45 @@ export function ExternalView({ profile }: { profile: Profile }) {
   const [devIdx, setDevIdx] = useState(0);
   const devDir = devRepos[devIdx] ?? "";
 
-  const mirror = useRepoStatus(mirrorDir, base, releases);
-  const repo = useRepoStatus(devDir, base, releases);
-  const [state, setState] = useState<MirrorState | null>(null);
-  const [packages, setPackages] = useState<PackageInfo[]>([]);
-  const [packageError, setPackageError] = useState<string | null>(null);
-  const [devExists, setDevExists] = useState<Record<string, boolean>>({});
+  // This view owns the initial refresh; hooks must not launch duplicate reads.
+  const mirror = useRepoStatus(mirrorDir, base, releases, false);
+  const repo = useRepoStatus(devDir, base, releases, false);
+  const devReposKey = JSON.stringify(devRepos);
+  const refreshKey = JSON.stringify([profile.id, mirrorDir, devDir, base, releases, profile.transferDir, devRepos]);
+  const beginRefresh = useRequestGeneration(refreshKey);
+  const [snapshot, setSnapshot] = useState<{
+    key: string; state: MirrorState | null; packages: PackageInfo[];
+    packageError: string | null; devExists: Record<string, boolean>;
+  } | null>(null);
+  const current = snapshot?.key === refreshKey ? snapshot : null;
+  const state = current?.state ?? null;
+  const packages = current?.packages ?? [];
+  const packageError = current?.packageError ?? null;
+  const devExists = current?.devExists ?? {};
 
   const reloadAll = useCallback(async () => {
-    // 镜像状态由 mirror.reload() 一次读出，别再单独查一遍：
-    // 大仓库（上千分支）的 repo_status 很贵。
-    const [, , nextState, nextPackages, devFlags] = await Promise.all([
-      mirror.reload(),
-      repo.reload(),
+    const isCurrent = beginRefresh();
+    if (!isCurrent()) return;
+    // Reuse the selected repository's full status. Other rows only need a probe.
+    const currentRepo = repo.reload();
+    const [nextState, packageResult, devFlags] = await Promise.all([
       mirrorDir ? api.mirrorState(mirrorDir).catch(() => null) : null,
-      api.listPackages(profile.transferDir).then((items) => { setPackageError(null); return items; }).catch((error) => { setPackageError(String(error)); return []; }),
-      Promise.all(
-        devRepos.map(async (dir) => {
-          const isRepo = await api
-            .repoStatus(dir, base, releases)
-            .then((s) => s.isRepo)
-            .catch(() => false);
-          return [dir, isRepo] as const;
-        }),
+      api.listPackages(profile.transferDir).then(
+        (packages) => ({ packages, packageError: null }),
+        (error) => ({ packages: [] as PackageInfo[], packageError: String(error) }),
       ),
+      Promise.all((JSON.parse(devReposKey) as string[]).map(async (dir) => [
+        dir,
+        dir === devDir ? !!(await currentRepo)?.isRepo : await api.probeRepo(dir).catch(() => false),
+      ] as const)),
+      mirror.reload(),
+      currentRepo,
     ]);
-    setState(nextState);
-    setPackages(nextPackages);
-    setDevExists(Object.fromEntries(devFlags));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mirror.reload, repo.reload, mirrorDir, devRepos.join("\n"), base, releases.join("\n"), profile.transferDir]);
+    if (!isCurrent()) return;
+    setSnapshot({ key: refreshKey, state: nextState, ...packageResult, devExists: Object.fromEntries(devFlags) });
+  }, [beginRefresh, refreshKey, mirror.reload, repo.reload, mirrorDir, devDir, devReposKey, profile.transferDir]);
 
-  useEffect(() => {
-    reloadAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile.id]);
+  useEffect(() => { void reloadAll(); }, [reloadAll]);
   useRefreshOnFocus(reloadAll);
 
   // 镜像必须是本工具建的裸仓库
@@ -152,7 +157,15 @@ export function ExternalView({ profile }: { profile: Profile }) {
   const [allowGap, setAllowGap] = useState(false);
   const [importRes, setImportRes] = useState<ImportInResult | null>(null);
   // 导入只更新镜像，开发仓库要再 fetch 一次才看得到
-  const [staleDevs, setStaleDevs] = useState(false);
+  const staleKey = JSON.stringify([profile.id, mirrorDir]);
+  const [staleState, setStaleState] = useState<{ key: string; paths: Set<string> } | null>(null);
+  const staleDevs = staleState?.key === staleKey ? staleState.paths : new Set<string>();
+  const clearStale = (dir: string) => setStaleState((previous) => {
+    if (!previous || previous.key !== staleKey || !previous.paths.has(dir)) return previous;
+    const paths = new Set(previous.paths);
+    paths.delete(dir);
+    return { key: staleKey, paths };
+  });
 
   const importIn = async (path: string) => {
     const r = await run(mirrorReady ? "导入增量包" : "建立外网镜像", () =>
@@ -160,7 +173,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
     );
     if (r) {
       setImportRes(r);
-      setStaleDevs(true);
+      setStaleState({ key: staleKey, paths: new Set(devRepos) });
       notify("ok", r.created ? "已建立外网镜像" : `已导入 #${r.seq ?? "?"}`);
     }
     reloadAll();
@@ -176,24 +189,32 @@ export function ExternalView({ profile }: { profile: Profile }) {
     const ok = await run("克隆开发仓库", () =>
       api.createDevRepo(mirrorDir, dir, profile.userName ?? "", profile.userEmail ?? ""),
     );
-    if (ok !== undefined) notify("ok", `已从镜像克隆到 ${dir}`);
+    if (ok !== undefined) {
+      clearStale(dir);
+      notify("ok", `已从镜像克隆到 ${dir}`);
+    }
     reloadAll();
   };
 
   const syncDev = async (dir: string) => {
     const ok = await run("同步开发仓库", () => api.syncDevRepo(dir, mirrorDir));
-    if (ok !== undefined) notify("ok", `${dir} 已同步到镜像的最新状态`);
-    setStaleDevs(false);
+    if (ok !== undefined) {
+      clearStale(dir);
+      notify("ok", `${dir} 已同步到镜像的最新状态`);
+    }
     reloadAll();
   };
 
   const syncAll = async () => {
-    for (const d of devRepos.filter((x) => devExists[x])) {
-      const ok = await run("同步开发仓库", () => api.syncDevRepo(d, mirrorDir));
-      if (ok === undefined) return;
-    }
-    notify("ok", "所有开发仓库已同步");
-    setStaleDevs(false);
+    const ok = await run("同步所有开发仓库", async () => {
+      for (const dir of devRepos.filter((path) => devExists[path])) {
+        await api.syncDevRepo(dir, mirrorDir);
+        clearStale(dir);
+      }
+      return null;
+    });
+    if (ok !== undefined) notify("ok", "所有开发仓库已同步");
+    // Even a partially failed batch must refresh the successfully synced rows.
     reloadAll();
   };
 
@@ -463,7 +484,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
           <Empty>还没有配置开发仓库目录，去配置里添加。</Empty>
         ) : (
           <>
-            {staleDevs && (
+            {devRepos.some((dir) => staleDevs.has(dir)) && (
               <Notice
                 tone="warning"
                 title="镜像已更新，开发仓库还没跟上"
@@ -477,8 +498,8 @@ export function ExternalView({ profile }: { profile: Profile }) {
                   key={d}
                   path={d}
                   current={i === devIdx}
-                  cloned={!!devExists[d]}
-                  stale={staleDevs}
+                  cloned={devExists[d]}
+                  stale={staleDevs.has(d)}
                   onSelect={() => setDevIdx(i)}
                   onSync={() => syncDev(d)}
                   onClone={() => cloneDev(d)}

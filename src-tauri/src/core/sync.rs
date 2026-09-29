@@ -8,12 +8,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::error::{invalid, Result, SyncError};
 use super::git::Git;
 use super::manifest::{BundleKind, Manifest, RefEntry, FORMAT};
 use super::repo::{self, CommitInfo, InternalState, MirrorState};
+use super::storage::{atomic_write, OperationLock};
 use crate::args;
 
 pub const MIN_GIT: (u32, u32) = (2, 25);
@@ -31,7 +32,13 @@ fn tool_version() -> String {
 
 fn sanitize(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -81,14 +88,16 @@ impl OpOutcome {
 
 /// 冲突消息里指明操作在哪个 worktree；主工作树不加后缀。
 fn at_worktree(wt: &Option<String>) -> String {
-    wt.as_ref().map(|p| format!("（在 {p}）")).unwrap_or_default()
+    wt.as_ref()
+        .map(|p| format!("（在 {p}）"))
+        .unwrap_or_default()
 }
 
 /// `git bundle create` + `bundle verify`，两端导出共用。
 ///
 /// 返回 `Some(NothingToSync)` 表示没有可打包的提交，调用方直接返回它。
-/// 任何失败都会删掉半成品：此时 manifest 还没写，残包会被 `list_packages`
-/// 当成「未知」类型的可导入包列在界面上。
+/// 半成品只存在于隐藏 staging 目录，错误/取消由 TempDir 自动清理，
+/// 不会被 `list_packages` 当成手工打包的完整 bundle。
 fn create_and_verify_bundle(
     g: &Git,
     cwd: &Path,
@@ -107,7 +116,7 @@ fn create_and_verify_bundle(
         return Err(SyncError::Git {
             cmd: "git bundle create".into(),
             code: out.code,
-            stderr: out.stderr.trim().to_string(),
+            stderr: super::git::redact(out.stderr.trim()),
         });
     }
     if let Err(e) = g.run(cwd, args!["bundle", "verify", bundle]) {
@@ -115,6 +124,122 @@ fn create_and_verify_bundle(
         return Err(e);
     }
     Ok(None)
+}
+
+/// A prepared export can always finish after a failed rename/state write. The
+/// pending marker hides the package until both files and its sequence are durable.
+#[derive(Serialize, Deserialize)]
+struct ExportJournal {
+    staging: PathBuf,
+    destination: PathBuf,
+    manifest: Manifest,
+    state: serde_json::Value,
+    warnings: Vec<String>,
+}
+
+fn export_journal(dir: &Path) -> PathBuf {
+    dir.join("offline-sync/export-pending.json")
+}
+
+fn pending_marker(payload: &Path) -> PathBuf {
+    let mut name = payload.as_os_str().to_owned();
+    name.push(".pending");
+    PathBuf::from(name)
+}
+
+fn publish_export<T: Serialize>(
+    state_dir: &Path,
+    transfer_dir: &Path,
+    staging: tempfile::TempDir,
+    manifest: Manifest,
+    state: &T,
+    warnings: Vec<String>,
+) -> Result<ExportOutcome> {
+    let destination = std::path::absolute(transfer_dir)?.join(&manifest.payload);
+    let _transfer_lock = OperationLock::acquire(destination.parent().unwrap())?;
+    if destination.exists() || super::manifest::manifest_path_for(&destination).exists() {
+        return invalid(format!("包已存在，不会覆盖：{}", destination.display()));
+    }
+    manifest.validate(&destination)?;
+    let payload = staging.path().join(&manifest.payload);
+    let files = if payload.is_dir() {
+        fs::read_dir(&payload)?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<std::io::Result<Vec<_>>>()?
+    } else {
+        vec![payload.clone()]
+    };
+    for file in files {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(file)?
+            .sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        if payload.is_dir() {
+            fs::File::open(&payload)?.sync_all()?;
+        }
+        fs::File::open(staging.path())?.sync_all()?;
+    }
+    let journal = ExportJournal {
+        staging: std::path::absolute(staging.path())?,
+        destination,
+        manifest,
+        state: serde_json::to_value(state)?,
+        warnings,
+    };
+    atomic_write(
+        &export_journal(state_dir),
+        &serde_json::to_vec_pretty(&journal)?,
+    )?;
+    // From here the journal owns the directory, including when finalization fails.
+    let _ = staging.keep();
+    finish_export(state_dir, journal)
+}
+
+fn recover_export(state_dir: &Path) -> Result<Option<ExportOutcome>> {
+    let path = export_journal(state_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let journal: ExportJournal = serde_json::from_slice(&fs::read(path)?)?;
+    let _transfer_lock = OperationLock::acquire(
+        journal
+            .destination
+            .parent()
+            .ok_or_else(|| SyncError::Invalid("导出恢复路径无效".into()))?,
+    )?;
+    finish_export(state_dir, journal).map(Some)
+}
+
+fn finish_export(state_dir: &Path, journal: ExportJournal) -> Result<ExportOutcome> {
+    journal.manifest.validate(&journal.destination)?;
+    let marker = pending_marker(&journal.destination);
+    atomic_write(&marker, b"export not committed\n")?;
+    let staged = journal.staging.join(&journal.manifest.payload);
+    if staged.exists() {
+        if journal.destination.exists() {
+            return invalid("导出目标已存在，无法安全恢复");
+        }
+        fs::rename(&staged, &journal.destination)?;
+    } else if !journal.destination.exists() {
+        return invalid("待恢复的导出内容丢失，请保留导出日志并检查传输目录");
+    }
+    let mpath = journal.manifest.write_for(&journal.destination)?;
+    repo::save_state(state_dir, &journal.state)?;
+    fs::remove_file(&marker)?;
+    fs::remove_file(export_journal(state_dir))?;
+    let _ = fs::remove_dir_all(&journal.staging);
+    Ok(ExportOutcome::Exported {
+        kind: journal.manifest.kind,
+        seq: journal.manifest.seq,
+        payload: journal.destination.to_string_lossy().into_owned(),
+        manifest: mpath.to_string_lossy().into_owned(),
+        refs: journal.manifest.refs,
+        warnings: journal.warnings,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -220,7 +345,10 @@ pub fn list_packages(dir: &Path) -> Result<Vec<PackageInfo>> {
     let mut seen = std::collections::HashSet::new();
     for entry in fs::read_dir(dir)? {
         let p = entry?.path();
-        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if let Some(stem) = name.strip_suffix(".manifest.json") {
             let text = fs::read_to_string(&p)?;
             let m: Manifest = match serde_json::from_str(&text) {
@@ -229,6 +357,12 @@ pub fn list_packages(dir: &Path) -> Result<Vec<PackageInfo>> {
             };
             let payload = dir.join(&m.payload);
             seen.insert(stem.to_string());
+            if m.validate(&payload).is_err()
+                || pending_marker(&payload).exists()
+                || super::manifest::manifest_path_for(&payload) != p
+            {
+                continue;
+            }
             out.push(PackageInfo {
                 payload_exists: payload.exists(),
                 payload_path: payload.to_string_lossy().into_owned(),
@@ -240,8 +374,15 @@ pub fn list_packages(dir: &Path) -> Result<Vec<PackageInfo>> {
     for entry in fs::read_dir(dir)? {
         let p = entry?.path();
         if p.extension().is_some_and(|e| e == "bundle") {
-            let stem = p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-            if !seen.contains(&stem) {
+            let stem = p
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            if !seen.contains(&stem)
+                && !pending_marker(&p).exists()
+                && !super::manifest::manifest_path_for(&p).exists()
+            {
                 out.push(PackageInfo {
                     manifest: None,
                     manifest_path: None,
@@ -259,37 +400,173 @@ pub fn list_commits(g: &Git, repo: &Path, from: &str, to: &str) -> Result<Vec<Co
     repo::commits_between(g, repo, from, to)
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RebaseJournal {
+    branch: String,
+    old_base: Option<String>,
+    new_base: String,
+    old_head: String,
+    target: String,
+    #[serde(default)]
+    completed: bool,
+}
+
+fn rebase_journal(git_dir: &Path) -> PathBuf {
+    git_dir.join("offline-sync-rebase.json")
+}
+
+fn read_rebase_journal(git_dir: &Path) -> Result<Option<RebaseJournal>> {
+    let path = rebase_journal(git_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
+}
+
+fn clear_rebase_journal(git_dir: &Path) -> Result<()> {
+    match fs::remove_file(rebase_journal(git_dir)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn finish_rebase(g: &Git, work: &Path, gd: &Path) -> Result<()> {
+    if let Some(mut journal) = read_rebase_journal(gd)? {
+        journal.completed = true;
+        atomic_write(&rebase_journal(gd), &serde_json::to_vec(&journal)?)?;
+        repo::set_sync_base(g, work, &journal.branch, &journal.new_base)?;
+        clear_rebase_journal(gd)?;
+    }
+    Ok(())
+}
+
+/// Recover a process interrupted after Git finished but before config/journal
+/// commit. An aborted/never-started operation retains its original (possibly unset) base.
+fn recover_rebase(g: &Git, work: &Path, gd: &Path) -> Result<()> {
+    if repo::in_progress(gd).is_some() {
+        return Ok(());
+    }
+    if let Some(journal) = read_rebase_journal(gd)? {
+        let head = repo::rev_parse(g, work, &format!("refs/heads/{}", journal.branch))?;
+        let advanced = head != journal.old_head
+            && g.exec(
+                Some(work),
+                &args!["merge-base", "--is-ancestor", &journal.target, &head],
+                None,
+                false,
+            )?
+            .ok();
+        if journal.completed || advanced {
+            finish_rebase(g, work, gd)?;
+        } else {
+            clear_rebase_journal(gd)?;
+        }
+    }
+    Ok(())
+}
+
+/// Do not apply a stale journal to a manually started, unrelated rebase.
+fn match_rebase_journal(gd: &Path) -> Result<()> {
+    if let Some(journal) = read_rebase_journal(gd)? {
+        let matching = ["rebase-merge", "rebase-apply"].iter().any(|dir| {
+            let dir = gd.join(dir);
+            fs::read_to_string(dir.join("head-name"))
+                .ok()
+                .is_some_and(|s| s.trim() == format!("refs/heads/{}", journal.branch))
+                && fs::read_to_string(dir.join("orig-head"))
+                    .ok()
+                    .is_some_and(|s| s.trim() == journal.old_head)
+                && fs::read_to_string(dir.join("onto"))
+                    .ok()
+                    .is_some_and(|s| s.trim() == journal.target)
+        });
+        if !matching {
+            clear_rebase_journal(gd)?;
+        }
+    }
+    Ok(())
+}
+
+fn operation_failure(
+    g: &Git,
+    work: &Path,
+    out: super::git::GitOutput,
+    wt: Option<String>,
+    command: &str,
+) -> Result<OpOutcome> {
+    let files = conflict_files(g, work);
+    let active = repo::in_progress(&repo::git_dir(g, work)?).is_some();
+    if !active {
+        return Err(SyncError::Git {
+            cmd: command.into(),
+            code: out.code,
+            stderr: super::git::redact(out.stderr.trim()),
+        });
+    }
+    Ok(OpOutcome {
+        ok: false,
+        conflict: !files.is_empty(),
+        files,
+        message: format!(
+            "操作未完成{}：{}",
+            at_worktree(&wt),
+            super::git::redact(out.stderr.trim())
+        ),
+        worktree: wt,
+    })
+}
+
 /// 中止未完成的 rebase / am / merge。
 pub fn abort(g: &Git, repo: &Path) -> Result<OpOutcome> {
     let gd = repo::git_dir(g, repo)?;
+    let _lock = OperationLock::acquire(&gd.join("offline-sync-operation"))?;
     match repo::in_progress(&gd).as_deref() {
-        Some("rebase") => g.run(repo, args!["rebase", "--abort"])?,
-        Some("am") => g.run(repo, args!["am", "--abort"])?,
-        Some("merge") => g.run(repo, args!["merge", "--abort"])?,
-        _ => return Ok(OpOutcome::done("没有需要中止的操作")),
-    };
+        Some("rebase") => {
+            match_rebase_journal(&gd)?;
+            g.run(repo, args!["rebase", "--abort"])?;
+            // syncBase has not been changed while the operation was pending.
+            clear_rebase_journal(&gd)?;
+        }
+        Some("am") => {
+            g.run(repo, args!["am", "--abort"])?;
+        }
+        Some("merge") => {
+            g.run(repo, args!["merge", "--abort"])?;
+        }
+        _ => {
+            recover_rebase(g, repo, &gd)?;
+            return Ok(OpOutcome::done("没有需要中止的操作"));
+        }
+    }
     Ok(OpOutcome::done("已中止"))
 }
 
 /// 冲突解决后继续 rebase / am。
 pub fn continue_op(g: &Git, repo: &Path) -> Result<OpOutcome> {
     let gd = repo::git_dir(g, repo)?;
+    let _lock = OperationLock::acquire(&gd.join("offline-sync-operation"))?;
+    let rebasing = repo::in_progress(&gd).as_deref() == Some("rebase");
     let a = match repo::in_progress(&gd).as_deref() {
-        Some("rebase") => args!["-c", "core.editor=true", "rebase", "--continue"],
+        Some("rebase") => {
+            match_rebase_journal(&gd)?;
+            args!["-c", "core.editor=true", "rebase", "--continue"]
+        }
         Some("am") => args!["am", "--continue"],
-        _ => return Ok(OpOutcome::done("没有进行中的操作")),
+        _ => {
+            recover_rebase(g, repo, &gd)?;
+            return Ok(OpOutcome::done("没有进行中的操作"));
+        }
     };
     let out = g.exec(Some(repo), &a, None, true)?;
     if out.ok() {
+        if rebasing {
+            finish_rebase(g, repo, &gd)?;
+        }
         Ok(OpOutcome::done("已继续完成"))
     } else {
-        Ok(OpOutcome {
-            ok: false,
-            conflict: true,
-            files: conflict_files(g, repo),
-            message: out.stderr.trim().to_string(),
-            worktree: None,
-        })
+        operation_failure(g, repo, out, None, "git continue")
     }
 }
 
@@ -319,6 +596,10 @@ pub fn export_out(
     fetch_upstream: bool,
     force_full: bool,
 ) -> Result<ExportOutcome> {
+    let _lock = OperationLock::acquire(mirror)?;
+    if let Some(outcome) = recover_export(mirror)? {
+        return Ok(outcome);
+    }
     if !repo::is_bare(g, mirror)? {
         return invalid("导出需要在镜像（裸）仓库中进行");
     }
@@ -337,15 +618,27 @@ pub fn export_out(
     }
 
     let refs = repo::list_refs(g, mirror, &["refs/heads", "refs/tags"])?;
-    let full = force_full || state.last_heads.is_empty();
-    let seq = state.out_seq + 1;
-    let kind = if full { BundleKind::Full } else { BundleKind::Incr };
-    let file_name = format!(
+    let snapshot: BTreeMap<String, String> = refs.iter().cloned().collect();
+    if !force_full && state.last_refs.as_ref() == Some(&snapshot) {
+        return Ok(ExportOutcome::NothingToSync {
+            message: "内网提交和引用均未改变，无需同步".into(),
+        });
+    }
+    let mut full = force_full || state.last_heads.is_empty() || state.last_refs.is_none();
+    let seq = state
+        .out_seq
+        .checked_add(1)
+        .ok_or_else(|| SyncError::Invalid("导出序号溢出".into()))?;
+    // Build invisibly; neither an interrupted bundle nor a patch directory is a package.
+    let staging = tempfile::Builder::new()
+        .prefix(".offline-sync-export-")
+        .tempdir_in(transfer_dir)?;
+    let mut file_name = format!(
         "{}-out-{seq:04}-{}.bundle",
         sanitize(repo_name),
         if full { "full" } else { "incr" }
     );
-    let bundle = transfer_dir.join(&file_name);
+    let mut bundle = staging.path().join(&file_name);
 
     // 只打包分支和 tag（GitLab 镜像里的 refs/merge-requests、refs/keep-around 等不需要）
     let mut a = args!["bundle", "create", &bundle];
@@ -368,11 +661,29 @@ pub fn export_out(
         a.extend(base.iter().map(Into::into));
     }
 
-    if let Some(nothing) =
-        create_and_verify_bundle(g, mirror, &bundle, a, "内网没有新提交，无需同步")?
+    if create_and_verify_bundle(g, mirror, &bundle, a, "内网没有新提交，无需同步")?.is_some()
     {
-        return Ok(nothing);
+        // Git cannot encode ref-only changes as an empty incremental bundle. Keep
+        // format 1 compatibility by publishing a full bundle with the new snapshot.
+        full = true;
+        file_name = format!("{}-out-{seq:04}-full.bundle", sanitize(repo_name));
+        bundle = staging.path().join(&file_name);
+        warnings.push("引用发生变化但没有新对象，已回退为全量包".into());
+        if let Some(nothing) = create_and_verify_bundle(
+            g,
+            mirror,
+            &bundle,
+            args!["bundle", "create", &bundle, "HEAD", "--branches", "--tags"],
+            "仓库没有可导出的引用",
+        )? {
+            return Ok(nothing);
+        }
     }
+    let kind = if full {
+        BundleKind::Full
+    } else {
+        BundleKind::Incr
+    };
 
     let ref_entries: Vec<RefEntry> = refs
         .iter()
@@ -394,23 +705,12 @@ pub fn export_out(
         refs: ref_entries.clone(),
         tool_version: tool_version(),
     };
-    let mpath = manifest.write_for(&bundle)?;
-
     state.repo_id = Some(rid);
     state.out_seq = seq;
     state.last_heads = refs.into_iter().map(|(_, s)| s).collect();
+    state.last_refs = Some(snapshot);
     state.last_export_at = Some(now_secs());
-    repo::save_state(mirror, &state)?;
-    g.info(format!("已导出 #{seq}：{}", bundle.display()));
-
-    Ok(ExportOutcome::Exported {
-        kind,
-        seq,
-        payload: bundle.to_string_lossy().into_owned(),
-        manifest: mpath.to_string_lossy().into_owned(),
-        refs: ref_entries,
-        warnings,
-    })
+    publish_export(mirror, transfer_dir, staging, manifest, &state, warnings)
 }
 
 fn parse_list_heads(out: &str) -> Vec<(String, String)> {
@@ -422,6 +722,112 @@ fn parse_list_heads(out: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Load objects without touching any refs. Even a damaged snapshot must never
+/// partially fetch heads/tags before its deletion instructions have been checked.
+fn unpack_snapshot(
+    g: &Git,
+    work: &Path,
+    bundle: &Path,
+    manifest: Option<&Manifest>,
+) -> Result<BTreeMap<String, String>> {
+    g.run(work, args!["bundle", "verify", bundle])?;
+    let advertised: BTreeMap<String, String> =
+        parse_list_heads(&g.query(work, args!["bundle", "list-heads", bundle])?)
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
+            .collect();
+    let wanted: BTreeMap<String, String> = match manifest {
+        Some(m) => {
+            let snapshot: BTreeMap<String, String> = m
+                .refs
+                .iter()
+                .map(|r| (r.name.clone(), r.sha.clone()))
+                .collect();
+            for (name, sha) in &advertised {
+                if snapshot.get(name) != Some(sha) {
+                    return invalid(format!("manifest 与 bundle 引用不一致：{name}"));
+                }
+            }
+            snapshot
+        }
+        None => advertised,
+    };
+    if wanted.is_empty() {
+        return invalid("包中没有可导入的分支或标签");
+    }
+    for (name, sha) in &wanted {
+        if !super::manifest::valid_ref(name) || !super::manifest::valid_oid(sha) {
+            return invalid(format!("包中引用或 SHA 无效：{name}"));
+        }
+    }
+    // Unlike fetch, unbundle only writes the object database, never local refs,
+    // FETCH_HEAD, auto-followed tags or refs in checked-out worktrees.
+    g.run(work, args!["bundle", "unbundle", bundle])?;
+    let input = wanted.values().cloned().collect::<Vec<_>>().join("\n") + "\n";
+    let checked = g.query_stdin(
+        work,
+        args!["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        &input,
+    )?;
+    let lines: Vec<_> = checked.lines().collect();
+    if lines.len() != wanted.len() {
+        return invalid("无法完整验证包中的引用对象");
+    }
+    for ((name, sha), line) in wanted.iter().zip(lines) {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        if parts.len() != 2
+            || parts[0] != sha
+            || parts[1] == "missing"
+            || (name.starts_with("refs/heads/") && parts[1] != "commit")
+        {
+            return invalid(format!("包缺少引用对象或分支未指向提交：{name} ({sha})"));
+        }
+    }
+    // Bound argv for large mirrors on Windows; --quiet validates connectivity
+    // without emitting the entire reachable object graph.
+    g.query_stdin(
+        work,
+        args!["rev-list", "--objects", "--quiet", "--stdin"],
+        &input,
+    )?;
+    if let Some(m) = manifest.filter(|m| matches!(m.kind, BundleKind::Full | BundleKind::Incr)) {
+        let base = wanted
+            .get(&format!("refs/heads/{}", m.base_branch))
+            .ok_or_else(|| SyncError::Invalid("manifest 缺少基准分支".into()))?;
+        if repo::repo_id(g, work, base)? != m.repo_id {
+            return invalid("manifest 仓库身份与包中的基准分支不一致");
+        }
+    }
+    Ok(wanted)
+}
+
+/// update-ref --stdin already batches atomically. CAS guards also reject an
+/// external writer changing any observed ref during validation (no partial updates).
+fn replace_refs(
+    g: &Git,
+    work: &Path,
+    before: &BTreeMap<String, String>,
+    wanted: &BTreeMap<String, String>,
+    prune: bool,
+) -> Result<()> {
+    let mut script = String::new();
+    for (name, sha) in wanted {
+        match before.get(name) {
+            Some(old) => script.push_str(&format!("update {name} {sha} {old}\n")),
+            None => script.push_str(&format!("create {name} {sha}\n")),
+        }
+    }
+    if prune {
+        for (name, old) in before {
+            if !wanted.contains_key(name) {
+                script.push_str(&format!("delete {name} {old}\n"));
+            }
+        }
+    }
+    g.query_stdin(work, args!["update-ref", "--no-deref", "--stdin"], &script)?;
+    Ok(())
+}
+
 /// 外网 → 内网：把回传 bundle 中的分支导入工作仓库。
 /// 分支已存在且无法快进时，导入为 `<分支>-import-<序号>`，不覆盖本地提交。
 pub fn import_back(
@@ -431,6 +837,8 @@ pub fn import_back(
     base_branch: &str,
     releases: &[String],
 ) -> Result<ImportBackResult> {
+    let common = g.query(work, args!["rev-parse", "--git-common-dir"])?;
+    let _lock = OperationLock::acquire(&work.join(common.trim()).join("offline-sync-operation"))?;
     if repo::is_bare(g, work)? || repo::is_mirror(g, work) {
         return invalid("请在工作仓库（非镜像）中导入回传包");
     }
@@ -448,15 +856,16 @@ pub fn import_back(
         warnings.push("未找到 manifest，跳过仓库身份检查".into());
     }
 
-    g.run(work, args!["bundle", "verify", bundle])?;
-    let heads = parse_list_heads(&g.query(work, args!["bundle", "list-heads", bundle])?);
+    let before: BTreeMap<String, String> = repo::list_refs(g, work, &["refs/heads"])?
+        .into_iter()
+        .collect();
+    let heads = unpack_snapshot(g, work, bundle, manifest.as_ref())?;
     // 分支名 → 检出它的工作树路径。不能只看主工作树的 HEAD：
     // 被 linked worktree 占用的分支同样 fetch 不进去，git 会报
     // "refusing to fetch into branch ... checked out at ..."，
     // 那条消息不含 non-fast-forward/rejected，会被当成未知错误抛出，
     // 而此时循环里前面的分支已经导入了，留下一次半完成的导入。
-    let checked_out: std::collections::HashMap<String, String> = repo::list_worktrees(g, work)
-        .unwrap_or_default()
+    let checked_out: std::collections::HashMap<String, String> = repo::list_worktrees(g, work)?
         .into_iter()
         .filter(|w| !w.bare)
         .filter_map(|w| w.branch.clone().map(|b| (b, w.path)))
@@ -468,8 +877,8 @@ pub fn import_back(
 
     // 先把所有被检出的分支一次查清再动手：中途失败会留下一次半完成的导入
     let blocked: Vec<String> = heads
-        .iter()
-        .filter_map(|(name, _)| name.strip_prefix("refs/heads/"))
+        .keys()
+        .filter_map(|name| name.strip_prefix("refs/heads/"))
         .filter_map(|b| checked_out.get(b).map(|w| (b, w)))
         .map(|(b, w)| format!("{b}（在 {w}）"))
         .collect();
@@ -481,34 +890,44 @@ pub fn import_back(
     }
 
     let mut branches = Vec::new();
+    let mut updates = BTreeMap::new();
     for (name, sha) in heads {
         let Some(branch) = name.strip_prefix("refs/heads/") else {
             continue;
         };
         let mut local = branch.to_string();
-        let out = g.exec(
-            Some(work),
-            &args!["fetch", bundle, format!("refs/heads/{branch}:refs/heads/{branch}")],
-            None,
-            true,
-        )?;
-        if !out.ok() {
-            if out.stderr.contains("non-fast-forward") || out.stderr.contains("rejected") {
+        if let Some(old) = before.get(&name) {
+            let check = g.exec(
+                Some(work),
+                &args!["merge-base", "--is-ancestor", old, &sha],
+                None,
+                false,
+            )?;
+            if check.code == 1 {
                 local = format!("{branch}-import-{seq_tag}");
-                g.run(
-                    work,
-                    args!["fetch", bundle, format!("refs/heads/{branch}:refs/heads/{local}")],
-                )?;
+                let alias = format!("refs/heads/{local}");
+                if checked_out.contains_key(&local) {
+                    return invalid(format!("导入目标分支 {local} 已被检出"));
+                }
+                if let Some(existing) = before.get(&alias) {
+                    if existing != &sha {
+                        return invalid(format!("导入目标分支 {local} 已存在且内容不同，不会覆盖"));
+                    }
+                }
                 warnings.push(format!(
                     "本地 {branch} 与回传内容已分叉（可能在内网 rebase 过），已导入为 {local}"
                 ));
-            } else {
+            } else if !check.ok() {
                 return Err(SyncError::Git {
-                    cmd: format!("git fetch {}", bundle.display()),
-                    code: out.code,
-                    stderr: out.stderr.trim().to_string(),
+                    cmd: "git merge-base --is-ancestor".into(),
+                    code: check.code,
+                    stderr: super::git::redact(check.stderr.trim()),
                 });
             }
+        }
+        let target = format!("refs/heads/{local}");
+        if updates.insert(target.clone(), sha.clone()).is_some() {
+            return invalid(format!("多个分支映射到同一个导入目标：{target}"));
         }
         let recorded = manifest
             .as_ref()
@@ -516,12 +935,32 @@ pub fn import_back(
             .and_then(|r| r.base.clone());
         let base = match recorded {
             Some(b) => b,
-            None => repo::infer_base(g, work, &local, base_branch, releases, "refs/remotes/origin/"),
+            None => {
+                let mut best = None;
+                if branch.starts_with("hotfix/") {
+                    for release in releases {
+                        let base_ref = format!("refs/remotes/origin/{release}");
+                        if repo::rev_exists(g, work, &base_ref) {
+                            let count: u64 = g
+                                .query(
+                                    work,
+                                    args!["rev-list", "--count", format!("{base_ref}..{sha}")],
+                                )?
+                                .trim()
+                                .parse()
+                                .unwrap_or(u64::MAX);
+                            if best.as_ref().is_none_or(|(n, _)| count < *n) {
+                                best = Some((count, release.clone()));
+                            }
+                        }
+                    }
+                }
+                best.map(|(_, b)| b).unwrap_or_else(|| base_branch.into())
+            }
         };
-        repo::set_sync_base(g, work, &local, &base)?;
         let origin_base = format!("refs/remotes/origin/{base}");
         let commits = if repo::rev_exists(g, work, &origin_base) {
-            repo::commits_between(g, work, &origin_base, &format!("refs/heads/{local}"))?
+            repo::commits_between(g, work, &origin_base, &sha)?
         } else {
             warnings.push(format!(
                 "{local} 的基准分支 origin/{base} 不存在，请先 fetch origin"
@@ -538,6 +977,10 @@ pub fn import_back(
     }
     if branches.is_empty() {
         return invalid("回传包里没有分支");
+    }
+    replace_refs(g, work, &before, &updates, false)?;
+    for branch in &branches {
+        repo::set_sync_base(g, work, &branch.local, &branch.base)?;
     }
     Ok(ImportBackResult { branches, warnings })
 }
@@ -602,13 +1045,7 @@ pub fn import_patches(
     if out.ok() {
         Ok(OpOutcome::done(format!("已应用 {} 个补丁到 {branch}", patches.len())).at(wt_out))
     } else {
-        Ok(OpOutcome {
-            ok: false,
-            conflict: true,
-            files: conflict_files(g, &target),
-            message: format!("补丁应用冲突{}：解决后点击“继续”，或点击“中止”", at_worktree(&wt_out)),
-            worktree: wt_out,
-        })
+        operation_failure(g, &target, out, wt_out, "git am --3way")
     }
 }
 
@@ -626,9 +1063,16 @@ pub fn rebase_onto(
     // 分支可能被某个 linked worktree 检出。那时不能（也不需要）switch：
     // `git switch` 会直接报 "already used by worktree"。就地在那个目录 rebase。
     let wt = repo::linked_worktree_for(g, repo, branch).map(|w| w.path);
-    let work: PathBuf = wt.as_deref().map_or_else(|| repo.to_path_buf(), PathBuf::from);
+    let work: PathBuf = wt
+        .as_deref()
+        .map_or_else(|| repo.to_path_buf(), PathBuf::from);
 
+    let gd = repo::git_dir(g, &work)?;
+    let _lock = OperationLock::acquire(&gd.join("offline-sync-operation"))?;
+    recover_rebase(g, &work, &gd)?;
     ensure_worktree_clean(g, &work)?;
+    validate_branch_name(g, &work, branch)?;
+    validate_branch_name(g, &work, onto)?;
     if fetch_upstream {
         g.run(repo, args!["fetch", "origin", "--prune"])?;
     }
@@ -641,32 +1085,42 @@ pub fn rebase_onto(
     if wt.is_none() {
         g.run(&work, args!["switch", branch])?;
     }
-    // 先写记录：冲突后“继续”完成时，记录也已经是新基准
-    repo::set_sync_base(g, repo, branch, onto)?;
+    let journal = RebaseJournal {
+        branch: branch.into(),
+        old_base: repo::get_sync_base(g, repo, branch),
+        new_base: onto.into(),
+        old_head: repo::rev_parse(g, &work, "HEAD")?,
+        target: repo::rev_parse(g, repo, &target)?,
+        completed: false,
+    };
+    atomic_write(&rebase_journal(&gd), &serde_json::to_vec(&journal)?)?;
     let a = match &old {
         Some(b) => args!["rebase", "--onto", &target, format!("origin/{b}")],
         None => args!["rebase", &target],
     };
     let out = g.exec(Some(&work), &a, None, true)?;
     if out.ok() {
+        finish_rebase(g, &work, &gd)?;
         Ok(OpOutcome::done(match &old {
             Some(b) => format!("{branch} 已从 origin/{b} 移到最新的 {target}"),
             None => format!("{branch} 已基于最新的 {target}"),
         })
         .at(wt))
     } else {
-        Ok(OpOutcome {
-            ok: false,
-            conflict: true,
-            files: conflict_files(g, &work),
-            message: format!("rebase 冲突{}：解决后点击“继续”，或点击“中止”", at_worktree(&wt)),
-            worktree: wt,
-        })
+        if repo::in_progress(&gd).is_none() {
+            clear_rebase_journal(&gd)?;
+        }
+        operation_failure(g, &work, out, wt, "git rebase")
     }
 }
 
 /// 推送到内网远程。拒绝在镜像仓库执行（mirror 推送会覆盖/删除远程分支）。
-pub fn push_branch(g: &Git, work: &Path, branch: &str, force_with_lease: bool) -> Result<OpOutcome> {
+pub fn push_branch(
+    g: &Git,
+    work: &Path,
+    branch: &str,
+    force_with_lease: bool,
+) -> Result<OpOutcome> {
     if repo::is_bare(g, work)? || repo::is_mirror(g, work) {
         return invalid("禁止在镜像仓库中推送：会覆盖或删除远程分支。请在工作仓库中推送");
     }
@@ -699,10 +1153,17 @@ fn mirror_refs(g: &Git, repo: &Path) -> Result<BTreeMap<String, String>> {
 /// `git fetch origin <任意分支>` 和 `git worktree add` 都能正常工作；
 /// 导入也不再碰开发仓库，不会和正在跑的 agent 抢工作区。
 ///
-/// 首次和增量走同一条 fetch 路径，首次只是多一步 `git init --bare`。
+/// 首次和增量都先 unbundle 对象、校验，再以一次事务更新 heads/tags；
+/// 首次只是多一步 `git init --bare`。
 /// 刻意不用 `git clone --mirror <bundle>`：那会留下一个指向 U 盘上 bundle 文件的
 /// `remote.origin`，正是旧实现里 `couldn't find remote ref` 的成因。
-pub fn import_in(g: &Git, bundle: &Path, mirror_dir: &Path, allow_gap: bool) -> Result<ImportInResult> {
+pub fn import_in(
+    g: &Git,
+    bundle: &Path,
+    mirror_dir: &Path,
+    allow_gap: bool,
+) -> Result<ImportInResult> {
+    let _lock = OperationLock::acquire(mirror_dir)?;
     let manifest = Manifest::read_for(bundle)?;
     if let Some(m) = &manifest {
         if matches!(m.kind, BundleKind::Back | BundleKind::Patch) {
@@ -743,6 +1204,12 @@ pub fn import_in(g: &Git, bundle: &Path, mirror_dir: &Path, allow_gap: bool) -> 
                 return invalid("该包与当前镜像不是同一个项目（根提交不同）");
             }
         }
+        if m.kind == BundleKind::Full && m.seq < state.last_in_seq {
+            g.info(format!(
+                "警告：正在用较旧的全量包 #{} 回退镜像（当前 #{}）；分支和标签将按该快照同步",
+                m.seq, state.last_in_seq
+            ));
+        }
         if m.kind == BundleKind::Incr && state.last_in_seq > 0 {
             if m.seq <= state.last_in_seq {
                 return invalid(format!(
@@ -759,54 +1226,18 @@ pub fn import_in(g: &Git, bundle: &Path, mirror_dir: &Path, allow_gap: bool) -> 
         }
     }
 
-    g.run(mirror_dir, args!["bundle", "verify", bundle])?;
     let before = mirror_refs(g, mirror_dir)?;
-    g.run(
-        mirror_dir,
-        args![
-            "fetch",
-            "--no-tags",
-            bundle,
-            "+refs/heads/*:refs/heads/*",
-            "+refs/tags/*:refs/tags/*"
-        ],
-    )?;
-
-    // 用 manifest 校正：增量包不含"指向旧提交的新分支"，也不含删除信息。
-    // 这套校正只在镜像层做一次，开发仓库靠 `fetch --prune` 跟上。
+    let wanted = unpack_snapshot(g, mirror_dir, bundle, manifest.as_ref())?;
+    // Format 1 full/incr manifests are complete mirror snapshots: prune tags as
+    // well as branches. A manual bundle without a manifest only adds/updates refs.
+    replace_refs(g, mirror_dir, &before, &wanted, manifest.is_some())?;
     if let Some(m) = &manifest {
-        let wanted: Vec<String> = m.refs.iter().map(|r| r.sha.clone()).collect();
-        let have: std::collections::HashSet<String> =
-            repo::existing_objects(g, mirror_dir, &wanted)?.into_iter().collect();
-        let mut script = String::new();
-        let mut keep = std::collections::HashSet::new();
-        for (b, sha) in m.branches() {
-            let r = format!("refs/heads/{b}");
-            keep.insert(r.clone());
-            if have.contains(sha) {
-                script.push_str(&format!("update {r} {sha}\n"));
-            }
-        }
-        for (t, sha) in m.tags() {
-            if have.contains(sha) {
-                script.push_str(&format!("update refs/tags/{t} {sha}\n"));
-            }
-        }
-        for (name, _) in mirror_refs(g, mirror_dir)? {
-            if name.starts_with("refs/heads/") && !keep.contains(&name) {
-                script.push_str(&format!("delete {name}\n"));
-            }
-        }
-        if !script.is_empty() {
-            g.query_stdin(mirror_dir, args!["update-ref", "--stdin"], &script)?;
-        }
         state.last_in_seq = m.seq;
         if state.repo_id.is_none() {
             state.repo_id = Some(m.repo_id.clone());
         }
     }
     state.last_import_at = Some(now_secs());
-    repo::save_state(mirror_dir, &state)?;
 
     let after = mirror_refs(g, mirror_dir)?;
 
@@ -828,6 +1259,9 @@ pub fn import_in(g: &Git, bundle: &Path, mirror_dir: &Path, allow_gap: bool) -> 
         }
     }
 
+    // Persist the sequence last: a failed HEAD repair or state write leaves this
+    // same package retryable; refs are already a validated idempotent snapshot.
+    repo::save_state(mirror_dir, &state)?;
     let mut changes = Vec::new();
     for (name, new) in &after {
         let old = before.get(name);
@@ -892,7 +1326,10 @@ pub fn create_dev_repo(
         fs::create_dir_all(parent)?;
     }
     g.run_nocwd(args!["clone", mirror_dir, dev_dir])?;
-    g.run(dev_dir, args!["remote", "set-url", "--push", "origin", PUSH_DISABLED])?;
+    g.run(
+        dev_dir,
+        args!["remote", "set-url", "--push", "origin", PUSH_DISABLED],
+    )?;
     configure_repo(g, dev_dir, name, email)?;
     Ok(())
 }
@@ -912,13 +1349,21 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// 万一配置里的开发仓库路径填错、落到某个无关仓库上，会删掉那个仓库的本地 tag。
 pub fn sync_dev_repo(g: &Git, dev_dir: &Path, mirror_dir: &Path) -> Result<()> {
     let origin = g
-        .exec(Some(dev_dir), &args!["config", "--get", "remote.origin.url"], None, false)
+        .exec(
+            Some(dev_dir),
+            &args!["config", "--get", "remote.origin.url"],
+            None,
+            false,
+        )
         .ok()
         .filter(|o| o.ok())
         .map(|o| o.stdout.trim().to_string())
         .unwrap_or_default();
     if origin.is_empty() {
-        return invalid(format!("{} 没有配置 origin，不是从镜像克隆出来的", dev_dir.display()));
+        return invalid(format!(
+            "{} 没有配置 origin，不是从镜像克隆出来的",
+            dev_dir.display()
+        ));
     }
     if !same_dir(Path::new(&origin), mirror_dir) {
         return invalid(format!(
@@ -929,7 +1374,10 @@ pub fn sync_dev_repo(g: &Git, dev_dir: &Path, mirror_dir: &Path) -> Result<()> {
             mirror_dir.display()
         ));
     }
-    g.run(dev_dir, args!["fetch", "origin", "--prune", "--prune-tags", "--tags"])?;
+    g.run(
+        dev_dir,
+        args!["fetch", "origin", "--prune", "--prune-tags", "--tags"],
+    )?;
     Ok(())
 }
 
@@ -995,19 +1443,29 @@ pub fn export_back(
     base_branch: &str,
     releases: &[String],
 ) -> Result<ExportOutcome> {
+    let _lock = OperationLock::acquire(mirror_dir)?;
+    if let Some(outcome) = recover_export(mirror_dir)? {
+        return Ok(outcome);
+    }
     if branches.is_empty() {
         return invalid("请至少选择一个分支");
     }
     fs::create_dir_all(transfer_dir)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".offline-sync-export-")
+        .tempdir_in(transfer_dir)?;
     // 回传序号由镜像统一分配：多个开发仓库 / worktree 各自计数会撞号
     let mut state: MirrorState = repo::load_state(mirror_dir)?;
     let rid = match &state.repo_id {
         Some(r) => r.clone(),
         None => repo::repo_id(g, repo, &format!("refs/remotes/origin/{base_branch}"))?,
     };
-    let seq = state.back_seq + 1;
+    let seq = state
+        .back_seq
+        .checked_add(1)
+        .ok_or_else(|| SyncError::Invalid("回传序号溢出".into()))?;
     let file_name = format!("{}-back-{seq:04}.bundle", sanitize(repo_name));
-    let bundle = transfer_dir.join(&file_name);
+    let bundle = staging.path().join(&file_name);
 
     let mut refs = Vec::new();
     let mut a = args!["bundle", "create", &bundle];
@@ -1040,18 +1498,15 @@ pub fn export_back(
         refs: refs.clone(),
         tool_version: tool_version(),
     };
-    let mpath = manifest.write_for(&bundle)?;
     state.back_seq = seq;
-    repo::save_state(mirror_dir, &state)?;
-
-    Ok(ExportOutcome::Exported {
-        kind: BundleKind::Back,
-        seq,
-        payload: bundle.to_string_lossy().into_owned(),
-        manifest: mpath.to_string_lossy().into_owned(),
-        refs,
-        warnings: dirty_warning(g, repo).into_iter().collect(),
-    })
+    publish_export(
+        mirror_dir,
+        transfer_dir,
+        staging,
+        manifest,
+        &state,
+        dirty_warning(g, repo).into_iter().collect(),
+    )
 }
 
 /// 外网 → 内网：导出 patch 目录（`git format-patch --binary origin/<base>..<branch>`）。
@@ -1066,17 +1521,29 @@ pub fn export_patches(
     base_branch: &str,
     releases: &[String],
 ) -> Result<ExportOutcome> {
+    let _lock = OperationLock::acquire(mirror_dir)?;
+    if let Some(outcome) = recover_export(mirror_dir)? {
+        return Ok(outcome);
+    }
     let mut state: MirrorState = repo::load_state(mirror_dir)?;
     let rid = match &state.repo_id {
         Some(r) => r.clone(),
         None => repo::repo_id(g, repo, &format!("refs/remotes/origin/{base_branch}"))?,
     };
-    let seq = state.back_seq + 1;
-    let dir_name = format!("{}-patch-{seq:04}-{}", sanitize(repo_name), sanitize(branch));
-    let dir = transfer_dir.join(&dir_name);
-    if dir.exists() {
-        return invalid(format!("目录已存在：{}", dir.display()));
-    }
+    let seq = state
+        .back_seq
+        .checked_add(1)
+        .ok_or_else(|| SyncError::Invalid("回传序号溢出".into()))?;
+    let dir_name = format!(
+        "{}-patch-{seq:04}-{}",
+        sanitize(repo_name),
+        sanitize(branch)
+    );
+    fs::create_dir_all(transfer_dir)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".offline-sync-export-")
+        .tempdir_in(transfer_dir)?;
+    let dir = staging.path().join(&dir_name);
     let (branch_base, _) = repo::resolve_base(g, repo, branch, base_branch, releases);
     let from = format!("origin/{branch_base}");
     if !repo::rev_exists(g, repo, &from) {
@@ -1108,16 +1575,13 @@ pub fn export_patches(
         refs: refs.clone(),
         tool_version: tool_version(),
     };
-    let mpath = manifest.write_for(&dir)?;
     state.back_seq = seq;
-    repo::save_state(mirror_dir, &state)?;
-
-    Ok(ExportOutcome::Exported {
-        kind: BundleKind::Patch,
-        seq,
-        payload: dir.to_string_lossy().into_owned(),
-        manifest: mpath.to_string_lossy().into_owned(),
-        refs,
-        warnings: dirty_warning(g, repo).into_iter().collect(),
-    })
+    publish_export(
+        mirror_dir,
+        transfer_dir,
+        staging,
+        manifest,
+        &state,
+        dirty_warning(g, repo).into_iter().collect(),
+    )
 }

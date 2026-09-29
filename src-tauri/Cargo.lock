@@ -1358,6 +1358,8 @@ dependencies = [
 name = "git-offline-sync"
 version = "2.0.3"
 dependencies = [
+ "libc",
+ "regex",
  "serde",
  "serde_json",
  "tauri",
@@ -1369,6 +1371,7 @@ dependencies = [
  "tauri-plugin-window-state",
  "tempfile",
  "thiserror 2.0.20",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -5,6 +5,7 @@
 //! - 检查增量包序号是否连续，防止漏包/错包
 //! - 记录导出时的全部分支指向，让外网端能同步"指向旧提交的新分支"和"已删除分支"
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -68,7 +69,8 @@ pub fn manifest_path_for(payload: &Path) -> PathBuf {
 impl Manifest {
     pub fn write_for(&self, payload: &Path) -> Result<PathBuf> {
         let path = manifest_path_for(payload);
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        self.validate(payload)?;
+        super::storage::atomic_write(&path, &serde_json::to_vec_pretty(self)?)?;
         Ok(path)
     }
 
@@ -77,6 +79,11 @@ impl Manifest {
     /// `format` 比本版本新时直接拒绝：字段含义可能已经变了，
     /// 按旧语义解读会静默出错，不如明确要求对端升级工具。
     pub fn read_for(payload: &Path) -> Result<Option<Manifest>> {
+        let mut marker = payload.as_os_str().to_owned();
+        marker.push(".pending");
+        if Path::new(&marker).exists() {
+            return invalid("导出尚未完成，请在导出端重试后再导入");
+        }
         let path = manifest_path_for(payload);
         if !path.exists() {
             return Ok(None);
@@ -90,7 +97,52 @@ impl Manifest {
                 m.format, m.tool_version
             ));
         }
+        m.validate(payload)?;
         Ok(Some(m))
+    }
+
+    /// Validate before trusting snapshot deletion instructions or constructing Git input.
+    pub fn validate(&self, payload: &Path) -> Result<()> {
+        if self.format != FORMAT || self.seq == 0 {
+            return invalid("manifest 格式或序号无效");
+        }
+        if !valid_oid(&self.repo_id) {
+            return invalid("manifest repoId 必须是完整 SHA");
+        }
+        if self.payload.is_empty()
+            || self.payload == "."
+            || self.payload == ".."
+            || self.payload.contains(['/', '\\'])
+            || self.payload.chars().any(char::is_control)
+            || payload.file_name().and_then(|n| n.to_str()) != Some(self.payload.as_str())
+        {
+            return invalid("manifest payload 必须是当前包的文件名，不能包含路径");
+        }
+        if !valid_branch(&self.base_branch) || self.refs.is_empty() {
+            return invalid("manifest 基准分支或引用快照无效");
+        }
+        let mut names = HashSet::new();
+        for entry in &self.refs {
+            if !valid_ref(&entry.name)
+                || !valid_oid(&entry.sha)
+                || entry.sha.len() != self.repo_id.len()
+                || !names.insert(&entry.name)
+                || entry.base.as_ref().is_some_and(|b| !valid_branch(b))
+            {
+                return invalid(format!("manifest 引用无效或重复：{}", entry.name));
+            }
+            if matches!(self.kind, BundleKind::Back | BundleKind::Patch)
+                && !entry.name.starts_with("refs/heads/")
+            {
+                return invalid("回传 manifest 只能包含分支引用");
+            }
+        }
+        if matches!(self.kind, BundleKind::Full | BundleKind::Incr)
+            && !names.contains(&format!("refs/heads/{}", self.base_branch))
+        {
+            return invalid("manifest 引用快照缺少基准分支");
+        }
+        Ok(())
     }
 
     pub fn branches(&self) -> impl Iterator<Item = (&str, &str)> {
@@ -108,6 +160,29 @@ impl Manifest {
                 .map(|t| (t, r.sha.as_str()))
         })
     }
+}
+
+pub(crate) fn valid_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value.bytes().all(|b| b.is_ascii_hexdigit())
+        && value.bytes().any(|b| b != b'0')
+}
+
+pub(crate) fn valid_ref(name: &str) -> bool {
+    (name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
+        && !name.ends_with('.')
+        && !name.contains("..")
+        && !name.contains("@{")
+        && !name
+            .chars()
+            .any(|c| c.is_control() || c == ' ' || "~^:?*[\\".contains(c))
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
+}
+
+fn valid_branch(name: &str) -> bool {
+    !name.starts_with('-') && name != "HEAD" && valid_ref(&format!("refs/heads/{name}"))
 }
 
 #[cfg(test)]
