@@ -43,6 +43,16 @@ jobs:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
       - run: pnpm check:version
+      - name: Inspect Windows argument forwarding
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-Command pnpm -All | Format-List CommandType, Name, Source
+          $probe = Join-Path $env:RUNNER_TEMP 'argv-probe.cjs'
+          Set-Content -Path $probe -Value 'console.log(JSON.stringify(process.argv.slice(2)))'
+          node $probe -- --locked
+          pnpm exec node $probe -- --locked
+          pnpm exec node $probe '--' --locked
       - run: pnpm test
       - run: pnpm build
       - name: Rust format
@@ -92,8 +102,8 @@ jobs:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
       - run: pnpm check:version
-      # exec preserves the -- separator so Tauri forwards --locked to Cargo on Windows too.
-      - run: pnpm exec tauri build --ci --config src-tauri/tauri.release.conf.json ${{ matrix.args }} -- --locked
+      # The Node driver inserts Cargo arguments without shell/shim parsing.
+      - run: node scripts/build.mjs --ci --config src-tauri/tauri.release.conf.json ${{ matrix.args }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""

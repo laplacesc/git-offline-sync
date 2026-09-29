@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { runBuild } from './build.mjs';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -71,6 +73,33 @@ function apiMock(assets, { existing = null, failUpload = false, corrupt = false,
     },
   };
 }
+
+test('build driver preserves Cargo separator in a real child process without a shell', (t) => {
+  const probe = join(temporary(t), 'argv probe.cjs');
+  write(probe, 'process.stdout.write(JSON.stringify(process.argv.slice(2)));');
+  for (const extra of [[], ['--config', 'src-tauri/tauri.windows-slim.conf.json'], ['--target', 'universal-apple-darwin']]) {
+    const options = ['--ci', '--config', 'src-tauri/tauri.release.conf.json', ...extra];
+    let received;
+    const status = runBuild(options, (command, args, spawnOptions) => {
+      assert.equal(command, process.execPath);
+      assert.match(args[0], /[\\/]@tauri-apps[\\/]cli[\\/]tauri\.js$/);
+      assert.equal(spawnOptions.shell, false);
+      assert.equal(spawnOptions.stdio, 'inherit');
+      const result = spawnSync(command, [probe, ...args.slice(1)], { ...spawnOptions, stdio: 'pipe', encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+      received = JSON.parse(result.stdout);
+      return result;
+    });
+    assert.equal(status, 0);
+    assert.deepEqual(received, ['build', ...options, '--', '--locked']);
+  }
+});
+
+test('build driver propagates failures instead of reporting success', () => {
+  assert.equal(runBuild([], () => ({ status: 17 })), 17);
+  assert.throws(() => runBuild([], () => ({ error: new Error('spawn failed') })), /spawn failed/);
+  assert.throws(() => runBuild([], () => ({ status: null, signal: 'SIGTERM' })), /SIGTERM/);
+});
 
 test('versions include package, Cargo, Tauri and optional exact tag', (t) => {
   const dir = temporary(t);
