@@ -2,7 +2,7 @@
  * 应用级组合组件：全部基于 HeroUI v3，只在这里做一次“设计系统化”的组合，
  * 页面代码直接使用这些组件，避免到处写一次性样式。
  */
-import { ReactNode, useRef, useState } from "react";
+import { createContext, ReactNode, useContext, useId, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Alert,
@@ -26,6 +26,8 @@ import {
 import type { ButtonProps } from "@heroui/react";
 import { BundleKind, CommitInfo, KIND_LABEL, OpOutcome, shortSha } from "./api";
 import { useRunner } from "./runner";
+import { Icon } from "./icons";
+import { useDisclosureMotion } from "./motion";
 
 // ---------------------------------------------------------------------------
 // 按钮：全局串行执行，有操作进行中时自动禁用
@@ -61,22 +63,104 @@ export function RefreshButton({ onPress }: { onPress: () => unknown }) {
   );
 }
 
-export function WorkflowNav({ steps }: { steps: string[] }) {
-  return (
-    <nav aria-label="同步流程" className="workflow-nav">
-      {steps.map((title, i) => (
-        <a key={title} href={`#step-${i + 1}`}
-          onClick={(event) => {
-            event.preventDefault();
-            const target = document.getElementById(`step-${i + 1}`);
-            target?.scrollIntoView({ block: "start" });
-            target?.focus({ preventScroll: true });
-          }}>
-          <span className="workflow-nav-number">{i + 1}</span>{title}
-        </a>
-      ))}
-    </nav>
-  );
+const WorkflowContext = createContext<{ step: number; select: (step: number) => void; id: string } | null>(null);
+
+/** Keep panels mounted so switching steps preserves input and branch selection. */
+export function Workflow({ children }: { children: ReactNode }) {
+  const [step, select] = useState(1);
+  const id = useId();
+  return <WorkflowContext.Provider value={{ step, select, id }}>
+    <div className="workflow-layout">{children}</div>
+  </WorkflowContext.Provider>;
+}
+
+export function WorkflowNav({ steps, counts = [] }: { steps: string[]; counts?: (number | undefined)[] }) {
+  const flow = useContext(WorkflowContext)!;
+  return <nav aria-label="同步流程">
+    <div role="tablist" aria-label="同步步骤" className="workflow-nav">
+      {steps.map((title, i) => <button key={title} type="button" role="tab"
+        id={`${flow.id}-tab-${i + 1}`} aria-controls={`${flow.id}-panel-${i + 1}`}
+        aria-selected={flow.step === i + 1} tabIndex={flow.step === i + 1 ? 0 : -1}
+        onClick={() => flow.select(i + 1)} onKeyDown={(event) => {
+          const next = event.key === "ArrowRight" ? (i + 1) % steps.length
+            : event.key === "ArrowLeft" ? (i + steps.length - 1) % steps.length
+            : event.key === "Home" ? 0 : event.key === "End" ? steps.length - 1 : null;
+          if (next === null) return;
+          event.preventDefault();
+          flow.select(next + 1);
+          document.getElementById(`${flow.id}-tab-${next + 1}`)?.focus();
+        }}>
+        <span className="workflow-nav-number" aria-hidden="true">{i + 1}</span>{title}
+        {counts[i] !== undefined && <span className="counter">{counts[i]}</span>}
+      </button>)}
+    </div>
+  </nav>;
+}
+
+export function WorkflowJump({ step, children }: { step: number; children: ReactNode }) {
+  const flow = useContext(WorkflowContext)!;
+  return <Button size="sm" variant="outline" onPress={() => {
+    flow.select(step);
+    document.getElementById(`${flow.id}-tab-${step}`)?.focus();
+  }}>{children}</Button>;
+}
+
+type PipelineNode = { title: string; detail: string; step: number; icon: Parameters<typeof Icon>[0]["name"] };
+export function Pipeline({ lanes, next, onRefresh }: {
+  lanes: { label: string; nodes: PipelineNode[]; commands: string[] }[];
+  next: { title: string; detail: string; step: number };
+  onRefresh: () => unknown;
+}) {
+  const flow = useContext(WorkflowContext)!;
+  const lanesId = useId();
+  const [expanded, setExpanded] = useState(false);
+  const disclosure = useDisclosureMotion<HTMLDivElement>(expanded, "collapse");
+  return <section className="pipeline" aria-label="同步链路总览">
+    <div className="pipeline-next"><span className="next-step-mark" aria-hidden="true"><Icon name="chevron" /></span>
+      <div className="next-step-copy" aria-live="polite"><span className="section-label">建议下一步</span><strong>{next.title}</strong><p>{next.detail}</p></div>
+      <WorkflowJump step={next.step}>前往处理<Icon name="chevron" /></WorkflowJump>
+    </div>
+    <div className="pipeline-header"><h2>同步链路总览</h2><div className="flex items-center gap-2">
+      <Button size="sm" variant="ghost" aria-expanded={expanded} aria-controls={lanesId}
+        onPress={() => setExpanded(!expanded)}>{expanded ? "收起链路" : "展开链路"}</Button>
+      <RefreshButton onPress={onRefresh} />
+    </div></div>
+    <div ref={disclosure.ref} id={lanesId} className="pipeline-details"
+      hidden={!disclosure.visible} aria-hidden={!expanded} inert={!expanded}>
+    {lanes.map((lane) => <div className="pipeline-lane" key={lane.label}>
+      <span className="pipeline-label">{lane.label}</span>
+      {lane.nodes.map((node, i) => <div className="pipeline-segment" key={i}>
+        {i > 0 && <span className="pipeline-arrow"><code>{lane.commands[i - 1]}</code><span aria-hidden="true">⟶</span></span>}
+        <button type="button" className="pipeline-node" onClick={() => {
+          flow.select(node.step);
+          document.getElementById(`${flow.id}-tab-${node.step}`)?.focus();
+        }}><span><Icon name={node.icon} />{node.title}</span><small title={node.detail}>{node.detail}</small></button>
+      </div>)}
+    </div>)}
+    </div>
+  </section>;
+}
+
+export function AheadBehind({ ahead, behind }: { ahead: number; behind: number }) {
+  const total = Math.max(ahead + behind, 1);
+  return <div className="ahead-behind" aria-label={`落后 ${behind} 个提交，领先 ${ahead} 个提交`}>
+    <span className={behind ? "text-warning" : "text-muted"}>↓{behind}</span>
+    <span className="ahead-behind-track" aria-hidden="true"><i style={{ width: `${behind / total * 100}%` }} /><b style={{ width: `${ahead / total * 100}%` }} /></span>
+    <span className={ahead ? "text-success" : "text-muted"}>↑{ahead}</span>
+  </div>;
+}
+
+/** Only show observed sequences and the immediate next expected number. */
+export function SeqChain({ last, sequences }: { last: number; sequences: number[] }) {
+  const visible = [...new Set([last, last + 1, ...sequences])].filter((n) => n > 0 && n >= last).sort((a, b) => a - b).slice(0, 8);
+  return <div className="seq-chain" aria-label="导入序号链">
+    <span>导入进度</span>{visible.map((n, i) => <span key={n} className="seq-item">
+      {i > 0 && n > visible[i - 1] + 1 && <span className="seq-gap">缺 #{visible[i - 1] + 1}{n > visible[i - 1] + 2 ? `–${n - 1}` : ""}</span>}
+      <span className={n <= last ? "seq-done" : sequences.includes(n) ? "seq-available" : "seq-gap"}>
+        #{n} · {n <= last ? "已导入" : sequences.includes(n) ? "待检查" : "未找到"}
+      </span>
+    </span>)}
+  </div>;
 }
 
 /** Quiet section metadata, shared by configuration pages. */
@@ -103,8 +187,11 @@ export function StepCard({
   actions?: ReactNode;
   children: ReactNode;
 }) {
+  const flow = useContext(WorkflowContext);
   return (
-    <Card id={`step-${step}`} tabIndex={-1} aria-label={title} className="workflow-step gap-0 p-0">
+    <Card id={flow ? `${flow.id}-panel-${step}` : `step-${step}`} role={flow ? "tabpanel" : undefined}
+      aria-labelledby={flow ? `${flow.id}-tab-${step}` : undefined} hidden={!!flow && flow.step !== step}
+      tabIndex={0} aria-label={flow ? undefined : title} className="workflow-step gap-0 p-0">
       <Card.Header className="step-header">
         <div className="flex min-w-0 flex-1 gap-3">
           <span className="step-number" aria-hidden="true">{step}</span>
@@ -151,7 +238,7 @@ export function TextInput({
   return (
     <TextField id={id} value={value} onChange={onChange} isReadOnly={isReadOnly} isInvalid={!!error} fullWidth className={className}>
       <Label>{label}</Label>
-      <Input placeholder={placeholder} spellCheck={false} className={mono ? "font-mono text-[13px]" : undefined} />
+      <Input name={id ?? label} autoComplete="off" placeholder={placeholder} spellCheck={false} className={mono ? "font-mono text-[13px]" : undefined} />
       {description && <Description>{description}</Description>}
       {error && <FieldError>{error}</FieldError>}
     </TextField>
@@ -244,7 +331,7 @@ export function PathInput({
     <TextField id={id} value={value} onChange={onChange} isInvalid={!!error} fullWidth>
       <Label>{label}</Label>
       <InputGroup fullWidth>
-        <InputGroup.Input placeholder={placeholder} spellCheck={false} className="font-mono text-[13px]" />
+        <InputGroup.Input name={id ?? label} autoComplete="off" placeholder={placeholder} spellCheck={false} className="font-mono text-[13px]" />
         <InputGroup.Suffix className="pr-1">
           <Button size="sm" variant="ghost" onPress={browse} aria-label={`浏览${label}`}>
             浏览…
@@ -301,7 +388,7 @@ export type Tone = "success" | "warning" | "danger" | "accent" | "default";
 
 export function Notice({ tone, title, children }: { tone: Tone; title?: ReactNode; children?: ReactNode }) {
   return (
-    <Alert status={tone}>
+    <Alert status={tone} className="flash">
       <Alert.Indicator />
       <Alert.Content>
         {title && <Alert.Title>{title}</Alert.Title>}
@@ -336,7 +423,7 @@ export function Empty({ children }: { children: ReactNode }) {
 /** 带分隔线的只读列表容器 */
 export function ListSurface({ children }: { children: ReactNode[] }) {
   return (
-    <Surface variant="default" className="overflow-hidden rounded-xl border border-border shadow-none">
+    <Surface variant="default" className="list-surface overflow-hidden rounded-2xl border border-border">
       {children.map((c, i) => (
         <div key={i}>
           {i > 0 && <Separator />}
@@ -350,11 +437,11 @@ export function ListSurface({ children }: { children: ReactNode[] }) {
 export function CommitList({ commits, empty = "没有提交" }: { commits: CommitInfo[]; empty?: string }) {
   if (commits.length === 0) return <Empty>{empty}</Empty>;
   return (
-    <div className="max-h-72 overflow-y-auto rounded-xl">
+    <div className="max-h-72 overflow-y-auto rounded-2xl">
       <ListSurface>
         {commits.map((c) => (
           <div key={c.sha} className="grid grid-cols-[auto_1fr] gap-x-3 px-4 py-2.5">
-            <Code>{shortSha(c.sha)}</Code>
+            <Code className="commit-sha">{shortSha(c.sha)}</Code>
             <span className="truncate text-sm font-medium">{c.subject}</span>
             <span className="col-start-2 text-xs text-muted">
               {c.author} &lt;{c.email}&gt; · {c.date}
@@ -368,7 +455,7 @@ export function CommitList({ commits, empty = "没有提交" }: { commits: Commi
 
 export function Code({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
-    <code className={"rounded-md bg-default px-1.5 py-0.5 font-mono text-[12px] break-all text-foreground " + className}>
+    <code className={"rounded-2xl bg-default px-1.5 py-0.5 font-mono text-[12px] break-all text-foreground " + className}>
       {children}
     </code>
   );
@@ -393,12 +480,12 @@ export function PackageRow({
   return (
     <div
       className={
-        "flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl px-4 py-3 transition-shadow " +
+        "package-row flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl px-4 py-3 transition-colors " +
         (highlight ? "selected-surface " : "border border-border bg-surface ") +
-        (dim ? "opacity-55" : "")
+        (dim ? "package-done" : "")
       }
     >
-      <div className="flex min-w-64 flex-1 items-center gap-3">
+      <div className="package-identity flex min-w-0 flex-1 items-center gap-3">
         <KindChip kind={kind} />
         <div className="min-w-0 flex-1">
           <div className="truncate font-mono text-[13px]" title={title}>

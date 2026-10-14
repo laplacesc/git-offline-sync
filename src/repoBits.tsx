@@ -1,3 +1,4 @@
+import { AheadBehind } from "./ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Alert, Checkbox, Chip, Table } from "@heroui/react";
@@ -218,7 +219,7 @@ export function BranchTable({
                   <SelectionBox label={`选择 ${b.name}`} />
                 </Table.Cell>
                 <Table.Cell className="break-words">
-                  <span className="font-medium">{breakAfterSlash(b.name)}</span>
+                  <span className="font-mono text-[13px]">{breakAfterSlash(b.name)}</span>
                   {b.current && (
                     <Chip size="sm" variant="secondary" className="ml-2">
                       当前
@@ -242,10 +243,7 @@ export function BranchTable({
                   )}
                 </Table.Cell>
                 <Table.Cell className="whitespace-nowrap">
-                  <span className="inline-flex gap-2 font-mono text-xs">
-                    <span className={b.ahead > 0 ? "font-semibold text-success" : "text-muted"}>↑{b.ahead}</span>
-                    <span className={b.behind > 0 ? "font-semibold text-warning" : "text-muted"}>↓{b.behind}</span>
-                  </span>
+                  <AheadBehind ahead={b.ahead} behind={b.behind} />
                 </Table.Cell>
                 {onRebase && (
                   <Table.Cell>

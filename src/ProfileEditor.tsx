@@ -113,7 +113,7 @@ export function ProfileEditor({
 
       <Card.Content className="flex flex-col gap-8 px-8 pb-8">
         {submitted && miss.length > 0 && (
-          <div ref={summary} role="alert" tabIndex={-1} className="rounded-xl border border-danger p-4 text-sm">
+          <div ref={summary} role="alert" tabIndex={-1} className="rounded-2xl border border-danger p-4 text-sm">
             <p className="font-semibold">请补全以下 {miss.length} 项</p>
             <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
               {miss.map(({ key, label }) => <li key={key}><a className="text-danger underline" href={`#profile-${key}`}
@@ -149,7 +149,7 @@ export function ProfileEditor({
             </Radio>
           ))}
         </RadioGroup> : (
-          <div className="rounded-xl border border-border bg-default/50 p-4">
+          <div className="rounded-2xl border border-border bg-default/50 p-4">
             <p className="font-semibold">{internal ? "内网端" : "外网端"}</p>
             <p className="mt-1 text-sm text-muted">{internal ? "连接 GitLab，导出内网包并接收回传。" : "导入内网包，在开发仓库中提交并回传。"}</p>
           </div>

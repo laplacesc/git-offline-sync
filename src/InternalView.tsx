@@ -33,6 +33,9 @@ import {
   RefreshButton,
   StepCard,
   WorkflowNav,
+  Workflow,
+  Pipeline,
+  WorkflowJump,
   TextInput,
 } from "./ui";
 
@@ -228,7 +231,7 @@ export function InternalView({ profile }: { profile: Profile }) {
     const approvedCommits = currentCommits;
     const ok = await confirm({
       title: `推送 ${branch}`,
-      tone: forceLease ? "warning" : "accent",
+      tone: forceLease ? "danger" : "accent",
       confirmLabel: "推送",
       body: (
         <div className="space-y-3">
@@ -254,9 +257,31 @@ export function InternalView({ profile }: { profile: Profile }) {
   const mirrorReady = !!mirror.status?.isRepo;
   const workReady = !!work.status?.isRepo && !work.status.isBare;
 
+  function nextStep() {
+    if (work.status?.inProgress || work.status?.inProgressTrees.length) return { title: "处理未完成的操作", detail: "检查工作树冲突，再继续或中止。", step: 4 };
+    if (!current || mirror.loading || work.loading) return { title: "检查仓库状态", detail: "正在读取仓库和同步记录。", step: 1 };
+    if (packageError) return { title: "检查传输目录", detail: "确认路径和 U 盘连接后刷新。", step: 3 };
+    if (!mirrorReady) return { title: "建立镜像仓库", detail: "从内网 GitLab 克隆，用于后续导出。", step: 1 };
+    if (backPkgs.length) return { title: "检查外网回传", detail: "传输目录中存在回传包，请核对分支与提交。", step: 3 };
+    return { title: "导出内网代码", detail: "拉取最新引用，生成可带往外网的同步包。", step: 2 };
+  }
+
   return (
-    <div className="workflow-layout">
-      <WorkflowNav steps={["镜像仓库", "导出到 U 盘", "导入外网回传", "Rebase 并推送"]} />
+    <Workflow>
+      <Pipeline onRefresh={reloadAll} lanes={[
+        { label: "出站 · 内网 → 外网", commands: ["clone / fetch", "bundle"], nodes: [
+          { title: "GitLab", detail: mirror.status?.remoteUrl || "远程地址尚未读取", step: 1, icon: "globe" },
+          { title: "镜像仓库", detail: mirror.loading ? "读取中…" : mirrorReady ? `${mirror.status?.branches.length} 个分支` : "尚未就绪", step: 1, icon: "folder" },
+          { title: "U 盘 · 内网包", detail: state ? `已导出 #${state.outSeq}` : "暂无导出记录", step: 2, icon: "folder" },
+        ] },
+        { label: "回站 · 外网 → 内网", commands: ["import / am", "rebase / push"], nodes: [
+          { title: "U 盘 · 回传包", detail: packageError ? "传输目录不可读" : current ? `${backPkgs.length} 个可见包` : "读取中…", step: 3, icon: "folder" },
+          { title: "工作仓库", detail: work.loading ? "读取中…" : workReady ? `${work.status?.branches.length} 个分支` : "尚未就绪", step: 3, icon: "monitor" },
+          { title: "GitLab", detail: "检查提交后推送", step: 4, icon: "globe" },
+        ] },
+      ]} next={nextStep()} />
+      <WorkflowNav steps={["镜像仓库", "导出到 U 盘", "导入外网回传", "Rebase 并推送"]}
+        counts={[mirror.status?.branches.length, undefined, current ? backPkgs.length : undefined, work.status?.branches.filter((b) => !candidates.includes(b.name)).length]} />
       {packageError && <Notice tone="danger" title="无法读取传输目录，请检查路径或 U 盘连接后刷新">{packageError}</Notice>}
       <StepCard
         step={1}
@@ -330,7 +355,7 @@ export function InternalView({ profile }: { profile: Profile }) {
             <span className="font-mono text-xs break-all">{exportRes.payload}</span>
             {exportRes.warnings.map((w) => (
               <span key={w} className="block">
-                ⚠ {w}
+                提示：{w}
               </span>
             ))}
           </Notice>
@@ -370,6 +395,8 @@ export function InternalView({ profile }: { profile: Profile }) {
               const m = p.manifest;
               const isPatch = m?.kind === "patch";
               const pd = patchDefaults(p);
+              const reason = !p.payloadExists ? "包文件缺失"
+                : m && state?.repoId && m.repoId !== state.repoId ? "仓库身份不符" : null;
               return (
                 <PackageRow
                   key={p.payloadPath}
@@ -379,6 +406,7 @@ export function InternalView({ profile }: { profile: Profile }) {
                     <>
                       {m ? formatTime(m.createdAt) : "无 manifest"}
                       {m && " · " + m.refs.map((r) => r.name.replace(/^refs\/heads\//, "")).join(", ")}
+                      {reason && <span className="block text-danger">{reason}</span>}
                     </>
                   }
                 >
@@ -405,7 +433,7 @@ export function InternalView({ profile }: { profile: Profile }) {
                     size="sm"
                     variant="secondary"
                     onPress={() => (isPatch ? importPatch(p) : importBundle(p.payloadPath))}
-                    isDisabled={!workReady || !p.payloadExists}
+                    isDisabled={!workReady || !!reason}
                   >
                     导入
                   </ActionButton>
@@ -455,6 +483,7 @@ export function InternalView({ profile }: { profile: Profile }) {
           </div>
         )}
         {patchOutcome && <OutcomeView outcome={patchOutcome} />}
+        {(importRes || patchOutcome) && <WorkflowJump step={4}>检查分支并推送</WorkflowJump>}
       </StepCard>
 
       <StepCard
@@ -472,64 +501,71 @@ export function InternalView({ profile }: { profile: Profile }) {
           }}
         />
         <DirtyTreesNotice status={work.status} suffix="rebase 前请先提交或 stash。" />
-        <BranchTable
-          branches={(work.status?.branches ?? []).filter((b) => !candidates.includes(b.name))}
-          emptyText="还没有开发分支（主线和发布分支不在这里列出）"
-          selected={selected}
-          onSelect={setSelected}
-        />
-        <DetachedWorktreesNotice status={work.status} />
-        {branch && (
-          <>
-            <div className="flex flex-wrap items-end gap-3">
-              <BaseSelect label="基准分支" value={onto} options={candidates} mainline={base} onChange={setOntoPicked} />
-              {branchInfo?.baseInferred && !changingBase && (
-                <span className="pb-2 text-xs text-muted">没有记录，按分支名推断；rebase 后会记录下来</span>
-              )}
-            </div>
-            {changingBase && (
-              <Notice
-                tone="accent"
-                title={`将把 ${branch} 从 origin/${branchInfo?.base} 移到 origin/${onto}：rebase --onto，只搬运分支自己的提交`}
-              />
+        <div className="rebase-layout">
+          <div className="branch-table-compact">
+            <BranchTable
+              branches={(work.status?.branches ?? []).filter((b) => !candidates.includes(b.name))}
+              emptyText="还没有开发分支（主线和发布分支不在这里列出）"
+              selected={selected}
+              onSelect={setSelected}
+            />
+            <DetachedWorktreesNotice status={work.status} />
+          </div>
+          <div className="rebase-details">
+            {!branch && <Empty>选择一个开发分支，检查相对基准的提交后再整理和推送。</Empty>}
+            {branch && (
+              <>
+                <div className="flex flex-wrap items-end gap-3">
+                  <BaseSelect label="基准分支" value={onto} options={candidates} mainline={base} onChange={setOntoPicked} />
+                  {branchInfo?.baseInferred && !changingBase && (
+                    <span className="pb-2 text-xs text-muted">没有记录，按分支名推断；rebase 后会记录下来</span>
+                  )}
+                </div>
+                {changingBase && (
+                  <Notice
+                    tone="accent"
+                    title={`将把 ${branch} 从 origin/${branchInfo?.base} 移到 origin/${onto}：rebase --onto，只搬运分支自己的提交`}
+                  />
+                )}
+                {branchWarning && <Notice tone="warning" title={branchWarning} />}
+                <h4 className="text-sm font-semibold">
+                  {changingBase ? `将搬运到 origin/${onto} 的提交（相对 origin/${listFrom}）` : `${branch} 相对 origin/${onto} 的提交`}
+                  {branchInfo && !changingBase && branchInfo.behind > 0 && (
+                    <span className="font-normal text-warning"> · 落后 {branchInfo.behind} 个，建议先 rebase</span>
+                  )}
+                </h4>
+                {currentCommits?.error ? (
+                  <Notice tone="danger" title="读取提交列表失败，请刷新后重试">{currentCommits.error}</Notice>
+                ) : !currentCommits ? (
+                  <p role="status" className="text-sm text-muted">正在读取提交列表…</p>
+                ) : (
+                  <CommitList commits={commits} empty={`没有相对 origin/${listFrom} 的新提交`} />
+                )}
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                  <Check checked={fetchBeforeRebase} onChange={setFetchBeforeRebase}>
+                    rebase 前 fetch origin
+                  </Check>
+                  <Check checked={forceLease} onChange={setForceLease}>
+                    force-with-lease（已推送过又 rebase 时）
+                  </Check>
+                  <span className="flex-1" />
+                  <ActionButton variant="outline" onPress={rebase} isDisabled={!workReady}>
+                    Rebase 到 origin/{onto}
+                  </ActionButton>
+                  <ActionButton
+                    variant={forceLease ? "danger" : "primary"}
+                    onPress={push}
+                    isDisabled={!workReady || !branchInfo || !commitsReady || !!work.status?.inProgress || !!work.status?.inProgressTrees.length || changingBase}
+                  >
+                    推送…
+                  </ActionButton>
+                </div>
+              </>
             )}
-            {branchWarning && <Notice tone="warning" title={branchWarning} />}
-            <h4 className="text-sm font-semibold">
-              {changingBase ? `将搬运到 origin/${onto} 的提交（相对 origin/${listFrom}）` : `${branch} 相对 origin/${onto} 的提交`}
-              {branchInfo && !changingBase && branchInfo.behind > 0 && (
-                <span className="font-normal text-warning"> · 落后 {branchInfo.behind} 个，建议先 rebase</span>
-              )}
-            </h4>
-            {currentCommits?.error ? (
-              <Notice tone="danger" title="读取提交列表失败，请刷新后重试">{currentCommits.error}</Notice>
-            ) : !currentCommits ? (
-              <p role="status" className="text-sm text-muted">正在读取提交列表…</p>
-            ) : (
-              <CommitList commits={commits} empty={`没有相对 origin/${listFrom} 的新提交`} />
-            )}
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-              <Check checked={fetchBeforeRebase} onChange={setFetchBeforeRebase}>
-                rebase 前 fetch origin
-              </Check>
-              <Check checked={forceLease} onChange={setForceLease}>
-                force-with-lease（已推送过又 rebase 时）
-              </Check>
-              <span className="flex-1" />
-              <ActionButton variant="outline" onPress={rebase} isDisabled={!workReady}>
-                Rebase 到 origin/{onto}
-              </ActionButton>
-              <ActionButton
-                variant="primary"
-                onPress={push}
-                isDisabled={!workReady || !branchInfo || !commitsReady || !!work.status?.inProgress || changingBase}
-              >
-                推送…
-              </ActionButton>
-            </div>
-          </>
-        )}
-        {opRes && <OutcomeView outcome={opRes} />}
+            {opRes && <OutcomeView outcome={opRes} />}
+          </div>
+        </div>
       </StepCard>
-    </div>
+    </Workflow>
   );
 }

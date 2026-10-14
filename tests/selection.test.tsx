@@ -49,6 +49,7 @@ describe("分支选择", () => {
       ok: true, conflict: false, files: [], message: "变基完成", worktree: null,
     });
     render(<ExternalView profile={profile} />);
+    fireEvent.click(screen.getByRole("tab", { name: /开发分支/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Rebase feature/two", exact: true }));
     let dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByRole("button", { name: "Rebase 到 origin/release/1.0" })).toBeTruthy();
@@ -119,6 +120,7 @@ describe("分支选择", () => {
     vi.spyOn(api, "listPackages").mockResolvedValue([]);
     const exported = vi.spyOn(api, "exportBack").mockResolvedValue({ status: "nothingToSync", message: "没有新提交" });
     render(<ExternalView profile={profile} />);
+    fireEvent.click(screen.getByRole("tab", { name: /开发分支/ }));
     fireEvent.click(await screen.findByRole("row", { name: /feature\/one/ }));
     fireEvent.click(screen.getByRole("row", { name: /feature\/two/ }));
     expect(screen.getByText("已选：feature/one、feature/two")).toBeTruthy();
@@ -127,6 +129,7 @@ describe("分支选择", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "刷新" })[0]);
     await waitFor(() => expect(screen.queryByRole("row", { name: /feature\/one/ })).toBeNull());
     expect(screen.queryByText("已选：feature/two")).not.toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: /回传到内网/ }));
     fireEvent.click(screen.getByRole("button", { name: "导出到 U 盘 →" }));
     await waitFor(() => expect(exported).toHaveBeenCalledWith(expect.objectContaining({ branches: ["feature/two"] })));
 
@@ -138,11 +141,14 @@ describe("分支选择", () => {
 
     // 仓库切换后即使存在同名分支，也不沿用前一个仓库的选择。
     available = branches;
+    fireEvent.click(screen.getByRole("tab", { name: /开发分支/ }));
     fireEvent.click(screen.getAllByRole("button", { name: "刷新" })[0]);
     fireEvent.click(await screen.findByRole("row", { name: "feature/one" }));
     expect(screen.getByText("已选：feature/one")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /开发仓库/ }));
     fireEvent.click(screen.getByRole("button", { name: "切换", exact: true }));
     await waitFor(() => expect(screen.queryByText("已选：feature/one")).toBeNull());
+    fireEvent.click(screen.getByRole("tab", { name: /回传到内网/ }));
     expect((screen.getByRole("button", { name: "导出到 U 盘 →" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

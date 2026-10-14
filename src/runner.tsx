@@ -1,4 +1,4 @@
-import { createContext, ReactNode, useCallback, useContext, useRef, useState } from "react";
+import { createContext, MutableRefObject, ReactNode, useCallback, useContext, useRef, useState } from "react";
 import { AlertDialog, Button, Spinner, toast } from "@heroui/react";
 import { api } from "./api";
 
@@ -11,7 +11,19 @@ export interface ConfirmOptions {
   tone?: "accent" | "warning" | "danger";
 }
 
+export interface OperationRecord {
+  id: number;
+  label: string;
+  startedAt: number;
+  endedAt?: number;
+  failed?: boolean;
+  stopRequested?: boolean;
+}
+
 interface Runner {
+  operations: OperationRecord[];
+  activeRun: MutableRefObject<number | null>;
+  clearOperations: () => void;
   /** 当前正在执行的操作名，null 表示空闲 */
   busy: string | null;
   error: string | null;
@@ -28,6 +40,8 @@ interface Runner {
 const Ctx = createContext<Runner | null>(null);
 
 export function RunnerProvider({ children }: { children: ReactNode }) {
+  const [operations, setOperations] = useState<OperationRecord[]>([]);
+  const activeRun = useRef<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const busyRef = useRef(false);
@@ -45,7 +59,9 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
     async <T,>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
       if (busyRef.current) return undefined;
       busyRef.current = true;
-      ++runSeq.current;
+      const id = ++runSeq.current;
+      activeRun.current = id;
+      setOperations((records) => [...records.slice(-99), { id, label, startedAt: Date.now() }]);
       cancelPending.current = false;
       setCancelRequested(false);
       setBusy(label);
@@ -53,10 +69,13 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       try {
         return await fn();
       } catch (e) {
+        setOperations((records) => records.map((record) => record.id === id ? { ...record, failed: true } : record));
         setError(`${label}失败：${String(e)}`);
         toast.danger(`${label}失败`, { description: String(e), timeout: 0 });
         return undefined;
       } finally {
+        activeRun.current = null;
+        setOperations((records) => records.map((record) => record.id === id ? { ...record, endedAt: Date.now() } : record));
         busyRef.current = false;
         setBusy(null);
         setCancelRequested(false);
@@ -75,6 +94,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       if (seq !== runSeq.current || !busyRef.current) return;
       const sent = id !== null && await api.cancelOperation(id);
       if (seq !== runSeq.current || !busyRef.current) return;
+      if (sent) setOperations((records) => records.map((record) => record.id === seq ? { ...record, stopRequested: true } : record));
       if (!sent) {
         cancelPending.current = false;
         setCancelRequested(false);
@@ -100,7 +120,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <Ctx.Provider value={{ busy, error, cancelRequested, requestCancel, dismissError: () => setError(null), notify, run, confirm }}>
+    <Ctx.Provider value={{ operations, activeRun, clearOperations: () => setOperations((records) => records.filter((record) => record.id === activeRun.current)), busy, error, cancelRequested, requestCancel, dismissError: () => setError(null), notify, run, confirm }}>
       {children}
       <AlertDialog.Backdrop isOpen={!!dialog} onOpenChange={(o) => !o && close(false)}>
         <AlertDialog.Container>
@@ -129,7 +149,7 @@ export function OperationStatus() {
   const { busy, error, dismissError, cancelRequested, requestCancel } = useRunner();
   if (!busy && !error) return null;
   return (
-    <div className="border-b border-border bg-surface px-5 py-3">
+    <div className="operation-status border-b border-border bg-surface px-5 py-3" data-running={!!busy}>
       {busy && <div className="flex flex-wrap items-center gap-3" aria-busy="true">
         <p role="status" className="flex min-w-0 flex-1 items-center gap-2 text-sm"><Spinner size="sm" />
           {cancelRequested ? "已请求停止，正在等待 Git 退出并检查操作结果…" : `正在${busy}，请稍候…`}
