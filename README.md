@@ -160,18 +160,20 @@ src-tauri/src/core/     与界面无关的同步核心（可单独测试）
 src-tauri/src/commands.rs  Tauri 命令（在后台线程执行，日志以 git-log 事件推送）
 src-tauri/tests/e2e.rs     端到端测试：本地裸仓库模拟 GitLab，完整往返
 src/                    React 界面（全部使用 HeroUI v3 组件）
-  index.css             灰阶浅深色主题、HeroUI 语义变量、桌面面板布局
+  index.css             深浅色 token、HeroUI 语义变量、固定侧栏布局
   ui.tsx                基于 HeroUI 的应用级组合组件：StepCard、PathInput、Notice、PackageRow…
   runner.tsx            串行执行 + Toast 提示 + AlertDialog 确认框
+  motion.ts             可中断的抽屉与链路展开、键盘即时切换
 ```
 
 ### 界面约定
 
 - 组件统一使用 HeroUI v3（`@heroui/react`，基于 React Aria，需要 Tailwind CSS v4）。页面只使用 `ui.tsx` 里的组合组件或 HeroUI 原生组件，不写一次性样式。
-- 布局参考 [PI-Desktop](https://github.com/vastsa/PI-Desktop)：可收起的配置侧栏、固定顶栏、独立滚动工作区和底部日志面板。侧栏支持按名称或包名前缀搜索配置；流程导航可跳转并聚焦到对应步骤。
-- 颜色、圆角、阴影等设计 token 只在 `src/index.css` 的 `:root` 中定义，并映射为 HeroUI 语义变量（`--accent`、`--surface`、`--border` 等），修改主题只需改这一处。
-- 正文采用系统字体，路径与提交哈希使用随包分发的 JetBrains Mono，无需联网加载字体。在“设置 → 外观 → 主题”中可选择系统、浅色或深色，保存后生效并在下次启动时恢复；默认跟随系统。用背景明度区分面板，主操作使用黑白反色按钮；彩色仅用于成功、警告和错误等状态。
-- 动效只用 CSS 实现，系统开启“减少动态效果”时自动关闭。
+- 界面采用桌面工作台布局，完整规范见 `design-system/git-offline-sync/MASTER.md`。240px 侧栏按内网/外网分组并支持搜索；小于 1024px 默认收起为抽屉。工作区以建议下一步和四步骤页签组织，完整同步链路默认折叠；页签支持方向键、Home/End，切换后保留表单与分支选择。
+- 颜色、圆角和阴影 token 统一在 `src/index.css` 中定义，并映射为 HeroUI 语义变量。顶栏外观菜单提供浅色、深色和跟随系统，默认跟随系统并实时响应系统变化；所选模式保存在当前 WebView 的 `localStorage.app-shell-theme`，兼容旧的浅色和深色偏好。外观偏好不写入同步配置，旧配置的主题字段继续兼容移除。
+- 正文采用系统字体，路径与提交哈希使用随包分发的 JetBrains Mono，无需联网加载字体。浅色使用雾灰画布和白色面板，深色使用炭灰画布和抬高一层的灰色面板；蓝色表示主操作与选中状态，成功、警告与错误配有具体文案。桌面长内容在任务面板内滚动，小屏在工作区自然滚动。日志默认折叠，正常执行不主动展开，出现错误时自动展开。
+- 日志按应用中的实际操作分组，显示开始时间、结束状态和耗时，可折叠、复制、暂停跟随、拖动或用键盘调整高度。后台读取单独显示；“已结束”只表示操作返回，具体结果以操作提示和日志为准。包列表显示文件缺失、身份不符和缺号原因；增量默认禁止跳号，保留显式允许跳号选项。
+- 动效使用 CSS 与原生 Web Animations API：按钮按压 120ms、小屏抽屉 220ms、链路展开 200ms；键盘操作和系统“减少动态效果”即时切换。快速反向操作从当前位置继续，关闭内容立即移出焦点。完整规范见 `design-system/git-offline-sync/MOTION.md`。
 
 ### 应用图标
 

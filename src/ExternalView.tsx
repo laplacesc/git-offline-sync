@@ -32,6 +32,10 @@ import {
   RefreshButton,
   StepCard,
   WorkflowNav,
+  Workflow,
+  Pipeline,
+  WorkflowJump,
+  SeqChain,
   TextInput,
 } from "./ui";
 
@@ -56,7 +60,7 @@ function DevRepoRow({
   return (
     <div
       className={
-        "flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl px-4 py-3 transition-shadow " +
+        "flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl px-4 py-3 transition-colors duration-500 " +
         (current && cloned ? "selected-surface" : "border border-border bg-surface")
       }
     >
@@ -311,9 +315,33 @@ export function ExternalView({ profile }: { profile: Profile }) {
   const branchNameOk = newBranch.trim() !== "" && !newBranch.trim().endsWith("/");
   const canCreate = branchNameOk && (!asWorktree || worktreePath.trim() !== "");
 
+  function nextStep() {
+    if (repo.status?.inProgress || repo.status?.inProgressTrees.length) return { title: "处理未完成的操作", detail: "检查开发工作树，再继续或中止。", step: 3 };
+    if (!current || mirror.loading || repo.loading) return { title: "检查同步状态", detail: "正在读取镜像、开发仓库和传输目录。", step: 1 };
+    if (packageError) return { title: "检查传输目录", detail: "确认路径和 U 盘连接后刷新。", step: 1 };
+    if (!mirrorReady) return { title: "导入全量包", detail: "先建立外网镜像，再克隆开发仓库。", step: 1 };
+    if (inPkgs.some((p) => p.manifest && p.manifest.seq > lastIn)) return { title: "检查新的内网包", detail: `从 #${lastIn + 1} 开始，按连续序号导入。`, step: 1 };
+    if (!devReady || staleDevs.size) return { title: "准备开发仓库", detail: "从镜像克隆或同步最新引用。", step: 2 };
+    if (selected.length) return { title: "回传所选分支", detail: "只打包内网尚未包含的已提交内容。", step: 4 };
+    return { title: "开发并选择分支", detail: "在特性分支提交代码，再选择需要回传的分支。", step: 3 };
+  }
+
   return (
-    <div className="workflow-layout">
-      <WorkflowNav steps={["导入内网包", "开发仓库", "开发分支", "回传到内网"]} />
+    <Workflow>
+      <Pipeline onRefresh={reloadAll} lanes={[
+        { label: "出站 · 内网 → 外网", commands: ["import", "clone / fetch"], nodes: [
+          { title: "U 盘 · 内网包", detail: packageError ? "传输目录不可读" : current ? `${inPkgs.length} 个可见包` : "读取中…", step: 1, icon: "folder" },
+          { title: "外网镜像", detail: state ? `已导入 #${lastIn}` : "尚无导入记录", step: 1, icon: "folder" },
+          { title: "开发仓库", detail: current ? `${Object.values(devExists).filter(Boolean).length} / ${devRepos.length} 个已克隆` : "读取中…", step: 2, icon: "monitor" },
+        ] },
+        { label: "回站 · 外网 → 内网", commands: ["bundle / patch", "带回内网"], nodes: [
+          { title: "开发分支", detail: repo.loading ? "读取中…" : `${branches.length} 个分支 · 已选 ${selected.length}`, step: 3, icon: "branch" },
+          { title: "回传包", detail: state ? `已分配 #${state.backSeq ?? 0}` : "暂无回传记录", step: 4, icon: "folder" },
+          { title: "U 盘", detail: "回内网检查后推送", step: 4, icon: "folder" },
+        ] },
+      ]} next={nextStep()} />
+      <WorkflowNav steps={["导入内网包", "开发仓库", "开发分支", "回传到内网"]}
+        counts={[current ? inPkgs.length : undefined, devRepos.length, repo.status ? branches.length : undefined, selected.length]} />
       {packageError && <Notice tone="danger" title="无法读取传输目录，请检查路径或 U 盘连接后刷新">{packageError}</Notice>}
       <AlertDialog.Backdrop
         isOpen={!!rebaseTarget}
@@ -371,6 +399,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
           </>
         }
       >
+        {state && <SeqChain last={lastIn} sequences={inPkgs.flatMap((p) => p.manifest?.repoId === state.repoId ? [p.manifest.seq] : [])} />}
         {needsSetup && (
           <Notice tone="accent" title="先在「编辑配置」里填写外网镜像目录和开发仓库目录">
             1.0.x 的外网仓库不再兼容：包要先导入到<b>外网镜像</b>（一个空目录，会建成裸仓库），
@@ -396,6 +425,9 @@ export function ExternalView({ profile }: { profile: Profile }) {
               const next = mirrorReady ? !!m && m.seq === lastIn + 1 : m?.kind === "full";
               // 已导入的全量包仍可再次导入（重新同步）；已导入的增量包不可
               const usable = mirrorReady ? !(done && m?.kind === "incr") : !m || m.kind === "full";
+              const wrongRepo = !!m && !!state?.repoId && m.repoId !== state.repoId;
+              const gap = !!m && mirrorReady && m.kind === "incr" && m.seq > lastIn + 1;
+              const reason = !p.payloadExists ? "包文件缺失" : wrongRepo ? "仓库身份不符" : gap && !allowGap ? `缺少 #${lastIn + 1}，不能跳号导入` : null;
               return (
                 <PackageRow
                   key={p.payloadPath}
@@ -409,6 +441,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
                       {m && ` · ${m.refs.filter((r) => r.name.startsWith("refs/heads/")).length} 个分支`}
                       {done && " · 已导入"}
                       {next && !done && " · 下一个"}
+                      {reason && <span className="block text-danger">{reason}</span>}
                     </>
                   }
                 >
@@ -416,7 +449,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
                     size="sm"
                     variant={next && !done ? "primary" : "secondary"}
                     onPress={() => importIn(p.payloadPath)}
-                    isDisabled={needsSetup || !usable || !p.payloadExists}
+                    isDisabled={needsSetup || !usable || !!reason}
                   >
                     导入
                   </ActionButton>
@@ -591,11 +624,13 @@ export function ExternalView({ profile }: { profile: Profile }) {
             <DetachedWorktreesNotice status={repo.status} />
             <DirtyTreesNotice status={repo.status} suffix="回传只包含已提交的内容。" />
             {opRes && <OutcomeView outcome={opRes} />}
+            {selected.length > 0 && <WorkflowJump step={4}>回传所选分支</WorkflowJump>}
           </>
         )}
       </StepCard>
 
       <StepCard step={4} label="Return" title="回传到内网" description="只打包内网还没有的提交（--not --remotes=origin）">
+        <WorkflowJump step={3}>选择开发分支</WorkflowJump>
         <div className="flex flex-wrap items-center gap-3">
           <ToggleButtonGroup
             aria-label="回传方式"
@@ -612,7 +647,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
           </ToggleButtonGroup>
           <span className="flex-1" />
           <span role="status" className="min-w-0 break-all text-sm text-muted">
-            {selected.length ? `已选：${selected.join("、")}` : "在上方表格中选择分支"}
+            {selected.length ? `已选：${selected.join("、")}` : "尚未选择开发分支"}
           </span>
           <ActionButton
             variant="primary"
@@ -634,13 +669,13 @@ export function ExternalView({ profile }: { profile: Profile }) {
             <span className="font-mono text-xs break-all">{exportRes.payload}</span>
             {exportRes.warnings.map((w) => (
               <span key={w} className="block">
-                ⚠ {w}
+                提示：{w}
               </span>
             ))}
           </Notice>
         )}
         {exportRes?.status === "nothingToSync" && <Notice tone="accent" title={exportRes.message} />}
       </StepCard>
-    </div>
+    </Workflow>
   );
 }

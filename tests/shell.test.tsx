@@ -1,8 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { api, type Profile } from "../src/api";
-import { StepCard, WorkflowNav } from "../src/ui";
+import { StepCard, Workflow, WorkflowNav } from "../src/ui";
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 vi.mock("../src/ExternalView", () => ({ ExternalView: ({ profile }: { profile: Profile }) => <p>外网工作区：{profile.name}</p> }));
@@ -36,6 +36,22 @@ it("按名称和包名前缀搜索配置，不改变当前工作区", async () =
   expect(screen.getByRole("option", { name: /订单服务/ }).getAttribute("aria-selected")).toBe("true");
   fireEvent.change(search, { target: { value: "" } });
   expect(screen.getAllByRole("option")).toHaveLength(2);
+});
+
+it("右上角外观菜单提供浅色、深色和跟随系统，并保存选择", async () => {
+  localStorage.clear();
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "外观：跟随系统" }));
+  expect(await screen.findByRole("menuitemradio", { name: "浅色" })).toBeTruthy();
+  expect(screen.getByRole("menuitemradio", { name: "跟随系统" }).getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "深色" }));
+  expect(document.documentElement.dataset.theme).toBe("dark");
+  expect(localStorage.getItem("app-shell-theme")).toBe("dark");
+  fireEvent.click(screen.getByRole("button", { name: "外观：深色" }));
+  fireEvent.click(await screen.findByRole("menuitemradio", { name: "跟随系统" }));
+  expect(localStorage.getItem("app-shell-theme")).toBe("system");
+  expect(document.documentElement.dataset.theme).toBe("light");
+  localStorage.clear();
 });
 
 it("收起和展开侧栏时保留搜索和当前配置", async () => {
@@ -81,59 +97,81 @@ it("首次使用可以选择内外网角色创建配置", async () => {
   expect(screen.getByRole("textbox", { name: "GitLab 仓库地址" })).toBeTruthy();
 });
 
-it("流程导航将键盘焦点移动到对应步骤", () => {
-  render(<><WorkflowNav steps={["导入内网包", "开发仓库"]} /><StepCard step={2} label="Sync" title="开发仓库">仓库内容</StepCard></>);
-  const step = document.getElementById("step-2")!;
-  step.scrollIntoView = vi.fn();
-  fireEvent.click(within(screen.getByRole("navigation", { name: "同步流程" })).getByRole("link", { name: /2\s*开发仓库/ }));
-  expect(step.scrollIntoView).toHaveBeenCalledWith({ block: "start" });
-  expect(document.activeElement).toBe(step);
+it("流程页签支持键盘切换，隐藏面板保留输入，导航关联正确", () => {
+  render(<Workflow><WorkflowNav steps={["导入内网包", "开发仓库"]} />
+    <StepCard step={1} label="Import" title="导入内网包"><input aria-label="包路径" defaultValue="/usb" /></StepCard>
+    <StepCard step={2} label="Sync" title="开发仓库">仓库内容</StepCard></Workflow>);
+  const tabs = screen.getAllByRole("tab");
+  fireEvent.change(screen.getByRole("textbox", { name: "包路径" }), { target: { value: "/changed" } });
+  fireEvent.keyDown(tabs[0], { key: "ArrowRight" });
+  expect(document.activeElement).toBe(tabs[1]);
+  expect(tabs[1].getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tabpanel").id).toBe(tabs[1].getAttribute("aria-controls"));
+  expect(screen.queryByRole("textbox", { name: "包路径" })).toBeNull();
+  fireEvent.keyDown(tabs[1], { key: "Home" });
+  expect((screen.getByRole("textbox", { name: "包路径" }) as HTMLInputElement).value).toBe("/changed");
+  fireEvent.click(tabs[1]);
+  expect(screen.getByRole("tabpanel").textContent).toContain("仓库内容");
 });
 
-it("旧配置默认系统主题，保存深色后生效并在重新加载时恢复", async () => {
+it("设置不提供主题切换，保存 Git 路径后重新检测环境", async () => {
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "打开设置" }));
-  const trigger = screen.getByRole("button", { name: /主题$/ });
-  expect(trigger.textContent).toContain("系统");
-  fireEvent.click(trigger);
-  expect((await screen.findByRole("option", { name: "系统", exact: true })).getAttribute("aria-selected")).toBe("true");
-  fireEvent.click(screen.getByRole("option", { name: "深色", exact: true }));
-  expect(document.documentElement.dataset.theme).toBe("light");
+  expect(screen.queryByText("外观", { exact: true })).toBeNull();
+  expect(screen.queryByRole("button", { name: /主题$/ })).toBeNull();
+  fireEvent.change(screen.getByRole("textbox", { name: "git 可执行文件" }), { target: { value: " /custom/git " } });
   fireEvent.click(screen.getByRole("button", { name: "保存并重新检测" }));
-  await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
-  expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ theme: "dark", profiles, lastProfileId: "orders" }));
-  const saved = vi.mocked(api.saveConfig).mock.calls[0][0];
-  cleanup();
-  vi.mocked(api.loadConfig).mockResolvedValue(saved);
-  render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "打开设置" }));
-  expect(document.documentElement.dataset.theme).toBe("dark");
-  expect(screen.getByRole("button", { name: /主题$/ }).textContent).toContain("深色");
+  await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith({ profiles, lastProfileId: "orders", gitPath: "/custom/git" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "保存并重新检测" })).toBeNull());
+  expect(api.environment).toHaveBeenCalledTimes(2);
 });
 
-it("取消主题修改不保存也不影响当前主题", async () => {
-  vi.mocked(api.loadConfig).mockResolvedValue({ profiles, theme: "dark" });
+it("取消设置修改后保留原 Git 路径", async () => {
+  vi.mocked(api.loadConfig).mockResolvedValue({ profiles, gitPath: "/original/git" });
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "打开设置" }));
-  fireEvent.click(screen.getByRole("button", { name: /主题$/ }));
-  fireEvent.click(await screen.findByRole("option", { name: "浅色", exact: true }));
+  fireEvent.change(screen.getByRole("textbox", { name: "git 可执行文件" }), { target: { value: "/changed/git" } });
   fireEvent.click(screen.getByRole("button", { name: "取消", exact: true }));
-  expect(document.documentElement.dataset.theme).toBe("dark");
   expect(api.saveConfig).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-  expect(screen.getByRole("button", { name: /主题$/ }).textContent).toContain("深色");
+  expect((screen.getByRole("textbox", { name: "git 可执行文件" }) as HTMLInputElement).value).toBe("/original/git");
 });
 
-it("主题保存失败时保留选择供重试，当前主题不变", async () => {
+it("设置保存失败时保留输入供重试", async () => {
   vi.mocked(api.saveConfig).mockRejectedValueOnce(new Error("配置不可写"));
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "打开设置" }));
-  fireEvent.click(screen.getByRole("button", { name: /主题$/ }));
-  fireEvent.click(await screen.findByRole("option", { name: "深色", exact: true }));
+  const path = screen.getByRole("textbox", { name: "git 可执行文件" }) as HTMLInputElement;
+  fireEvent.change(path, { target: { value: "/custom/git" } });
   fireEvent.click(screen.getByRole("button", { name: "保存并重新检测" }));
   expect(await screen.findByText("保存失败，请检查错误提示后重试。")).toBeTruthy();
-  expect(document.documentElement.dataset.theme).toBe("light");
-  expect(screen.getByRole("button", { name: /主题$/ }).textContent).toContain("深色");
+  expect(path.value).toBe("/custom/git");
   fireEvent.click(screen.getByRole("button", { name: "保存并重新检测" }));
-  await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "保存并重新检测" })).toBeNull());
+  expect(api.saveConfig).toHaveBeenLastCalledWith({ profiles, lastProfileId: "orders", gitPath: "/custom/git" });
+});
+
+it("小屏默认收起侧栏，抽屉限制焦点，Escape 关闭并恢复焦点，选择配置后关闭", async () => {
+  vi.stubGlobal("matchMedia", (query: string) => ({ matches: query === "(max-width: 1023px)", media: query, addEventListener() {}, removeEventListener() {} }));
+  render(<App />);
+  const toggle = await screen.findByRole("button", { name: "展开侧栏" });
+  expect(screen.queryByRole("dialog", { name: "工作区导航" })).toBeNull();
+  fireEvent.click(toggle);
+  const drawer = screen.getByRole("dialog", { name: "工作区导航" });
+  const close = screen.getByRole("button", { name: "关闭侧栏", exact: true });
+  expect(drawer.getAttribute("aria-modal")).toBe("true");
+  expect(document.activeElement).toBe(close);
+  expect(document.getElementById("main-content")?.hasAttribute("inert")).toBe(true);
+  fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "打开设置" }));
+  fireEvent.keyDown(document.activeElement!, { key: "Tab" });
+  expect(document.activeElement).toBe(close);
+  fireEvent.keyDown(drawer, { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "工作区导航" })).toBeNull();
+  expect(document.activeElement).toBe(toggle);
+  expect(document.getElementById("main-content")?.hasAttribute("inert")).toBe(false);
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("option", { name: /基础平台/ }));
+  expect(await screen.findByText("内网工作区：基础平台")).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "工作区导航" })).toBeNull();
 });

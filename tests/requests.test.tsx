@@ -149,6 +149,7 @@ describe("仓库查询", () => {
     const old = deferred<boolean>();
     vi.spyOn(api, "probeRepo").mockReturnValueOnce(old.promise).mockResolvedValueOnce(false);
     renderView("external");
+    fireEvent.click(screen.getByRole("tab", { name: /开发仓库/ }));
     fireEvent.click(screen.getAllByRole("button", { name: "刷新", exact: true })[0]);
     await waitFor(() => expect(within(devRow("/dev-two")).getByRole("button", { name: "从镜像克隆" })).toBeTruthy());
     await act(async () => old.resolve(true));
@@ -158,6 +159,7 @@ describe("仓库查询", () => {
 
   it("首轮只对镜像和当前开发库查完整状态，其余仓库使用 probe", async () => {
     renderView("external");
+    fireEvent.click(screen.getByRole("tab", { name: /开发仓库/ }));
     await screen.findByRole("button", { name: "切换", exact: true });
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status").map(([, args]) => (args as { path: string }).path).sort()).toEqual(["/dev-one", "/mirror"]);
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "probe_repo")).toEqual([["probe_repo", { path: "/dev-two" }]]);
@@ -203,6 +205,7 @@ describe("提交列表与推送", () => {
     const two = deferred<CommitInfo[]>();
     vi.spyOn(api, "listCommits").mockImplementation((_repo, _from, to) => to.endsWith("one") ? one.promise : two.promise);
     renderView("internal");
+    fireEvent.click(screen.getByRole("tab", { name: /Rebase 并推送/ }));
     fireEvent.click(await screen.findByRole("row", { name: "feature/one", exact: true }));
     expect((screen.getByRole("button", { name: "推送…" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("row", { name: "feature/two", exact: true }));
@@ -222,6 +225,7 @@ describe("提交列表与推送", () => {
     const next = deferred<CommitInfo[]>();
     vi.spyOn(api, "listCommits").mockResolvedValueOnce([commit("previous-commit")]).mockReturnValueOnce(next.promise);
     renderView("internal");
+    fireEvent.click(screen.getByRole("tab", { name: /Rebase 并推送/ }));
     fireEvent.click(await screen.findByRole("row", { name: "feature/one", exact: true }));
     expect(await screen.findByText("previous-commit")).toBeTruthy();
     fireEvent.click(screen.getByRole("row", { name: "feature/two", exact: true }));
@@ -236,6 +240,7 @@ describe("提交列表与推送", () => {
   it("确认框打开后配置变化，确认旧内容不能推送", async () => {
     vi.spyOn(api, "listCommits").mockResolvedValue([commit("approved-commit")]);
     const { rerender } = renderView("internal");
+    fireEvent.click(screen.getByRole("tab", { name: /Rebase 并推送/ }));
     fireEvent.click(await screen.findByRole("row", { name: "feature/one", exact: true }));
     await screen.findByText("approved-commit");
     fireEvent.click(screen.getByRole("button", { name: "推送…" }));
@@ -249,6 +254,7 @@ describe("提交列表与推送", () => {
   it("提交加载失败不可误报为空列表或允许推送", async () => {
     vi.spyOn(api, "listCommits").mockRejectedValue(new Error("missing base"));
     renderView("internal");
+    fireEvent.click(screen.getByRole("tab", { name: /Rebase 并推送/ }));
     fireEvent.click(await screen.findByRole("row", { name: "feature/one", exact: true }));
     expect(await screen.findByText(/missing base/)).toBeTruthy();
     expect(screen.queryByText("没有相对 origin/main 的新提交")).toBeNull();
@@ -262,6 +268,7 @@ describe("开发库 stale 状态", () => {
     renderView("external", value);
     fireEvent.click(await screen.findByRole("button", { name: "导入", exact: true }));
     await waitFor(() => expect(screen.getAllByText("待同步")).toHaveLength(value.devRepos!.length));
+    fireEvent.click(screen.getByRole("tab", { name: /开发仓库/ }));
   }
 
   it("null 成功仅清除所同步的库；失败保留标记，重试成功再清除", async () => {
@@ -306,4 +313,34 @@ describe("开发库 stale 状态", () => {
     await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status").length).toBeGreaterThan(before));
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "sync_dev_repo").map(([, args]) => (args as { devDir: string }).devDir)).toEqual(["/dev-one", "/dev-two"]);
   });
+});
+
+it("导入前阻止缺号、身份不符和缺失文件；显式跳号也不能绕过身份校验", async () => {
+  const makePackage = (seq: number, repoId = "matching", payloadExists = true): PackageInfo => ({
+    payloadPath: `/usb/${seq}.bundle`, payloadExists, manifestPath: `/usb/${seq}.json`,
+    manifest: { format: 1, kind: "incr", repoName: "test", repoId, seq, createdAt: 1, payload: `${seq}.bundle`, baseBranch: "main", refs: [], toolVersion: "2.0.4" },
+  });
+  vi.spyOn(api, "mirrorState").mockResolvedValue({ repoId: "matching", lastInSeq: 2, backSeq: 0, lastImportAt: null });
+  vi.spyOn(api, "listPackages").mockResolvedValue([makePackage(3), makePackage(5), makePackage(4, "other"), makePackage(6, "matching", false)]);
+  renderView("external");
+  await screen.findByText("仓库身份不符");
+  const importButton = (seq: number) => within(screen.getByText(`#${seq} · ${seq}.bundle`).closest(".package-row") as HTMLElement).getByRole("button", { name: "导入" }) as HTMLButtonElement;
+  expect(importButton(3).disabled).toBe(false);
+  expect(importButton(5).disabled).toBe(true);
+  expect(importButton(4).disabled).toBe(true);
+  expect(importButton(6).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("checkbox", { name: /允许跳号导入/ }));
+  expect(importButton(5).disabled).toBe(false);
+  expect(importButton(4).disabled).toBe(true);
+  expect(importButton(6).disabled).toBe(true);
+});
+
+
+it.each(["system", "light", "dark"])("旧 %s 主题偏好被忽略，保存配置时移除该字段", async (theme) => {
+  vi.mocked(invoke).mockResolvedValueOnce({ theme, gitPath: "/custom/git", profiles: [profile], lastProfileId: profile.id });
+  const config = await api.loadConfig();
+  expect(config).toEqual({ gitPath: "/custom/git", profiles: [profile], lastProfileId: profile.id });
+  expect(config).not.toHaveProperty("theme");
+  await api.saveConfig(config);
+  expect(invoke).toHaveBeenLastCalledWith("save_config", { config });
 });

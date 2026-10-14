@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 // ---------- 与 Rust 端对应的类型 ----------
 
 export type Role = "internal" | "external";
-export type Theme = "system" | "light" | "dark";
 
 export interface Profile {
   id: string;
@@ -29,8 +28,6 @@ export interface Profile {
 }
 
 export interface AppConfig {
-  /** Missing in older configs; defaults to following the system. */
-  theme?: Theme;
   gitPath?: string;
   profiles: Profile[];
   lastProfileId?: string;
@@ -234,7 +231,11 @@ export const api = {
   activeOperation: () => invoke<number | null>("active_operation"),
   cancelOperation: (id: number) => invoke<boolean>("cancel_operation", { id }),
   probeRepo: (path: string) => readOnce<boolean>("probe_repo", { path }),
-  loadConfig: () => invoke<AppConfig>("load_config"),
+  loadConfig: async (): Promise<AppConfig> => {
+    // 兼容旧配置：不再使用或保存深浅主题偏好。
+    const { theme: _legacyTheme, ...config } = await invoke<AppConfig & { theme?: unknown }>("load_config");
+    return config;
+  },
   saveConfig: (config: AppConfig) => mutate<null>("save_config", { config }),
   environment: () => invoke<Environment>("environment"),
 

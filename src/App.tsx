@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Card, Input, Label, ListBox, Select, Spinner, Toast } from "@heroui/react";
+import { Button, Card, Dropdown, Header, Input, ListBox, Spinner, Toast } from "@heroui/react";
 import type { Selection } from "@heroui/react";
-import { api, AppConfig, Environment, newId, Profile, Role, Theme } from "./api";
+import { api, AppConfig, Environment, newId, Profile, Role } from "./api";
 import { ExternalView } from "./ExternalView";
 import { InternalView } from "./InternalView";
 import { LogPanel, useGitLog } from "./LogPanel";
@@ -9,9 +9,10 @@ import { blankProfile, ProfileEditor } from "./ProfileEditor";
 import { Icon } from "./icons";
 import { OperationStatus, RunnerProvider, useRunner } from "./runner";
 import { AppGlyph, Code, FormSection, Notice, PathInput, SectionLabel, TextInput } from "./ui";
-import { useTheme } from "./theme";
 import { UpdatePanel, VersionChip } from "./UpdatePanel";
 import { startAutoCheck } from "./updater";
+import { useAppearance } from "./appearance";
+import { useDisclosureMotion, useInputModality } from "./motion";
 import "./index.css";
 
 /**
@@ -29,28 +30,58 @@ function TitleBarDrag({ className = "" }: { className?: string }) {
 type Mode = { kind: "view" } | { kind: "edit"; profile: Profile; isNew: boolean } | { kind: "settings" };
 
 function Shell() {
-  const { busy, notify, confirm } = useRunner();
+  useInputModality();
+  const { preference, setPreference } = useAppearance();
+  const appearanceLabel = preference === "system" ? "跟随系统" : preference === "light" ? "浅色" : "深色";
+  const { busy, error, notify, confirm, operations, clearOperations } = useRunner();
   const [config, setConfig] = useState<AppConfig | null>(null);
-  useTheme(config?.theme);
   const [env, setEnv] = useState<Environment | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   useEffect(() => startAutoCheck(), []);
   const [mode, setMode] = useState<Mode>({ kind: "view" });
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [smallScreen, setSmallScreen] = useState(() => window.matchMedia("(max-width: 1023px)").matches);
+  const [sidebarOpen, setSidebarOpen] = useState(() => !window.matchMedia("(max-width: 1023px)").matches);
+  const sidebarMotion = useDisclosureMotion<HTMLElement>(sidebarOpen, "drawer", smallScreen);
+  const sidebarRef = sidebarMotion.ref;
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 1023px)");
+    const update = () => { setSmallScreen(media.matches); setSidebarOpen(!media.matches); };
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    if (!smallScreen || !sidebarOpen) return;
+    const sidebar = sidebarRef.current;
+    if (!sidebar) return;
+    const controls = () => [...sidebar.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')];
+    controls()[0]?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); setSidebarOpen(false); }
+      if (event.key !== "Tab") return;
+      const items = controls();
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    sidebar.addEventListener("keydown", onKeyDown);
+    return () => { sidebar.removeEventListener("keydown", onKeyDown); sidebarToggleRef.current?.focus(); };
+  }, [smallScreen, sidebarOpen]);
   const [profileSearch, setProfileSearch] = useState("");
   const contentRef = useRef<HTMLDivElement>(null);
   const pageKey = mode.kind === "edit" ? mode.profile.id : config?.lastProfileId;
   useEffect(() => {
     if (contentRef.current) contentRef.current.scrollTop = 0;
   }, [mode.kind, pageKey]);
-  // 默认收起；开始执行操作或出现错误时自动展开
+  // 默认收起；仅出现错误时自动展开，正常执行不改变用户的展开选择
   const [logOpen, setLogOpen] = useState(false);
   const log = useGitLog();
   const logErrors = log.lines.filter((l) => l.kind === "error").length;
   useEffect(() => {
-    if (busy) setLogOpen(true);
-  }, [busy]);
+    if (error) setLogOpen(true);
+  }, [error]);
   useEffect(() => {
     if (logErrors > 0) setLogOpen(true);
   }, [logErrors]);
@@ -97,8 +128,12 @@ function Shell() {
   const select = (id: string) => {
     setMode({ kind: "view" });
     persist({ ...config, lastProfileId: id });
+    if (smallScreen) setSidebarOpen(false);
   };
-  const startNew = (role: Role) => setMode({ kind: "edit", profile: blankProfile(role, newId()), isNew: true });
+  const startNew = (role: Role) => {
+    setMode({ kind: "edit", profile: blankProfile(role, newId()), isNew: true });
+    if (smallScreen) setSidebarOpen(false);
+  };
 
   const saveProfile = async (p: Profile) => {
     const exists = config.profiles.some((x) => x.id === p.id);
@@ -141,11 +176,16 @@ function Shell() {
   return (
     <div className="app-shell" data-sidebar-open={sidebarOpen} data-platform={IS_MAC ? "mac" : "other"}>
       <a href="#main-content" className="skip-link">跳到主要内容</a>
-      <aside id="app-sidebar" className="app-sidebar" aria-label="工作区导航" hidden={!sidebarOpen}>
+      {smallScreen && sidebarMotion.visible && <button className="sidebar-backdrop" data-open={sidebarOpen}
+        aria-hidden={!sidebarOpen} aria-label="关闭侧栏遮罩" tabIndex={-1} onClick={() => setSidebarOpen(false)} />}
+      <aside ref={sidebarRef} id="app-sidebar" className="app-sidebar" aria-label="工作区导航" hidden={!sidebarMotion.visible}
+        aria-hidden={!sidebarOpen} inert={!sidebarOpen}
+        role={smallScreen && sidebarOpen ? "dialog" : undefined} aria-modal={smallScreen && sidebarOpen ? true : undefined}>
         <TitleBarDrag />
         <div className="app-brand">
           <span className="brand-mark"><AppGlyph className="size-5" /></span>
-          <span className="font-semibold">Git 离线同步</span>
+          <span className="brand-copy"><strong>Git 离线同步</strong><small>离线开发工作台</small></span>
+          <Button isIconOnly size="sm" variant="ghost" className="sidebar-close" aria-label="关闭侧栏" onPress={() => setSidebarOpen(false)}>×</Button>
         </div>
         <div className="sidebar-tools">
           <Button fullWidth variant="ghost" className="new-profile-button" onPress={() => startNew(recommended)} isDisabled={!!busy || mode.kind === "edit"}>
@@ -153,7 +193,7 @@ function Shell() {
           </Button>
           <div className="profile-search">
             <Icon name="search" />
-            <Input aria-label="搜索同步配置" placeholder="搜索配置…" value={profileSearch} onChange={(event) => setProfileSearch(event.target.value)} />
+            <Input aria-label="搜索同步配置" name="profile-search" autoComplete="off" placeholder="搜索配置…" value={profileSearch} onChange={(event) => setProfileSearch(event.target.value)} />
           </div>
         </div>
         <div className="app-profiles-title"><span>同步配置</span><span>{config.profiles.length}</span></div>
@@ -173,12 +213,17 @@ function Shell() {
               }}
               className="profile-listbox"
             >
-              {visibleProfiles.map((p) => (
+              {(["internal", "external"] as Role[]).filter((role) => visibleProfiles.some((p) => p.role === role)).map((role) => (
+                <ListBox.Section key={role}>
+                  <Header className="profile-group-label">{role === "internal" ? "内网端" : "外网端"}</Header>
+                  {visibleProfiles.filter((p) => p.role === role).map((p) => (
                 <ListBox.Item key={p.id} id={p.id} textValue={p.name} className="profile-item">
                   <Icon name="folder" />
                   <span className="flex-1 truncate" title={p.name}>{p.name}</span>
                   <span className="profile-role">{p.role === "internal" ? "内网" : "外网"}</span>
                 </ListBox.Item>
+                  ))}
+                </ListBox.Section>
               ))}
             </ListBox>
           )}
@@ -192,15 +237,15 @@ function Shell() {
               onOpenUpdates={() => setMode({ kind: "settings" })} />
           </div>
           <Button fullWidth variant="ghost" className="settings-button" isDisabled={!!busy || mode.kind === "edit"}
-            aria-label="打开设置" aria-pressed={mode.kind === "settings"} onPress={() => setMode({ kind: "settings" })}>
+            aria-label="打开设置" aria-pressed={mode.kind === "settings"} onPress={() => { setMode({ kind: "settings" }); if (smallScreen) setSidebarOpen(false); }}>
             <Icon name="settings" /><span>设置</span>
           </Button>
         </div>
       </aside>
 
-      <main id="main-content" tabIndex={-1} className="app-main">
+      <main id="main-content" tabIndex={-1} className="app-main" inert={smallScreen && sidebarOpen}>
         <header className="workspace-toolbar" data-tauri-drag-region>
-          <Button isIconOnly size="sm" variant="ghost" className="sidebar-toggle" aria-label={sidebarOpen ? "收起侧栏" : "展开侧栏"}
+          <Button ref={sidebarToggleRef} isIconOnly size="sm" variant="ghost" className="sidebar-toggle" aria-label={sidebarOpen ? "收起侧栏" : "展开侧栏"}
             aria-expanded={sidebarOpen} aria-controls="app-sidebar" onPress={() => setSidebarOpen(!sidebarOpen)}>
             <Icon name="panel" />
           </Button>
@@ -208,6 +253,21 @@ function Shell() {
             <span className="truncate" title={workspaceTitle} data-tauri-drag-region>{workspaceTitle}</span>
             {mode.kind === "view" && current && <span className="role-badge">{current.role === "internal" ? "内网端" : "外网端"}</span>}
           </div>
+          <Dropdown>
+            <Button isIconOnly size="sm" variant="ghost" aria-label={`外观：${appearanceLabel}`}>
+              <Icon name={preference === "system" ? "monitor" : preference === "light" ? "sun" : "moon"} />
+            </Button>
+            <Dropdown.Popover placement="bottom end">
+              <Dropdown.Menu aria-label="选择外观" selectionMode="single" disallowEmptySelection
+                selectedKeys={new Set([preference])} onAction={(key) => {
+                  if (key === "light" || key === "dark" || key === "system") setPreference(key);
+                }}>
+                <Dropdown.Item id="light" textValue="浅色"><Icon name="sun" />浅色<Dropdown.ItemIndicator /></Dropdown.Item>
+                <Dropdown.Item id="dark" textValue="深色"><Icon name="moon" />深色<Dropdown.ItemIndicator /></Dropdown.Item>
+                <Dropdown.Item id="system" textValue="跟随系统"><Icon name="monitor" />跟随系统<Dropdown.ItemIndicator /></Dropdown.Item>
+              </Dropdown.Menu>
+            </Dropdown.Popover>
+          </Dropdown>
           {mode.kind === "view" && current && <Button size="sm" variant="ghost" isDisabled={!!busy}
             onPress={() => setMode({ kind: "edit", profile: current, isNew: false })}>
             <Icon name="settings" />编辑配置
@@ -237,7 +297,8 @@ function Shell() {
               <>
                 <section className="workspace-summary" aria-label="当前同步配置">
                   <div className="workspace-heading">
-                    <h1>同步工作区</h1>
+                    <span className="workspace-eyebrow">{current.role === "internal" ? "内网同步工作区" : "外网开发工作区"}</span>
+                    <h1>{current.name}</h1>
                     <p>{current.role === "internal" ? "管理镜像、导出内网包，并接收外网回传。" : "导入内网包，在开发仓库中工作，再将提交带回内网。"}</p>
                   </div>
                   <div className="workspace-metadata">
@@ -251,7 +312,7 @@ function Shell() {
             ) : <Welcome onNew={startNew} recommended={recommended} />)}
           </div>
         </div>
-        <LogPanel lines={log.lines} clear={log.clear} open={logOpen} setOpen={setLogOpen} />
+        <LogPanel lines={log.lines} operations={operations} clear={() => { log.clear(); clearOperations(); }} open={logOpen} setOpen={setLogOpen} />
       </main>
     </div>
   );
@@ -314,14 +375,13 @@ function Settings({
   onCancel: () => void;
 }) {
   const [gitPath, setGitPath] = useState(config.gitPath ?? "");
-  const [theme, setTheme] = useState<Theme>(config.theme ?? "system");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   async function save() {
     setSaving(true);
     setError("");
     try {
-      if (await onSave({ ...config, theme, gitPath: gitPath.trim() || undefined }) === false) setError("保存失败，请检查错误提示后重试。");
+      if (await onSave({ ...config, gitPath: gitPath.trim() || undefined }) === false) setError("保存失败，请检查错误提示后重试。");
     } catch (e) { setError(String(e)); }
     finally { setSaving(false); }
   }
@@ -333,27 +393,6 @@ function Settings({
       </Card.Header>
       <Card.Content className="flex flex-col gap-5 px-8 pb-8">
         {error && <p role="alert" className="text-danger">{error}</p>}
-        <FormSection title="外观" description="选择应用主题，保存后生效。系统模式会自动跟随系统的浅色或深色设置。">
-          <Select value={theme} onChange={(value) => {
-            if (value === "system" || value === "light" || value === "dark") setTheme(value);
-          }} isDisabled={saving} className="theme-select">
-            <Label>主题</Label>
-            <Select.Trigger aria-label="主题" className="theme-select-trigger">
-              <Select.Value />
-              <Select.Indicator />
-            </Select.Trigger>
-            <Select.Popover>
-              <ListBox>
-                {([{ value: "system", label: "系统" }, { value: "light", label: "浅色" }, { value: "dark", label: "深色" }] as const).map((option) => (
-                  <ListBox.Item key={option.value} id={option.value} textValue={option.label}>
-                    {option.label}
-                    <ListBox.ItemIndicator />
-                  </ListBox.Item>
-                ))}
-              </ListBox>
-            </Select.Popover>
-          </Select>
-        </FormSection>
         <FormSection title="Git 环境" description="默认自动检测 Git。只有自动检测失败或需要指定版本时，才填写可执行文件路径。">
         <PathInput
           label="git 可执行文件"

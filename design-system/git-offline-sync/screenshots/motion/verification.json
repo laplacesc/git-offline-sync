@@ -1,0 +1,190 @@
+{
+  "verifiedAt": "2026-10-15",
+  "checks": [
+    {
+      "name": "pointer press provides subtle scale feedback",
+      "passed": true
+    },
+    {
+      "name": "pipeline pointer entry uses 200ms measured collapse",
+      "passed": true
+    },
+    {
+      "name": "pipeline visual exit immediately removes keyboard access",
+      "passed": true
+    },
+    {
+      "name": "pipeline reversal starts at the visible height",
+      "passed": true
+    },
+    {
+      "name": "pipeline finishes hidden with no residual animations",
+      "passed": true
+    },
+    {
+      "name": "drawer enters from left in 220ms and receives focus immediately",
+      "passed": true
+    },
+    {
+      "name": "drawer animation causes no mobile overflow",
+      "passed": true
+    },
+    {
+      "name": "drawer exits to the same edge and immediately releases main",
+      "passed": true
+    },
+    {
+      "name": "drawer rapid reopening continues from its current transform",
+      "passed": true
+    },
+    {
+      "name": "Escape cancels movement and restores trigger focus immediately",
+      "passed": true
+    },
+    {
+      "name": "keyboard drawer opening skips authored animation",
+      "passed": true
+    },
+    {
+      "name": "reduced motion drawer opening is immediate",
+      "passed": true
+    },
+    {
+      "name": "reduced motion drawer closing is immediate",
+      "passed": true
+    },
+    {
+      "name": "reduced motion pipeline opening has no animation",
+      "passed": true
+    },
+    {
+      "name": "enabling reduced motion settles in-flight content",
+      "passed": true
+    },
+    {
+      "name": "short desktop retains a usable task panel",
+      "passed": true
+    },
+    {
+      "name": "short desktop allows workspace scrolling",
+      "passed": true
+    },
+    {
+      "name": "short desktop task reachable above log",
+      "passed": true
+    },
+    {
+      "name": "1280px desktop task fits canvas",
+      "passed": true
+    },
+    {
+      "name": "light initial state",
+      "passed": true
+    },
+    {
+      "name": "dark toggle persists",
+      "passed": true
+    },
+    {
+      "name": "import command and updated sequence",
+      "passed": true
+    },
+    {
+      "name": "End selects final tab",
+      "passed": true
+    },
+    {
+      "name": "ArrowLeft selects development tab",
+      "passed": true
+    },
+    {
+      "name": "return export receives branch",
+      "passed": true
+    },
+    {
+      "name": "push confirmation",
+      "passed": true
+    },
+    {
+      "name": "no horizontal overflow at 1440",
+      "passed": true
+    },
+    {
+      "name": "no horizontal overflow at 1024",
+      "passed": true
+    },
+    {
+      "name": "no horizontal overflow at 768",
+      "passed": true
+    },
+    {
+      "name": "no horizontal overflow at 414",
+      "passed": true
+    },
+    {
+      "name": "no horizontal overflow at 375",
+      "passed": true
+    },
+    {
+      "name": "no horizontal overflow at 320",
+      "passed": true
+    },
+    {
+      "name": "drawer moves focus",
+      "passed": true
+    },
+    {
+      "name": "drawer wraps backwards",
+      "passed": true
+    },
+    {
+      "name": "drawer wraps forwards",
+      "passed": true
+    },
+    {
+      "name": "Escape restores focus",
+      "passed": true
+    },
+    {
+      "name": "mobile log keyboard resizing changes visible height",
+      "passed": true
+    },
+    {
+      "name": "mobile log button resizing changes visible height",
+      "passed": true
+    },
+    {
+      "name": "read error offers recovery",
+      "passed": true
+    },
+    {
+      "name": "invalid form focuses error summary",
+      "passed": true
+    },
+    {
+      "name": "configuration no overflow at 1280",
+      "passed": true
+    },
+    {
+      "name": "configuration no overflow at 768",
+      "passed": true
+    },
+    {
+      "name": "configuration no overflow at 375",
+      "passed": true
+    },
+    {
+      "name": "configuration no overflow at 320",
+      "passed": true
+    },
+    {
+      "name": "reduced motion disables transitions",
+      "passed": true
+    },
+    {
+      "name": "no runtime errors",
+      "passed": true
+    }
+  ],
+  "errors": []
+}
