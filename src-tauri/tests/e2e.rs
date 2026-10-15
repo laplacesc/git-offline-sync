@@ -1262,3 +1262,85 @@ fn interrupted_export_is_hidden_and_finishes_with_the_same_sequence() {
         ExportOutcome::NothingToSync { .. }
     ));
 }
+
+#[test]
+fn delete_local_branch_requires_confirmation_for_unmerged_and_preserves_remote() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    isolate_git_env(&root);
+    let work = root.join("work");
+    let remote = root.join("remote.git");
+    fs::create_dir_all(&work).unwrap();
+    sh(&root, &["init", "--bare", "-q", remote.to_str().unwrap()]);
+    sh(&work, &["init", "-q"]);
+    commit(&work, "a.txt", "initial\n", "initial");
+    sh(
+        &work,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    sh(&work, &["push", "-u", "origin", "main"]);
+    sh(&work, &["branch", "feature/merged"]);
+    sh(&work, &["push", "-u", "origin", "feature/merged"]);
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    repo::set_sync_base(&g, &work, "feature/merged", "main").unwrap();
+
+    let result = sync::delete_local_branch(&g, &work, "feature/merged", None).unwrap();
+    assert!(matches!(result, sync::DeleteBranchOutcome::Deleted { .. }));
+    assert!(!repo::rev_exists(&g, &work, "refs/heads/feature/merged"));
+    assert!(repo::rev_exists(
+        &g,
+        &work,
+        "refs/remotes/origin/feature/merged"
+    ));
+    assert!(repo::rev_exists(&g, &remote, "refs/heads/feature/merged"));
+    assert!(repo::get_sync_base(&g, &work, "feature/merged").is_none());
+
+    // 当前分支和 linked worktree 占用的分支，即使已合并也不能删除。
+    assert!(sync::delete_local_branch(&g, &work, "main", None).is_err());
+    assert!(repo::rev_exists(&g, &work, "refs/heads/main"));
+    let linked = root.join("linked");
+    sh(
+        &work,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/linked",
+            linked.to_str().unwrap(),
+        ],
+    );
+    assert!(sync::delete_local_branch(&g, &work, "feature/linked", None).is_err());
+    assert!(repo::rev_exists(&g, &work, "refs/heads/feature/linked"));
+
+    sh(&work, &["switch", "-c", "feature/unmerged"]);
+    commit(&work, "new.txt", "unmerged\n", "unmerged");
+    sh(&work, &["switch", "main"]);
+    let pending = sync::delete_local_branch(&g, &work, "feature/unmerged", None).unwrap();
+    let sync::DeleteBranchOutcome::NeedsForce { sha } = pending else {
+        panic!("未合并分支应要求二次确认");
+    };
+    assert!(repo::rev_exists(&g, &work, "refs/heads/feature/unmerged"));
+    // 强制删除也不能绕过工作树占用检查。
+    let main_sha = repo::rev_parse(&g, &work, "refs/heads/main").unwrap();
+    assert!(sync::delete_local_branch(&g, &work, "main", Some(&main_sha)).is_err());
+    assert!(sync::delete_local_branch(&g, &work, "feature/linked", Some(&main_sha)).is_err());
+    // 二次确认期间有新提交时，旧确认不能删除更新后的分支。
+    sh(&work, &["switch", "feature/unmerged"]);
+    commit(&work, "new.txt", "updated\n", "updated");
+    sh(&work, &["switch", "main"]);
+    assert!(sync::delete_local_branch(&g, &work, "feature/unmerged", Some(&sha)).is_err());
+    assert!(repo::rev_exists(&g, &work, "refs/heads/feature/unmerged"));
+    let pending = sync::delete_local_branch(&g, &work, "feature/unmerged", None).unwrap();
+    let sync::DeleteBranchOutcome::NeedsForce { sha } = pending else {
+        panic!("更新后的未合并分支应重新要求确认");
+    };
+    let removed = sync::delete_local_branch(&g, &work, "feature/unmerged", Some(&sha)).unwrap();
+    assert!(matches!(removed, sync::DeleteBranchOutcome::Deleted { .. }));
+    assert!(!repo::rev_exists(&g, &work, "refs/heads/feature/unmerged"));
+    assert!(sync::delete_local_branch(&g, &work, "feature/missing", None).is_err());
+    assert!(sync::delete_local_branch(&g, &work, "--all", None).is_err());
+    assert!(sync::delete_local_branch(&g, &remote, "main", None).is_err());
+    assert!(repo::rev_exists(&g, &remote, "refs/heads/main"));
+}

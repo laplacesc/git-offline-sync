@@ -1114,6 +1114,76 @@ pub fn rebase_onto(
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum DeleteBranchOutcome {
+    Deleted { message: String },
+    NeedsForce { sha: String },
+}
+
+/// 普通删除遇到未合并分支时返回确认所需的提交；强制删除必须匹配该提交。
+pub fn delete_local_branch(
+    g: &Git,
+    repo: &Path,
+    branch: &str,
+    force_at: Option<&str>,
+) -> Result<DeleteBranchOutcome> {
+    if repo::is_bare(g, repo)? || repo::is_mirror(g, repo) {
+        return invalid("请选择普通工作仓库删除本地分支");
+    }
+    let gd = repo::git_dir(g, repo)?;
+    let _lock = OperationLock::acquire(&gd.join("offline-sync-operation"))?;
+    validate_branch_name(g, repo, branch)?;
+    if !repo::rev_exists(g, repo, &format!("refs/heads/{branch}")) {
+        return invalid(format!("本地分支 {branch} 不存在，请刷新列表"));
+    }
+    if repo::list_worktrees(g, repo)?
+        .iter()
+        .any(|w| w.branch.as_deref() == Some(branch))
+    {
+        return invalid(format!("分支 {branch} 正被工作树使用，请先切换分支"));
+    }
+    let sha = repo::rev_parse(g, repo, &format!("refs/heads/{branch}"))?;
+    if let Some(expected) = force_at {
+        if expected != sha {
+            return invalid("分支提交已变化，请刷新列表后重新确认删除");
+        }
+    } else {
+        // 与 git branch -d 一致：优先检查上游，没有可用上游时检查 HEAD。
+        let target = repo::rev_parse(g, repo, &format!("{branch}@{{upstream}}"))
+            .unwrap_or_else(|_| "HEAD".into());
+        let merged = g.exec(
+            Some(repo),
+            &args!["merge-base", "--is-ancestor", &sha, &target],
+            None,
+            false,
+        )?;
+        match merged.code {
+            0 => {}
+            1 => return Ok(DeleteBranchOutcome::NeedsForce { sha }),
+            code => {
+                return Err(SyncError::Git {
+                    cmd: "git merge-base --is-ancestor".into(),
+                    code,
+                    stderr: merged.stderr,
+                })
+            }
+        }
+    }
+    g.run(
+        repo,
+        args![
+            "branch",
+            if force_at.is_some() { "-D" } else { "-d" },
+            "--",
+            branch
+        ],
+    )?;
+    Ok(DeleteBranchOutcome::Deleted {
+        message: format!("已删除本地分支 {branch}"),
+    })
+}
+
 /// 推送到内网远程。拒绝在镜像仓库执行（mirror 推送会覆盖/删除远程分支）。
 pub fn push_branch(
     g: &Git,

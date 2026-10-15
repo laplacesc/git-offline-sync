@@ -140,6 +140,10 @@ export type ExportOutcome =
     }
   | { status: "nothingToSync"; message: string };
 
+export type DeleteBranchOutcome =
+  | { status: "deleted"; message: string }
+  | { status: "needsForce"; sha: string };
+
 export interface OpOutcome {
   ok: boolean;
   conflict: boolean;
@@ -252,6 +256,8 @@ export const api = {
   continueOp: (repo: string) => mutate<OpOutcome>("continue_op", { repo }),
   rebaseOnto: (repo: string, branch: string, baseBranch: string, fetchUpstream: boolean) =>
     mutate<OpOutcome>("rebase_onto", { repo, branch, baseBranch, fetchUpstream }),
+  deleteLocalBranch: (repo: string, branch: string, forceAt?: string) =>
+    mutate<DeleteBranchOutcome>("delete_local_branch", { repo, branch, forceAt: forceAt ?? null }),
 
   // 内网端
   initMirror: (url: string, mirrorDir: string) => mutate<null>("init_mirror", { url, mirrorDir }),

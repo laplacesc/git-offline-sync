@@ -150,6 +150,8 @@ export function BranchTable({
   multi,
   isSelectable,
   onRebase,
+  repoPath,
+  onDeleted,
   emptyText = "没有本地分支",
 }: {
   branches: BranchInfo[];
@@ -158,10 +160,42 @@ export function BranchTable({
   multi?: boolean;
   isSelectable?: (b: BranchInfo) => boolean;
   onRebase?: (b: BranchInfo) => void;
+  repoPath?: string;
+  onDeleted?: () => unknown;
   emptyText?: string;
 }) {
   const [query, setQuery] = useState("");
-  const { notify } = useRunner();
+  const { notify, confirm, run } = useRunner();
+  const deleteBranch = async (b: BranchInfo) => {
+    if (!repoPath || b.current || b.worktree) return;
+    const approved = await confirm({
+      title: `删除本地分支 ${b.name}？`,
+      tone: "danger",
+      confirmLabel: "删除本地分支",
+      body: <div className="space-y-3">
+        <p>从 <Code>{repoPath}</Code> 删除 <Code>{b.name}</Code>，远程分支保持不变。</p>
+        <p className="text-sm text-muted">如果分支尚未合并，会再次询问是否强制删除。</p>
+      </div>,
+    });
+    if (!approved) return;
+    let result = await run("删除本地分支", () => api.deleteLocalBranch(repoPath, b.name));
+    if (result?.status === "needsForce") {
+      const forceAt = result.sha;
+      const forceApproved = await confirm({
+        title: `强制删除未合并分支 ${b.name}？`,
+        tone: "danger",
+        confirmLabel: "仍然强制删除",
+        body: <div className="space-y-3">
+          <p><Code>{b.name}</Code> 尚未合并，删除后可能丢失仅保存在此分支上的提交。</p>
+          <p className="text-sm text-muted">仓库：<Code>{repoPath}</Code>；分支提交：<Code>{shortSha(forceAt)}</Code>。请确认这些提交已备份或不再需要。</p>
+        </div>,
+      });
+      if (!forceApproved) return;
+      result = await run("强制删除本地分支", () => api.deleteLocalBranch(repoPath, b.name, forceAt));
+    }
+    if (result?.status === "deleted") notify("ok", result.message);
+    await onDeleted?.();
+  };
   const copyBranch = async (name: string) => {
     try {
       await navigator.clipboard.writeText(name);
@@ -216,7 +250,7 @@ export function BranchTable({
             <Table.Column className="whitespace-nowrap">提交</Table.Column>
             <Table.Column className="whitespace-nowrap">基准</Table.Column>
             <Table.Column className="whitespace-nowrap">相对基准</Table.Column>
-            {onRebase && <Table.Column className="whitespace-nowrap">操作</Table.Column>}
+            {(onRebase || repoPath) && <Table.Column className="whitespace-nowrap">操作</Table.Column>}
           </Table.Header>
           <Table.Body>
             {visible.map((b) => (
@@ -262,11 +296,18 @@ export function BranchTable({
                 <Table.Cell className="whitespace-nowrap">
                   <AheadBehind ahead={b.ahead} behind={b.behind} />
                 </Table.Cell>
-                {onRebase && (
+                {(onRebase || repoPath) && (
                   <Table.Cell>
-                    <ActionButton size="sm" variant="outline" onPress={() => onRebase(b)} aria-label={`Rebase ${b.name}`}>
-                      Rebase…
-                    </ActionButton>
+                    <div className="flex items-center gap-2 whitespace-nowrap">
+                      {onRebase && <ActionButton size="sm" variant="outline" onPress={() => onRebase(b)} aria-label={`Rebase ${b.name}`}>
+                        Rebase
+                      </ActionButton>}
+                      {repoPath && <ActionButton size="sm" variant="danger-soft"
+                        isDisabled={b.current || !!b.worktree} aria-label={`删除本地分支 ${b.name}`}
+                        onPress={() => deleteBranch(b)}>
+                        删除本地分支
+                      </ActionButton>}
+                    </div>
                   </Table.Cell>
                 )}
               </Table.Row>

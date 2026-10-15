@@ -12,7 +12,8 @@ use crate::core::error::SyncError;
 use crate::core::git::{redact, Git, LogEvent, LogKind, OperationGuard, OperationRegistry};
 use crate::core::repo::{CommitInfo, RepoStatus, Worktree};
 use crate::core::sync::{
-    self, ExportOutcome, ImportBackResult, ImportInResult, OpOutcome, PackageInfo,
+    self, DeleteBranchOutcome, ExportOutcome, ImportBackResult, ImportInResult, OpOutcome,
+    PackageInfo,
 };
 
 pub const LOG_EVENT: &str = "git-log";
@@ -245,6 +246,19 @@ pub async fn rebase_onto(
 ) -> CmdResult<OpOutcome> {
     mutating(app, move |g| {
         sync::rebase_onto(g, &p(repo), &branch, &base_branch, fetch_upstream)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_local_branch(
+    app: AppHandle,
+    repo: String,
+    branch: String,
+    force_at: Option<String>,
+) -> CmdResult<DeleteBranchOutcome> {
+    mutating(app, move |g| {
+        sync::delete_local_branch(g, &p(repo), &branch, force_at.as_deref())
     })
     .await
 }

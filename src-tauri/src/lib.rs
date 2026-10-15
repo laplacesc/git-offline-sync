@@ -84,6 +84,7 @@ pub fn run() {
             commands::abort_op,
             commands::continue_op,
             commands::rebase_onto,
+            commands::delete_local_branch,
             commands::init_mirror,
             commands::export_out,
             commands::import_back,

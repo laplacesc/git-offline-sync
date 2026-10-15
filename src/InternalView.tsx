@@ -4,6 +4,7 @@ import { Input } from "@heroui/react";
 import {
   api,
   baseCandidates,
+  BranchInfo,
   CommitInfo,
   defaultBaseFor,
   ExportOutcome,
@@ -219,11 +220,27 @@ export function InternalView({ profile }: { profile: Profile }) {
     );
   }, [beginCommits, commitKey, branch, work.status, work.loading, workDir, listFrom]);
 
-  const rebase = async () => {
-    const r = await run("Rebase", () => api.rebaseOnto(workDir, branch, onto, fetchBeforeRebase));
+  const rebaseBranch = async (name: string, targetBase: string) => {
+    const r = await run("Rebase", () => api.rebaseOnto(workDir, name, targetBase, fetchBeforeRebase));
     setOntoPicked(null);
     if (r) setOpRes(r);
     reloadAll();
+  };
+  const rebase = () => rebaseBranch(branch, onto);
+  const rebaseRow = async (target: BranchInfo) => {
+    const targetBase = target.name === branch ? onto : target.base;
+    const approved = await confirm({
+      title: `Rebase ${target.name}`,
+      confirmLabel: "Rebase",
+      body: <div className="space-y-3">
+        <p>将 <Code>{target.name}</Code> Rebase 到 <Code>origin/{targetBase}</Code>。</p>
+        <p className="text-sm text-muted">{fetchBeforeRebase ? "执行前会 fetch origin。" : "使用当前本地的 origin 引用，不执行 fetch。"}</p>
+      </div>,
+    });
+    if (approved) {
+      setSelected([target.name]);
+      await rebaseBranch(target.name, targetBase);
+    }
   };
 
   const push = async () => {
@@ -508,6 +525,9 @@ export function InternalView({ profile }: { profile: Profile }) {
               emptyText="还没有开发分支（主线和发布分支不在这里列出）"
               selected={selected}
               onSelect={setSelected}
+              onRebase={rebaseRow}
+              repoPath={workDir}
+              onDeleted={reloadAll}
             />
             <DetachedWorktreesNotice status={work.status} />
           </div>

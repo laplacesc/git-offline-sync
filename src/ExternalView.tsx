@@ -620,6 +620,8 @@ export function ExternalView({ profile }: { profile: Profile }) {
               onSelect={setSelected}
               multi={mode === "bundle"}
               onRebase={(b) => setRebaseTarget({ name: b.name, onto: b.base })}
+              repoPath={devDir}
+              onDeleted={reloadAll}
             />
             <DetachedWorktreesNotice status={repo.status} />
             <DirtyTreesNotice status={repo.status} suffix="回传只包含已提交的内容。" />

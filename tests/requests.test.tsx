@@ -5,7 +5,7 @@ import { api, type CommitInfo, type PackageInfo, type Profile, type RepoStatus }
 import { ExternalView } from "../src/ExternalView";
 import { InternalView } from "../src/InternalView";
 import { useRepoStatus } from "../src/repoBits";
-import { RunnerProvider } from "../src/runner";
+import { OperationStatus, RunnerProvider } from "../src/runner";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({
@@ -343,4 +343,123 @@ it.each(["system", "light", "dark"])("旧 %s 主题偏好被忽略，保存配�
   expect(config).not.toHaveProperty("theme");
   await api.saveConfig(config);
   expect(invoke).toHaveBeenLastCalledWith("save_config", { config });
+});
+
+describe("分支行操作", () => {
+  it.each(["external", "internal"] as const)("%s 删除本地分支支持取消，确认后刷新并清理选择", async (role) => {
+    const repoPath = role === "external" ? "/dev-one" : "/work";
+    let deleted = false;
+    const remove = vi.spyOn(api, "deleteLocalBranch").mockImplementation(async () => {
+      deleted = true;
+      return { status: "deleted", message: "已删除本地分支 feature/one" };
+    });
+    vi.spyOn(api, "repoStatus").mockImplementation(async (path) => {
+      const result = status(path);
+      if (deleted && path === repoPath) result.branches = result.branches.filter((b) => b.name !== "feature/one");
+      return result;
+    });
+    renderView(role);
+    fireEvent.click(screen.getByRole("tab", { name: role === "external" ? /开发分支/ : /Rebase 并推送/ }));
+    const row = await screen.findByRole("row", { name: "feature/one", exact: true });
+    fireEvent.click(row);
+    fireEvent.click(within(row).getByRole("button", { name: "删除本地分支 feature/one", exact: true }));
+    let dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(repoPath)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(remove).not.toHaveBeenCalled();
+    expect(row.getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(within(row).getByRole("button", { name: "删除本地分支 feature/one", exact: true }));
+    dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "删除本地分支", exact: true }));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(repoPath, "feature/one"));
+    await waitFor(() => expect(screen.queryByRole("row", { name: "feature/one", exact: true })).toBeNull());
+    expect(screen.getByText(/已选 0 个/)).toBeTruthy();
+    expect(screen.getByRole("row", { name: "feature/two", exact: true }).getAttribute("aria-selected")).not.toBe("true");
+  });
+
+  it("内网行内 Rebase 对点击的分支执行，不误用已选分支", async () => {
+    const rebase = vi.spyOn(api, "rebaseOnto").mockResolvedValue({ ok: true, conflict: false, files: [], message: "已完成", worktree: null });
+    renderView("internal");
+    fireEvent.click(screen.getByRole("tab", { name: /Rebase 并推送/ }));
+    fireEvent.click(await screen.findByRole("row", { name: "feature/one", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Rebase feature/two", exact: true }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText("feature/two")).toBeTruthy();
+    expect(rebase).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rebase", exact: true }));
+    await waitFor(() => expect(rebase).toHaveBeenCalledWith("/work", "feature/two", "main", true));
+  });
+});
+
+it("删除失败保留分支和原选择，行内按钮不会切换选择", async () => {
+  vi.spyOn(api, "deleteLocalBranch").mockRejectedValue(new Error("分支尚未合并"));
+  render(<RunnerProvider><ExternalView profile={profile} /><OperationStatus /></RunnerProvider>);
+  fireEvent.click(screen.getByRole("tab", { name: /开发分支/ }));
+  fireEvent.click(await screen.findByRole("row", { name: "feature/one", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "删除本地分支 feature/two", exact: true }));
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "删除本地分支", exact: true }));
+  expect((await screen.findByRole("alert")).textContent).toContain("分支尚未合并");
+  expect(screen.getByRole("row", { name: "feature/one", exact: true }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("row", { name: "feature/two", exact: true }).getAttribute("aria-selected")).not.toBe("true");
+});
+
+it.each(["external", "internal"] as const)("%s 禁止删除当前分支和 worktree 占用分支", async (role) => {
+  vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({
+    ...status(path),
+    branches: status(path).branches.map((b, i) => ({ ...b, current: i === 0, worktree: i === 1 ? "/linked" : null })),
+  }));
+  const remove = vi.spyOn(api, "deleteLocalBranch");
+  renderView(role);
+  fireEvent.click(screen.getByRole("tab", { name: role === "external" ? /开发分支/ : /Rebase 并推送/ }));
+  for (const name of ["feature/one", "feature/two"]) {
+    const button = await screen.findByRole<HTMLButtonElement>("button", { name: `删除本地分支 ${name}`, exact: true });
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+  }
+  expect(screen.queryByRole("alertdialog")).toBeNull();
+  expect(remove).not.toHaveBeenCalled();
+});
+
+it.each(["external", "internal"] as const)("%s 未合并分支只有二次确认后才强制删除，取消则保留分支", async (role) => {
+  const repoPath = role === "external" ? "/dev-one" : "/work";
+  let deleted = false;
+  const sha = "abcdef123456";
+  const remove = vi.spyOn(api, "deleteLocalBranch").mockImplementation(async (_repo, _branch, forceAt) => {
+    if (!forceAt) return { status: "needsForce", sha };
+    deleted = true;
+    return { status: "deleted", message: "已删除本地分支 feature/one" };
+  });
+  vi.spyOn(api, "repoStatus").mockImplementation(async (path) => {
+    const result = status(path);
+    if (deleted && path === repoPath) result.branches = result.branches.filter((b) => b.name !== "feature/one");
+    return result;
+  });
+  renderView(role);
+  fireEvent.click(screen.getByRole("tab", { name: role === "external" ? /开发分支/ : /Rebase 并推送/ }));
+  const row = await screen.findByRole("row", { name: "feature/one", exact: true });
+  fireEvent.click(row);
+  for (const approveForce of [false, true]) {
+    fireEvent.click(within(row).getByRole("button", { name: "删除本地分支 feature/one", exact: true }));
+    let dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "删除本地分支", exact: true }));
+    dialog = await screen.findByRole("alertdialog", { name: "强制删除未合并分支 feature/one？" });
+    expect(within(dialog).getByText(/删除后可能丢失/)).toBeTruthy();
+    expect(within(dialog).getByText(repoPath)).toBeTruthy();
+    expect(deleted).toBe(false);
+    expect(row.getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(within(dialog).getByRole("button", { name: approveForce ? "仍然强制删除" : "取消", exact: true }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    if (!approveForce) {
+      expect(remove).toHaveBeenCalledTimes(1);
+      expect(remove).toHaveBeenLastCalledWith(repoPath, "feature/one");
+      expect(deleted).toBe(false);
+    }
+  }
+  expect(remove).toHaveBeenCalledTimes(3);
+  expect(remove).toHaveBeenLastCalledWith(repoPath, "feature/one", sha);
+  await waitFor(() => expect(screen.queryByRole("row", { name: "feature/one", exact: true })).toBeNull());
+  expect(screen.getByText(/已选 0 个/)).toBeTruthy();
 });
