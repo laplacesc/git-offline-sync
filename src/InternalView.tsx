@@ -519,7 +519,7 @@ export function InternalView({ profile }: { profile: Profile }) {
         />
         <DirtyTreesNotice status={work.status} suffix="rebase 前请先提交或 stash。" />
         <div className="rebase-layout">
-          <div className="branch-table-compact">
+          <div className="rebase-branches">
             <BranchTable
               branches={(work.status?.branches ?? []).filter((b) => !candidates.includes(b.name))}
               emptyText="还没有开发分支（主线和发布分支不在这里列出）"
@@ -532,6 +532,7 @@ export function InternalView({ profile }: { profile: Profile }) {
             <DetachedWorktreesNotice status={work.status} />
           </div>
           <div className="rebase-details">
+            <h3 className="text-sm font-semibold">检查提交与推送</h3>
             {!branch && <Empty>选择一个开发分支，检查相对基准的提交后再整理和推送。</Empty>}
             {branch && (
               <>
