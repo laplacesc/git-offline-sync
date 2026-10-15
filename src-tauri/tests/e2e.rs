@@ -1267,7 +1267,11 @@ fn interrupted_export_is_hidden_and_finishes_with_the_same_sequence() {
 fn delete_local_branch_requires_confirmation_for_unmerged_and_preserves_remote() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = if cfg!(windows) {
+        tmp.path().to_path_buf()
+    } else {
+        tmp.path().canonicalize().unwrap()
+    };
     isolate_git_env(&root);
     let work = root.join("work");
     let remote = root.join("remote.git");
