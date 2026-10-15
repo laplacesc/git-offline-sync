@@ -1,10 +1,11 @@
 import { AheadBehind } from "./ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Alert, Checkbox, Chip, Table } from "@heroui/react";
+import { Alert, Button, Checkbox, Chip, Table } from "@heroui/react";
 import type { Selection } from "@heroui/react";
 import { api, BranchInfo, InProgressOp, OpOutcome, RepoStatus, shortSha } from "./api";
 import { useRunner } from "./runner";
+import { Icon } from "./icons";
 import { ActionButton, Code, Empty, Notice, TextInput } from "./ui";
 
 /**
@@ -160,6 +161,15 @@ export function BranchTable({
   emptyText?: string;
 }) {
   const [query, setQuery] = useState("");
+  const { notify } = useRunner();
+  const copyBranch = async (name: string) => {
+    try {
+      await navigator.clipboard.writeText(name);
+      notify("ok", `已复制分支名：${name}`);
+    } catch {
+      notify("error", "复制失败，请选择分支名手动复制");
+    }
+  };
   // Table 不会替受控调用方清理已删除的 key；空表也必须同步清空选择。
   useEffect(() => {
     const available = new Set(branches.filter((b) => !isSelectable || isSelectable(b)).map((b) => b.name));
@@ -219,7 +229,14 @@ export function BranchTable({
                   <SelectionBox label={`选择 ${b.name}`} />
                 </Table.Cell>
                 <Table.Cell className="break-words">
-                  <span className="font-mono text-[13px]">{breakAfterSlash(b.name)}</span>
+                  <span className="inline-flex max-w-full items-center gap-1">
+                    <span className="min-w-0 font-mono text-[13px]">{breakAfterSlash(b.name)}</span>
+                    <Button size="sm" variant="ghost" isIconOnly className="shrink-0"
+                      aria-label={`复制分支名 ${b.name}`}
+                      onPress={() => copyBranch(b.name)}>
+                      <Icon name="copy" />
+                    </Button>
+                  </span>
                   {b.current && (
                     <Chip size="sm" variant="secondary" className="ml-2">
                       当前
