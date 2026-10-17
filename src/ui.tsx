@@ -11,6 +11,7 @@ import {
   Checkbox,
   Chip,
   Description,
+  Disclosure,
   EmptyState,
   Input,
   InputGroup,
@@ -22,12 +23,12 @@ import {
   TextField,
   FieldError,
   Spinner,
+  Tabs,
 } from "@heroui/react";
 import type { ButtonProps } from "@heroui/react";
 import { BundleKind, CommitInfo, KIND_LABEL, OpOutcome, shortSha } from "./api";
 import { useRunner } from "./runner";
 import { Icon } from "./icons";
-import { useDisclosureMotion } from "./motion";
 
 // ---------------------------------------------------------------------------
 // 按钮：全局串行执行，有操作进行中时自动禁用
@@ -63,6 +64,21 @@ export function RefreshButton({ onPress }: { onPress: () => unknown }) {
   );
 }
 
+/** 业务折叠区只组合原生插槽，展开、键盘和焦点由 Disclosure 管理。 */
+export function Fold({ title, children, className = "", defaultExpanded = false }: {
+  title: ReactNode;
+  children: ReactNode;
+  className?: string;
+  defaultExpanded?: boolean;
+}) {
+  return <Disclosure className={`fold ${className}`} defaultExpanded={defaultExpanded}>
+    <Disclosure.Heading>
+      <Disclosure.Trigger><Disclosure.Indicator />{title}</Disclosure.Trigger>
+    </Disclosure.Heading>
+    <Disclosure.Content><Disclosure.Body>{children}</Disclosure.Body></Disclosure.Content>
+  </Disclosure>;
+}
+
 const WorkflowContext = createContext<{ step: number; select: (step: number) => void; id: string } | null>(null);
 
 /** Keep panels mounted so switching steps preserves input and branch selection. */
@@ -70,30 +86,20 @@ export function Workflow({ children }: { children: ReactNode }) {
   const [step, select] = useState(1);
   const id = useId();
   return <WorkflowContext.Provider value={{ step, select, id }}>
-    <div className="workflow-layout">{children}</div>
+    <Tabs className="workflow-layout" selectedKey={String(step)} onSelectionChange={(key) => select(Number(key))}>{children}</Tabs>
   </WorkflowContext.Provider>;
 }
 
 export function WorkflowNav({ steps, counts = [] }: { steps: string[]; counts?: (number | undefined)[] }) {
   const flow = useContext(WorkflowContext)!;
   return <nav aria-label="同步流程">
-    <div role="tablist" aria-label="同步步骤" className="workflow-nav">
-      {steps.map((title, i) => <button key={title} type="button" role="tab"
-        id={`${flow.id}-tab-${i + 1}`} aria-controls={`${flow.id}-panel-${i + 1}`}
-        aria-selected={flow.step === i + 1} tabIndex={flow.step === i + 1 ? 0 : -1}
-        onClick={() => flow.select(i + 1)} onKeyDown={(event) => {
-          const next = event.key === "ArrowRight" ? (i + 1) % steps.length
-            : event.key === "ArrowLeft" ? (i + steps.length - 1) % steps.length
-            : event.key === "Home" ? 0 : event.key === "End" ? steps.length - 1 : null;
-          if (next === null) return;
-          event.preventDefault();
-          flow.select(next + 1);
-          document.getElementById(`${flow.id}-tab-${next + 1}`)?.focus();
-        }}>
+    <Tabs.List aria-label="同步步骤" className="workflow-nav">
+      {steps.map((title, i) => <Tabs.Tab key={title} id={String(i + 1)} data-workflow-tab={`${flow.id}-${i + 1}`}>
         <span className="workflow-nav-number" aria-hidden="true">{i + 1}</span>{title}
         {counts[i] !== undefined && <span className="counter">{counts[i]}</span>}
-      </button>)}
-    </div>
+        <Tabs.Indicator />
+      </Tabs.Tab>)}
+    </Tabs.List>
   </nav>;
 }
 
@@ -101,7 +107,7 @@ export function WorkflowJump({ step, children }: { step: number; children: React
   const flow = useContext(WorkflowContext)!;
   return <Button size="sm" variant="outline" onPress={() => {
     flow.select(step);
-    document.getElementById(`${flow.id}-tab-${step}`)?.focus();
+    document.querySelector<HTMLElement>(`[data-workflow-tab="${flow.id}-${step}"]`)?.focus();
   }}>{children}</Button>;
 }
 
@@ -112,33 +118,29 @@ export function Pipeline({ lanes, next, onRefresh }: {
   onRefresh: () => unknown;
 }) {
   const flow = useContext(WorkflowContext)!;
-  const lanesId = useId();
   const [expanded, setExpanded] = useState(false);
-  const disclosure = useDisclosureMotion<HTMLDivElement>(expanded, "collapse");
-  return <section className="pipeline" aria-label="同步链路总览">
+  return <Disclosure className="pipeline" aria-label="同步链路总览" isExpanded={expanded} onExpandedChange={setExpanded}>
     <div className="pipeline-next"><span className="next-step-mark" aria-hidden="true"><Icon name="chevron" /></span>
       <div className="next-step-copy" aria-live="polite"><span className="section-label">建议下一步</span><strong>{next.title}</strong><p>{next.detail}</p></div>
       <WorkflowJump step={next.step}>前往处理<Icon name="chevron" /></WorkflowJump>
     </div>
     <div className="pipeline-header"><h2>同步链路总览</h2><div className="flex items-center gap-2">
-      <Button size="sm" variant="ghost" aria-expanded={expanded} aria-controls={lanesId}
-        onPress={() => setExpanded(!expanded)}>{expanded ? "收起链路" : "展开链路"}</Button>
+      <Disclosure.Heading><Disclosure.Trigger>{expanded ? "收起链路" : "展开链路"}<Disclosure.Indicator /></Disclosure.Trigger></Disclosure.Heading>
       <RefreshButton onPress={onRefresh} />
     </div></div>
-    <div ref={disclosure.ref} id={lanesId} className="pipeline-details"
-      hidden={!disclosure.visible} aria-hidden={!expanded} inert={!expanded}>
+    <Disclosure.Content className="pipeline-details"><Disclosure.Body>
     {lanes.map((lane) => <div className="pipeline-lane" key={lane.label}>
       <span className="pipeline-label">{lane.label}</span>
       {lane.nodes.map((node, i) => <div className="pipeline-segment" key={i}>
         {i > 0 && <span className="pipeline-arrow"><code>{lane.commands[i - 1]}</code><span aria-hidden="true">⟶</span></span>}
-        <button type="button" className="pipeline-node" onClick={() => {
+        <Button variant="ghost" className="pipeline-node" onPress={() => {
           flow.select(node.step);
-          document.getElementById(`${flow.id}-tab-${node.step}`)?.focus();
-        }}><span><Icon name={node.icon} />{node.title}</span><small title={node.detail}>{node.detail}</small></button>
+          document.querySelector<HTMLElement>(`[data-workflow-tab="${flow.id}-${node.step}"]`)?.focus();
+        }}><span><Icon name={node.icon} />{node.title}</span><small title={node.detail}>{node.detail}</small></Button>
       </div>)}
     </div>)}
-    </div>
-  </section>;
+    </Disclosure.Body></Disclosure.Content>
+  </Disclosure>;
 }
 
 export function AheadBehind({ ahead, behind }: { ahead: number; behind: number }) {
@@ -188,10 +190,8 @@ export function StepCard({
   children: ReactNode;
 }) {
   const flow = useContext(WorkflowContext);
-  return (
-    <Card id={flow ? `${flow.id}-panel-${step}` : `step-${step}`} role={flow ? "tabpanel" : undefined}
-      aria-labelledby={flow ? `${flow.id}-tab-${step}` : undefined} hidden={!!flow && flow.step !== step}
-      tabIndex={0} aria-label={flow ? undefined : title} className="workflow-step gap-0 p-0">
+  const card = (
+    <Card aria-label={title} className="workflow-step gap-0 p-0">
       <Card.Header className="step-header">
         <div className="flex min-w-0 flex-1 gap-3">
           <span className="step-number" aria-hidden="true">{step}</span>
@@ -206,6 +206,7 @@ export function StepCard({
       <Card.Content className="step-content">{children}</Card.Content>
     </Card>
   );
+  return flow ? <Tabs.Panel id={String(step)} shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>{card}</Tabs.Panel> : card;
 }
 
 // ---------------------------------------------------------------------------
@@ -440,10 +441,10 @@ export function CommitList({ commits, empty = "没有提交" }: { commits: Commi
     <div className="max-h-72 overflow-y-auto rounded-2xl">
       <ListSurface>
         {commits.map((c) => (
-          <div key={c.sha} className="grid grid-cols-[auto_1fr] gap-x-3 px-4 py-2.5">
+          <div key={c.sha} className="commit-row">
             <Code className="commit-sha">{shortSha(c.sha)}</Code>
-            <span className="truncate text-sm font-medium">{c.subject}</span>
-            <span className="col-start-2 text-xs text-muted">
+            <span className="text-sm font-medium">{c.subject}</span>
+            <span className="commit-author text-xs text-muted">
               {c.author} &lt;{c.email}&gt; · {c.date}
             </span>
           </div>

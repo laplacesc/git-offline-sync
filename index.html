@@ -3,7 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f4f5f7" />
+    <meta name="theme-color" content="#f8f4eb" />
+    <script>
+      (() => {
+        let preference = "system";
+        try {
+          const saved = localStorage.getItem("app-shell-theme");
+          if (saved === "light" || saved === "dark" || saved === "system") preference = saved;
+        } catch { /* Storage can be unavailable in a WebView. */ }
+        const dark = preference === "dark" || (preference === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+        const theme = dark ? "dark" : "light";
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+        document.documentElement.style.backgroundColor = dark ? "#0b1322" : "#f8f4eb";
+        document.querySelector('meta[name="theme-color"]').content = dark ? "#0b1322" : "#f8f4eb";
+      })();
+    </script>
     <title>Git 离线同步</title>
   </head>
 

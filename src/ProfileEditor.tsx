@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { AlertDialog, Button, Card, Description, Label, Radio, RadioGroup } from "@heroui/react";
+import { AlertDialog, Button, Card, Description, Form, Label, Link, Radio, RadioGroup } from "@heroui/react";
 import { parseBranchList, Profile, releasesOf, Role } from "./api";
 import { FormSection, PathInput, SectionLabel, TextInput } from "./ui";
 
@@ -91,6 +91,7 @@ export function ProfileEditor({
   }
 
   return (
+    <Form className="form-page-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
     <Card className="form-page gap-0 p-0">
       <AlertDialog.Backdrop isOpen={discardOpen} onOpenChange={setDiscardOpen}>
         <AlertDialog.Container>
@@ -106,7 +107,7 @@ export function ProfileEditor({
       </AlertDialog.Backdrop>
       <Card.Header className="form-page-header">
         <SectionLabel>{isNew ? "连接内网与外网" : "同步配置"}</SectionLabel>
-        <Card.Title className="text-xl leading-tight font-semibold">
+        <Card.Title render={(props) => <h1 {...props} />} className="text-xl leading-tight font-semibold">
           {isNew ? "新建同步配置" : initial.name}
         </Card.Title>
       </Card.Header>
@@ -116,8 +117,8 @@ export function ProfileEditor({
           <div ref={summary} role="alert" tabIndex={-1} className="rounded-2xl border border-danger p-4 text-sm">
             <p className="font-semibold">请补全以下 {miss.length} 项</p>
             <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
-              {miss.map(({ key, label }) => <li key={key}><a className="text-danger underline" href={`#profile-${key}`}
-                onClick={(event) => { event.preventDefault(); document.getElementById(`profile-${key}`)?.focus(); }}>{label}</a></li>)}
+              {miss.map(({ key, label }) => <li key={key}><Link className="text-danger underline" href={`#profile-${key}`}
+                onClick={(event) => { event.preventDefault(); document.getElementById(`profile-${key}`)?.focus(); }}>{label}</Link></li>)}
             </ul>
           </div>
         )}
@@ -158,7 +159,7 @@ export function ProfileEditor({
 
         <FormSection title="基本信息" description="名称用于区分项目，包名前缀和基准分支需要在内外网保持一致。">
         <div className="form-fields">
-          <TextInput id="profile-name" error={errorFor("name")} label="名称" value={p.name} onChange={(v) => set("name", v)} placeholder="例如：订单服务" description="只用来在左侧列表里区分" />
+          <TextInput id="profile-name" error={errorFor("name")} label="名称" value={p.name} onChange={(v) => set("name", v)} placeholder="例如：订单服务" description="用于在顶部项目菜单中区分项目" />
           <TextInput
             id="profile-repoName" error={errorFor("repoName")} label="包名前缀"
             value={p.repoName}
@@ -225,7 +226,7 @@ export function ProfileEditor({
             />
             <div className="flex flex-col gap-3">
               {devRepos.map((d, i) => (
-                <div key={i} className="flex items-end gap-2">
+                <div key={i} className="profile-dev-row">
                   <div className="min-w-0 flex-1">
                     <PathInput
                       label={i === 0 ? "开发仓库目录" : `开发仓库 ${i + 1}`}
@@ -263,25 +264,25 @@ export function ProfileEditor({
         </FormSection>}
       </Card.Content>
 
-      <Card.Footer className="flex flex-wrap items-center gap-3 border-t border-border px-8 py-5">
+      <Card.Footer className="profile-footer flex flex-wrap items-center justify-end gap-3 border-t border-border px-8 py-5">
         {onDelete && (
-          <Button variant="danger-soft" onPress={onDelete} isDisabled={saving}>
+          <Button className="mr-auto" variant="danger-soft" onPress={onDelete} isDisabled={saving}>
             删除配置
           </Button>
         )}
-        <span className="min-w-0 flex-1" />
-        {miss.length > 0 && <span className="text-sm text-muted">还需填写：{miss.map((m) => m.label).join("、")}</span>}
+        {miss.length > 0 && <span className="profile-missing text-sm text-muted">还需填写：{miss.map((m) => m.label).join("、")}</span>}
         <Button variant="tertiary" onPress={() => dirty ? setDiscardOpen(true) : onCancel()} isDisabled={saving}>
           取消
         </Button>
         <Button
           variant="primary"
           isDisabled={saving}
-          onPress={save}
+          type="submit"
         >
           {saving ? "保存中…" : "保存"}
         </Button>
       </Card.Footer>
     </Card>
+    </Form>
   );
 }

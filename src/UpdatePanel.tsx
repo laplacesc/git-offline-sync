@@ -1,7 +1,7 @@
 import { Button, ProgressBar, Spinner } from "@heroui/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useRunner } from "./runner";
-import { Notice } from "./ui";
+import { Fold, Notice } from "./ui";
 import { checkForUpdates, downloadUpdate, hasUpdate, installUpdate, RELEASES_URL, useUpdateState } from "./updater";
 
 function openReleases() {
@@ -47,10 +47,9 @@ export function UpdatePanel({ currentVersion }: { currentVersion?: string }) {
       {s.error && <Notice tone="danger" title={s.status === "error" ? "检查更新失败" : undefined}>{s.error}</Notice>}
 
       {s.releaseNotes && hasUpdate(s) && (
-        <details className="update-notes">
-          <summary>更新说明</summary>
+        <Fold className="update-notes" title={"更新说明"}>
           <pre>{s.releaseNotes}</pre>
-        </details>
+        </Fold>
       )}
 
       <div className="flex flex-wrap gap-3">
@@ -98,10 +97,10 @@ export function VersionChip({ version, onOpenUpdates, isDisabled }: { version?: 
 
   if (!label) return null;
   return (
-    <button type="button" className={"version-chip" + (ready ? " has-update" : "")} title={title} aria-label={title}
-      disabled={isDisabled && ready} onClick={onPress}>
+    <Button size="sm" variant="ghost" className={"version-chip" + (ready ? " has-update" : "")} aria-label={title}
+      isDisabled={isDisabled && ready} onPress={onPress}>
       {ready && <span className="update-dot" aria-hidden="true" />}
       {label}
-    </button>
+    </Button>
   );
 }

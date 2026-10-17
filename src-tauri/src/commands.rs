@@ -217,6 +217,18 @@ pub async fn list_packages(app: AppHandle, dir: String) -> CmdResult<Vec<Package
 }
 
 #[tauri::command]
+pub async fn list_return_packages(
+    app: AppHandle,
+    work_dir: String,
+    dir: String,
+) -> CmdResult<Vec<crate::core::review::ReturnPackageInfo>> {
+    blocking(app, move |g| {
+        crate::core::review::list_return_packages(g, &p(work_dir), &p(dir))
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn list_commits(
     app: AppHandle,
     repo: String,
@@ -344,6 +356,79 @@ pub async fn push_branch(
 ) -> CmdResult<OpOutcome> {
     mutating(app, move |g| {
         sync::push_branch(g, &p(work_dir), &branch, force_with_lease)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn prepare_push(
+    app: AppHandle,
+    work_dir: String,
+    branch: String,
+    force_with_lease: bool,
+) -> CmdResult<crate::core::review::PushPlan> {
+    mutating(app, move |g| {
+        crate::core::review::prepare_push(g, &p(work_dir), &branch, force_with_lease)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn execute_push(app: AppHandle, plan_id: String) -> CmdResult<OpOutcome> {
+    mutating(app, move |g| crate::core::review::execute_push(g, &plan_id)).await
+}
+
+#[tauri::command]
+pub async fn import_return(
+    app: AppHandle,
+    work_dir: String,
+    bundle: String,
+    base_branch: String,
+    release_branches: Vec<String>,
+) -> CmdResult<crate::core::review::ImportReturnResult> {
+    mutating(app, move |g| {
+        crate::core::review::import_return(
+            g,
+            &p(work_dir),
+            &p(bundle),
+            &base_branch,
+            &release_branches,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sync_updates(
+    app: AppHandle,
+    mirror_dir: String,
+    bundle: Option<String>,
+    dev_dirs: Vec<String>,
+    name: String,
+    email: String,
+) -> CmdResult<sync::SyncUpdatesResult> {
+    mutating(app, move |g| {
+        let bundle = bundle.map(p);
+        sync::sync_updates(
+            g,
+            &p(mirror_dir),
+            bundle.as_deref(),
+            &dev_dirs,
+            &name,
+            &email,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn dev_sync_status(
+    app: AppHandle,
+    mirror_dir: String,
+    dev_dirs: Vec<String>,
+) -> CmdResult<Vec<sync::DevSyncStatus>> {
+    blocking(app, move |g| {
+        Ok(sync::dev_sync_status(g, &p(mirror_dir), &dev_dirs))
     })
     .await
 }

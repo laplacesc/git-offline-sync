@@ -72,6 +72,12 @@ pub struct RepoStatus {
     /// 用户只能去终端解决。
     pub in_progress_trees: Vec<InProgressOp>,
     pub branches: Vec<BranchInfo>,
+    /// 实际公开引用快照，供导入前展示删除/变更；不包含应用私有引用。
+    pub refs: Vec<super::manifest::RefEntry>,
+    /// 来自持久 receipt 的审查分支 → 原始分支映射；裸库为空。
+    pub review_sources: HashMap<String, String>,
+    /// 当前提交曾经核实推送成功的受管审查分支；仅查本地持久标记，裸库为空。
+    pub pushed_branches: Vec<String>,
     pub remote_url: Option<String>,
 }
 
@@ -549,6 +555,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
         .map(|o| super::git::redact(o.stdout.trim()));
 
     if !st.is_bare {
+        st.review_sources = super::review::review_sources(g, path)?;
         st.worktrees = list_worktrees(g, path)?;
         st.current_branch = current_branch(g, path);
         st.in_progress = in_progress(&git_dir(g, path)?);
@@ -556,7 +563,19 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
         st.dirty_trees = dirty_worktrees(g, path);
     }
 
-    let refs = list_refs(g, path, &["refs/heads"])?;
+    let public_refs = list_refs(g, path, &["refs/heads", "refs/tags"])?;
+    st.refs = public_refs
+        .iter()
+        .map(|(name, sha)| super::manifest::RefEntry {
+            name: name.clone(),
+            sha: sha.clone(),
+            base: None,
+        })
+        .collect();
+    let refs: Vec<_> = public_refs
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("refs/heads/"))
+        .collect();
     if st.is_bare {
         // 镜像仓库只用于打包：界面只需要分支列表，不计算基准和领先/落后
         //（GitLab 镜像常有成百上千个分支，逐个计算会让界面长时间没有响应）
@@ -629,6 +648,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
             behind,
         });
     }
+    st.pushed_branches = super::review::pushed_branches(g, path, &st.branches)?;
     Ok(st)
 }
 

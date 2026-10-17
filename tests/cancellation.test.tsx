@@ -53,6 +53,21 @@ it("取消查询的旧响应不会停止新启动的操作", async () => {
   await act(async () => nextTask.resolve(null));
 });
 
+it.each([{ ok: false, conflict: true }, { outcomes: [{ ok: false, conflict: false }] }])(
+  "业务返回需要处理时不把操作记录为完成：%j", async (outcome) => {
+    function OutcomeHarness() {
+      const { run, operations } = useRunner();
+      const latest = operations[operations.length - 1];
+      return <><button onClick={() => run("整理", async () => outcome)}>执行</button>
+        <output>{latest?.endedAt ? latest.needsAttention ? "需要处理" : "已完成" : "等待"}</output></>;
+    }
+    render(<RunnerProvider><OutcomeHarness /></RunnerProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "执行" }));
+    expect(await screen.findByText("需要处理", { selector: "output" })).toBeTruthy();
+    expect(screen.queryByText("已完成")).toBeNull();
+  },
+);
+
 it("没有可取消的操作时可以重试，不误报回滚成功", async () => {
   const task = deferred<null>();
   vi.spyOn(api, "activeOperation").mockResolvedValue(null);

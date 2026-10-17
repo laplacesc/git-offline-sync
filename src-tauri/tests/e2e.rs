@@ -10,8 +10,8 @@ use std::sync::Mutex;
 
 use git_offline_sync_lib::core::git::{Git, LogEvent};
 use git_offline_sync_lib::core::manifest::{manifest_path_for, BundleKind, Manifest};
-use git_offline_sync_lib::core::repo;
 use git_offline_sync_lib::core::sync::{self, ExportOutcome};
+use git_offline_sync_lib::core::{repo, review};
 
 fn sh(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -1014,6 +1014,145 @@ fn snapshot_fixture(root: &Path, g: &Git) -> (PathBuf, PathBuf, PathBuf, PathBuf
     let ext = root.join("external.git");
     sync::import_in(g, &full, &ext, false).unwrap();
     (seed, mirror, usb, ext, full)
+}
+
+#[test]
+fn review_push_records_only_verified_current_commits() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let root = test_root(&tmp);
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let (seed, _, usb, ext, _) = snapshot_fixture(&root, &g);
+    let remote = root.join("remote.git");
+    sh(
+        &root,
+        &[
+            "clone",
+            "--bare",
+            seed.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
+    let work = root.join("work");
+    sh(
+        &root,
+        &["clone", remote.to_str().unwrap(), work.to_str().unwrap()],
+    );
+    let dev = root.join("dev");
+    sync::create_dev_repo(&g, &ext, &dev, "Tester", "tester@example.com").unwrap();
+    sync::create_branch(&g, &dev, "feature/return", "main", None).unwrap();
+    commit(&dev, "returned", "returned\n", "returned change");
+    let bundle = exported(
+        sync::export_back(
+            &g,
+            &dev,
+            &ext,
+            &["feature/return".into()],
+            &usb,
+            "test",
+            "main",
+            &[],
+        )
+        .unwrap(),
+    )
+    .2;
+    let accepted = review::import_return(&g, &work, &bundle, "main", &[]).unwrap();
+    assert!(accepted.outcomes[0].ok, "{:?}", accepted.outcomes);
+    let local = &accepted.branches[0].local;
+    let wt = Path::new(accepted.outcomes[0].worktree.as_ref().unwrap());
+    let marker = format!(
+        "refs/offline-sync/review-pushed/{}",
+        local.strip_prefix("review/").unwrap()
+    );
+    assert!(repo::status(&g, &work, "main", &[])
+        .unwrap()
+        .pushed_branches
+        .is_empty());
+    let plan = review::prepare_push(&g, &work, local, false).unwrap();
+    let outcome = review::execute_push(&g, &plan.plan_id).unwrap();
+    assert!(outcome.ok, "{}", outcome.message);
+    assert_eq!(sh(&work, &["rev-parse", &marker]), plan.source_oid);
+    assert_eq!(
+        sh(&remote, &["rev-parse", "feature/return"]),
+        plan.source_oid
+    );
+
+    // A fresh client and an unreachable origin still recover the persisted result.
+    let restarted = Git::new(None, &log);
+    sh(
+        &work,
+        &["remote", "set-url", "origin", "missing-remote.git"],
+    );
+    let status = repo::status(&restarted, &work, "main", &[]).unwrap();
+    assert_eq!(status.pushed_branches, vec![local.clone()]);
+    assert_eq!(
+        serde_json::to_value(&status).unwrap()["pushedBranches"],
+        serde_json::json!([local])
+    );
+    assert_eq!(
+        repo::status(&restarted, wt, "main", &[])
+            .unwrap()
+            .pushed_branches,
+        vec![local.clone()]
+    );
+    assert!(repo::status(&restarted, &remote, "main", &[])
+        .unwrap()
+        .pushed_branches
+        .is_empty());
+
+    commit(wt, "next", "next\n", "new local commit");
+    assert!(repo::status(&restarted, &work, "main", &[])
+        .unwrap()
+        .pushed_branches
+        .is_empty());
+    sh(
+        &work,
+        &["remote", "set-url", "origin", remote.to_str().unwrap()],
+    );
+
+    // Ref-lock failure after a verified push must preserve success and explain it.
+    let marker_lock = repo::git_dir(&g, &work)
+        .unwrap()
+        .join(format!("{marker}.lock"));
+    fs::write(&marker_lock, "fault injection").unwrap();
+    let plan = review::prepare_push(&g, &work, local, false).unwrap();
+    let outcome = review::execute_push(&g, &plan.plan_id).unwrap();
+    assert!(outcome.ok, "{}", outcome.message);
+    assert!(outcome.message.contains("推送已完成但记录失败，请检查"));
+    assert_eq!(
+        sh(&remote, &["rev-parse", "feature/return"]),
+        plan.source_oid
+    );
+    assert!(repo::status(&g, &work, "main", &[])
+        .unwrap()
+        .pushed_branches
+        .is_empty());
+    fs::remove_file(marker_lock).unwrap();
+    let retry = review::prepare_push(&g, &work, local, false).unwrap();
+    assert!(review::execute_push(&g, &retry.plan_id).unwrap().ok);
+    assert_eq!(
+        repo::status(&g, &work, "main", &[])
+            .unwrap()
+            .pushed_branches,
+        vec![local.clone()]
+    );
+
+    // Unmanaged branches and orphan markers must not appear as pushed branches.
+    sh(&work, &["branch", "review/unmanaged", &plan.source_oid]);
+    sh(
+        &work,
+        &[
+            "update-ref",
+            "refs/offline-sync/review-pushed/unmanaged",
+            &plan.source_oid,
+        ],
+    );
+    sh(&work, &["update-ref", "-d", &format!("refs/heads/{local}")]);
+    assert!(repo::status(&g, &work, "main", &[])
+        .unwrap()
+        .pushed_branches
+        .is_empty());
 }
 
 #[test]

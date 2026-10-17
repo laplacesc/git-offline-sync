@@ -226,8 +226,8 @@ export function BranchTable({
   };
 
   return (
-    <div className="min-w-0 space-y-3">
-      <div className="flex flex-wrap items-end gap-3">
+    <div className="branch-table min-w-0 space-y-3">
+      <div className="branch-table-tools">
         <TextInput label="查找分支" value={query} onChange={setQuery} placeholder="输入分支名" className="min-w-0 flex-1 sm:max-w-sm" />
         <span role="status" className="pb-3 text-sm text-muted">{visible.length} / {branches.length} 个分支 · 已选 {selected.length} 个</span>
         {query && <ActionButton variant="ghost" onPress={() => setQuery("")}>清除搜索</ActionButton>}
@@ -262,7 +262,7 @@ export function BranchTable({
                 <Table.Cell>
                   <SelectionBox label={`选择 ${b.name}`} />
                 </Table.Cell>
-                <Table.Cell className="break-words">
+                <Table.Cell className="branch-name-cell">
                   <span className="inline-flex max-w-full items-center gap-1">
                     <span className="min-w-0 font-mono text-[13px]">{breakAfterSlash(b.name)}</span>
                     <Button size="sm" variant="ghost" isIconOnly className="shrink-0"
@@ -285,7 +285,7 @@ export function BranchTable({
                 <Table.Cell className="whitespace-nowrap">
                   <Code>{shortSha(b.sha)}</Code>
                 </Table.Cell>
-                <Table.Cell className="whitespace-nowrap">
+                <Table.Cell className="branch-base-cell">
                   <Code>origin/{b.base}</Code>
                   {b.baseInferred && (
                     <span className="ml-1.5 text-xs text-muted" title="没有记录，按分支名前缀推断">

@@ -97,6 +97,9 @@ export interface RepoStatus {
   inProgressTrees: InProgressOp[];
   branches: BranchInfo[];
   remoteUrl: string | null;
+  refs?: RefEntry[];
+  reviewSources?: Record<string, string>;
+  pushedBranches?: string[];
 }
 
 export type BundleKind = "full" | "incr" | "back" | "patch";
@@ -126,6 +129,11 @@ export interface PackageInfo {
   manifestPath: string | null;
   payloadPath: string;
   payloadExists: boolean;
+}
+
+export interface ReturnPackageInfo extends PackageInfo {
+  received: boolean;
+  receiptKey?: string | null;
 }
 
 export type ExportOutcome =
@@ -177,6 +185,32 @@ export interface ImportedBranch {
 export interface ImportBackResult {
   branches: ImportedBranch[];
   warnings: string[];
+}
+
+export interface ReturnImportResult extends ImportBackResult {
+  outcomes: OpOutcome[];
+}
+
+export interface PushPlan {
+  planId: string;
+  sourceOid: string;
+  targetRef: string;
+  remoteUrl: string;
+  remoteOid: string | null;
+  baseOid: string;
+  commits: CommitInfo[];
+  nonFastForward: boolean;
+}
+
+export interface DevSyncStatus {
+  path: string;
+  status: "upToDate" | "needsFetch" | "notCloned" | "unknown";
+  error: string | null;
+}
+
+export interface SyncUpdatesResult {
+  imported: ImportInResult | null;
+  repositories: { path: string; status: "fetched" | "cloned" }[];
 }
 
 export interface InternalState {
@@ -250,6 +284,7 @@ export const api = {
   mirrorState: (mirrorDir: string) =>
     invoke<MirrorState>("sync_state", { path: mirrorDir, external: true }),
   listPackages: (dir: string) => invoke<PackageInfo[]>("list_packages", { dir }),
+  listReturnPackages: (workDir: string, dir: string) => invoke<ReturnPackageInfo[]>("list_return_packages", { workDir, dir }),
   listCommits: (repo: string, from: string, to: string) =>
     invoke<CommitInfo[]>("list_commits", { repo, from, to }),
   abortOp: (repo: string) => mutate<OpOutcome>("abort_op", { repo }),
@@ -280,10 +315,19 @@ export const api = {
     /** 给了就把分支建成独立 worktree，不抢主工作树 */
     worktreePath?: string;
   }) => mutate<OpOutcome>("import_patches", { ...a, worktreePath: a.worktreePath ?? null }),
+  importReturn: (workDir: string, bundle: string, baseBranch: string, releaseBranches: string[]) =>
+    mutate<ReturnImportResult>("import_return", { workDir, bundle, baseBranch, releaseBranches }),
+  preparePush: (workDir: string, branch: string, forceWithLease: boolean) =>
+    mutate<PushPlan>("prepare_push", { workDir, branch, forceWithLease }),
+  executePush: (planId: string) => mutate<OpOutcome>("execute_push", { planId }),
   pushBranch: (workDir: string, branch: string, forceWithLease: boolean) =>
     mutate<OpOutcome>("push_branch", { workDir, branch, forceWithLease }),
 
   // 外网端
+  devSyncStatus: (mirrorDir: string, devDirs: string[]) =>
+    readOnce<DevSyncStatus[]>("dev_sync_status", { mirrorDir, devDirs }),
+  syncUpdates: (a: { bundle: string | null; mirrorDir: string; devDirs: string[]; name: string; email: string }) =>
+    mutate<SyncUpdatesResult>("sync_updates", a),
   importIn: (bundle: string, mirrorDir: string, allowGap: boolean) =>
     mutate<ImportInResult>("import_in", { bundle, mirrorDir, allowGap }),
   createDevRepo: (mirrorDir: string, devDir: string, name: string, email: string) =>

@@ -17,6 +17,7 @@ export interface OperationRecord {
   startedAt: number;
   endedAt?: number;
   failed?: boolean;
+  needsAttention?: boolean;
   stopRequested?: boolean;
 }
 
@@ -67,7 +68,14 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       setBusy(label);
       setError(null);
       try {
-        return await fn();
+        const result = await fn();
+        if (result && typeof result === "object") {
+          const outcome = result as { ok?: boolean; outcomes?: { ok: boolean }[] };
+          if (outcome.ok === false || (Array.isArray(outcome.outcomes) && outcome.outcomes.some((item) => !item.ok))) {
+            setOperations((records) => records.map((record) => record.id === id ? { ...record, needsAttention: true } : record));
+          }
+        }
+        return result;
       } catch (e) {
         setOperations((records) => records.map((record) => record.id === id ? { ...record, failed: true } : record));
         setError(`${label}失败：${String(e)}`);

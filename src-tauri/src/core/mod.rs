@@ -4,5 +4,6 @@ pub mod error;
 pub mod git;
 pub mod manifest;
 pub mod repo;
+pub mod review;
 pub mod storage;
 pub mod sync;

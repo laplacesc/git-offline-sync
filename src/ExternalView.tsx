@@ -1,683 +1,374 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AlertDialog, Table, ToggleButton, ToggleButtonGroup } from "@heroui/react";
-import type { Key } from "@heroui/react";
+import { AlertDialog, Checkbox, CheckboxGroup, Label, ListBox, Radio, RadioGroup, Select, Tabs } from "@heroui/react";
 import {
-  api,
-  baseCandidates,
-  defaultBaseFor,
-  ExportOutcome,
-  formatTime,
-  ImportInResult,
-  MirrorState,
-  OpOutcome,
-  PackageInfo,
-  prefixWarning,
-  Profile,
-  releasesOf,
-  shortSha,
+  api, baseCandidates, defaultBaseFor, BranchInfo, ExportOutcome, formatTime, MirrorState,
+  OpOutcome, PackageInfo, prefixWarning, Profile, RefEntry, releasesOf, shortSha,
 } from "./api";
 import { useRunner } from "./runner";
-import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus, useRequestGeneration } from "./repoBits";
+import { Icon } from "./icons";
 import {
-  ActionButton,
-  BaseSelect,
-  Check,
-  Code,
-  Empty,
-  KindChip,
-  Notice,
-  OutcomeView,
-  PackageRow,
-  RefreshButton,
-  StepCard,
-  WorkflowNav,
-  Workflow,
-  Pipeline,
-  WorkflowJump,
-  SeqChain,
-  TextInput,
-} from "./ui";
+  BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners,
+  useRefreshOnFocus, useRepoStatus, useRequestGeneration,
+} from "./repoBits";
+import { ActionButton, BaseSelect, Check, Code, Fold, Notice, OutcomeView, RefreshButton, TextInput } from "./ui";
 
-/** 开发仓库列表里的一行：尚未克隆的给「从镜像克隆」，已克隆的给「切换 / 同步」。 */
-function DevRepoRow({
-  path,
-  current,
-  cloned,
-  stale,
-  onSelect,
-  onSync,
-  onClone,
-}: {
-  path: string;
-  current: boolean;
-  cloned: boolean | undefined;
-  stale: boolean;
-  onSelect: () => void;
-  onSync: () => void;
-  onClone: () => void;
+function ReturnBranches({ branches, selected, onSelect, single, isDisabled }: {
+  branches: BranchInfo[];
+  selected: string[];
+  onSelect: (names: string[]) => void;
+  single: boolean;
+  isDisabled: boolean;
 }) {
-  return (
-    <div
-      className={
-        "flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl px-4 py-3 transition-colors duration-500 " +
-        (current && cloned ? "selected-surface" : "border border-border bg-surface")
-      }
-    >
-      <div className="min-w-0 flex-1">
-        <div className="truncate font-mono text-[13px]" title={path}>
-          {path}
-        </div>
-        <div className="text-xs text-muted">
-          {cloned === undefined ? "正在检查…" : cloned ? (current ? "当前操作的仓库" : "已克隆") : "尚未克隆"}
-          {cloned && stale && <span className="ml-2 text-warning">待同步</span>}
-        </div>
-      </div>
-      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-        {cloned === undefined ? null : cloned ? (
-          <>
-            {!current && (
-              <ActionButton size="sm" variant="secondary" onPress={onSelect}>
-                切换
-              </ActionButton>
-            )}
-            <ActionButton size="sm" variant={stale ? "primary" : "outline"} onPress={onSync}>
-              同步
-            </ActionButton>
-          </>
-        ) : (
-          <ActionButton size="sm" variant="primary" onPress={onClone}>
-            从镜像克隆
-          </ActionButton>
-        )}
-      </div>
-    </div>
-  );
+  if (!branches.length) return <p className="sync-empty">还没有可回传的开发分支。</p>;
+  if (single) return <RadioGroup className="sync-branches" aria-label="回传分支"
+    value={selected[0] ?? ""} isDisabled={isDisabled} onChange={(name) => onSelect([name])}>
+    {branches.map((branch) => <Radio key={branch.name} className="sync-branch-row" value={branch.name} aria-label={branch.name}>
+      <Radio.Content><Radio.Control><Radio.Indicator /></Radio.Control>
+        <span className="sync-branch-copy font-mono">{branch.name}</span>
+      </Radio.Content>
+    </Radio>)}
+  </RadioGroup>;
+  return <CheckboxGroup className="sync-branches" aria-label="回传分支"
+    value={selected} isDisabled={isDisabled} onChange={onSelect}>
+    {branches.map((branch) => <Checkbox key={branch.name} className="sync-branch-row" value={branch.name} aria-label={branch.name}>
+      <Checkbox.Content><Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>
+        <span className="sync-branch-copy font-mono">{branch.name}</span>
+      </Checkbox.Content>
+    </Checkbox>)}
+  </CheckboxGroup>;
 }
 
 export function ExternalView({ profile }: { profile: Profile }) {
-  const { run, notify, busy } = useRunner();
+  const { run, notify, confirm, busy } = useRunner();
   const base = profile.baseBranch;
   const releases = releasesOf(profile);
+  const candidates = baseCandidates(profile);
   const mirrorDir = profile.mirrorDir ?? "";
   const devRepos = profile.devRepos ?? [];
-
-  // 当前操作的开发仓库。多个开发仓库共享同一个镜像，只是各自的工作副本。
-  const [devIdx, setDevIdx] = useState(0);
-  const devDir = devRepos[devIdx] ?? "";
-
-  // This view owns the initial refresh; hooks must not launch duplicate reads.
+  const devReposKey = JSON.stringify(devRepos);
+  const [devPicked, setDevPicked] = useState("");
+  const devDir = devRepos.includes(devPicked) ? devPicked : devRepos[0] ?? "";
   const mirror = useRepoStatus(mirrorDir, base, releases, false);
   const repo = useRepoStatus(devDir, base, releases, false);
-  const devReposKey = JSON.stringify(devRepos);
-  const refreshKey = JSON.stringify([profile.id, mirrorDir, devDir, base, releases, profile.transferDir, devRepos]);
+  const refreshKey = JSON.stringify([
+    profile.id, profile.repoName, mirrorDir, devDir, base, releases, profile.transferDir,
+    devRepos, profile.userName, profile.userEmail,
+  ]);
   const beginRefresh = useRequestGeneration(refreshKey);
+  const beginAction = useRequestGeneration(refreshKey);
+  const revision = useRef(0);
   const [snapshot, setSnapshot] = useState<{
-    key: string; state: MirrorState | null; packages: PackageInfo[];
-    packageError: string | null; devExists: Record<string, boolean>;
+    key: string; loading: boolean; state: MirrorState | null; stateError: string | null;
+    packages: PackageInfo[]; packageError: string | null;
+    devs: Awaited<ReturnType<typeof api.devSyncStatus>>; devError: string | null;
   } | null>(null);
   const current = snapshot?.key === refreshKey ? snapshot : null;
-  const state = current?.state ?? null;
-  const packages = current?.packages ?? [];
-  const packageError = current?.packageError ?? null;
-  const devExists = current?.devExists ?? {};
+  const state = current?.state;
+  const lastIn = state?.lastInSeq ?? 0;
+  const ready = !!current && !current.loading && !current.stateError && !!state && !mirror.error;
+  const mirrorReady = !!mirror.status?.isRepo && !!mirror.status.isBare;
+  // Full replacement can delete tags too; branches alone cannot describe its impact.
+  const mirrorRefs = (mirror.status as (typeof mirror.status & { refs?: RefEntry[] }))?.refs;
+  const devReady = !!repo.status?.isRepo && !repo.status.isBare && !repo.loading;
+  const needsFull = !state?.repoId || !mirrorReady;
+  const [picked, setPicked] = useState<{ key: string; path: string } | null>(null);
+  const [result, setResult] = useState<{ key: string; text: string } | null>(null);
 
   const reloadAll = useCallback(async () => {
     const isCurrent = beginRefresh();
     if (!isCurrent()) return;
-    // Reuse the selected repository's full status. Other rows only need a probe.
-    const currentRepo = repo.reload();
-    const [nextState, packageResult, devFlags] = await Promise.all([
-      mirrorDir ? api.mirrorState(mirrorDir).catch(() => null) : null,
+    revision.current += 1;
+    setSnapshot((previous) => previous?.key === refreshKey ? { ...previous, loading: true } : null);
+    const [stateResult, packageResult, devResult] = await Promise.all([
+      mirrorDir ? api.mirrorState(mirrorDir).then(
+        (state) => ({ state, stateError: null }),
+        (error) => ({ state: null, stateError: String(error) }),
+      ) : { state: null, stateError: null },
       api.listPackages(profile.transferDir).then(
         (packages) => ({ packages, packageError: null }),
         (error) => ({ packages: [] as PackageInfo[], packageError: String(error) }),
       ),
-      Promise.all((JSON.parse(devReposKey) as string[]).map(async (dir) => [
-        dir,
-        dir === devDir ? !!(await currentRepo)?.isRepo : await api.probeRepo(dir).catch(() => false),
-      ] as const)),
-      mirror.reload(),
-      currentRepo,
+      mirrorDir ? api.devSyncStatus(mirrorDir, JSON.parse(devReposKey) as string[]).then(
+        (devs) => ({ devs, devError: null }),
+        (error) => ({ devs: [], devError: String(error) }),
+      ) : { devs: [], devError: null },
+      mirror.reload(), repo.reload(),
     ]);
-    if (!isCurrent()) return;
-    setSnapshot({ key: refreshKey, state: nextState, ...packageResult, devExists: Object.fromEntries(devFlags) });
-  }, [beginRefresh, refreshKey, mirror.reload, repo.reload, mirrorDir, devDir, devReposKey, profile.transferDir]);
-
+    if (isCurrent()) setSnapshot({ key: refreshKey, loading: false, ...stateResult, ...packageResult, ...devResult });
+  }, [beginRefresh, refreshKey, mirrorDir, profile.transferDir, devReposKey, mirror.reload, repo.reload]);
   useEffect(() => { void reloadAll(); }, [reloadAll]);
   useRefreshOnFocus(reloadAll);
 
-  // 镜像必须是本工具建的裸仓库
-  const mirrorReady = !!mirror.status?.isRepo && !!mirror.status?.isBare;
-  const devReady = !!repo.status?.isRepo;
-  // 1.0.x 升级上来的配置没有这两个目录，先让用户去填，别让它报 create_dir_all("") 那种错
-  const needsSetup = mirrorDir.trim() === "";
+  const packages = (current?.packages ?? []).filter((p) => {
+    const m = p.manifest;
+    return m && (m.kind === "full" || m.kind === "incr") && m.seq > lastIn
+      && (state?.repoId ? m.repoId === state.repoId : m.repoName === profile.repoName && m.baseBranch === base);
+  }).sort((a, b) => a.manifest!.seq - b.manifest!.seq);
+  const usable = (p: PackageInfo) => p.payloadExists && (needsFull ? p.manifest?.kind === "full"
+    : p.manifest?.seq === lastIn + 1 || p.manifest?.kind === "full");
+  const next = packages.find((p) => usable(p) && (needsFull || p.manifest!.seq === lastIn + 1));
+  const chosen = picked?.key === refreshKey ? packages.find((p) => p.payloadPath === picked.path && usable(p)) : next;
+  const missing = !needsFull && !next && packages.some((p) => p.manifest!.seq > lastIn + 1);
+  const pendingDevs = devRepos.some((path) => current?.devs.find((d) => d.path === path)?.status !== "upToDate");
+  const fullGap = chosen?.manifest?.kind === "full" && !needsFull && chosen.manifest.seq > lastIn + 1;
+  const missingImpact = fullGap && !mirrorRefs;
+  const canSync = ready && !!mirrorDir.trim() && devRepos.length > 0 && !mirror.loading && !missingImpact
+    && (!mirror.status?.isRepo || mirrorReady) && (!!chosen || mirrorReady && pendingDevs && !needsFull);
 
-  // ---------- 1. 导入内网包到镜像 ----------
-  const inPkgs = packages
-    .filter((p) => !p.manifest || p.manifest.kind === "full" || p.manifest.kind === "incr")
-    .sort((a, b) => (b.manifest?.seq ?? 0) - (a.manifest?.seq ?? 0));
-  const lastIn = state?.lastInSeq ?? 0;
-  const [allowGap, setAllowGap] = useState(false);
-  const [importRes, setImportRes] = useState<ImportInResult | null>(null);
-  // 导入只更新镜像，开发仓库要再 fetch 一次才看得到
-  const staleKey = JSON.stringify([profile.id, mirrorDir]);
-  const [staleState, setStaleState] = useState<{ key: string; paths: Set<string> } | null>(null);
-  const staleDevs = staleState?.key === staleKey ? staleState.paths : new Set<string>();
-  const clearStale = (dir: string) => setStaleState((previous) => {
-    if (!previous || previous.key !== staleKey || !previous.paths.has(dir)) return previous;
-    const paths = new Set(previous.paths);
-    paths.delete(dir);
-    return { key: staleKey, paths };
-  });
-
-  const importIn = async (path: string) => {
-    const r = await run(mirrorReady ? "导入增量包" : "建立外网镜像", () =>
-      api.importIn(path, mirrorDir, allowGap),
-    );
-    if (r) {
-      setImportRes(r);
-      setStaleState({ key: staleKey, paths: new Set(devRepos) });
-      notify("ok", r.created ? "已建立外网镜像" : `已导入 #${r.seq ?? "?"}`);
+  const sync = async (bundle: PackageInfo | null = chosen ?? null, dirs = devRepos) => {
+    if (!ready || !mirrorDir.trim() || !dirs.length || (bundle && !usable(bundle)) || (!bundle && !mirrorReady)) return;
+    const isCurrent = beginAction();
+    const startedAt = revision.current;
+    const m = bundle?.manifest;
+    if (m?.kind === "full" && !needsFull && m.seq > lastIn + 1) {
+      if (!mirrorRefs) return;
+      const targetRefs = new Map(m.refs.map((ref) => [ref.name, ref.sha]));
+      const oldRefs = new Map(mirrorRefs.map((ref) => [ref.name, ref.sha]));
+      const affected = [...new Set([...oldRefs.keys(), ...targetRefs.keys()])]
+        .filter((name) => oldRefs.get(name) !== targetRefs.get(name));
+      const approved = await confirm({
+        title: `使用全量更新 #${m.seq}？`, tone: "warning", confirmLabel: `同步到 #${m.seq}`,
+        body: <div className="space-y-3">
+          <p>将 {mirrorDir} 从 #{lastIn} 同步到 #{m.seq}，跳过 #{lastIn + 1}–#{m.seq - 1}。</p>
+          <p>以下引用将按全量包更新，可能回退；包外的分支和标签将移除。</p>
+          <ul>{affected.map((name) => <li key={name}><Code>{name}</Code>：{shortSha(oldRefs.get(name))} → {targetRefs.has(name) ? shortSha(targetRefs.get(name)) : "删除"}</li>)}</ul>
+          {!affected.length && <p>分支和标签没有变化，仅推进同步记录。</p>}
+        </div>,
+      });
+      if (!approved || !isCurrent() || startedAt !== revision.current) return;
     }
-    reloadAll();
-  };
-
-  const browse = async () => {
-    const p = await open({ multiple: false, filters: [{ name: "Git bundle", extensions: ["bundle"] }] });
-    if (typeof p === "string") importIn(p);
-  };
-
-  // ---------- 2. 开发仓库 ----------
-  const cloneDev = async (dir: string) => {
-    const ok = await run("克隆开发仓库", () =>
-      api.createDevRepo(mirrorDir, dir, profile.userName ?? "", profile.userEmail ?? ""),
-    );
-    if (ok !== undefined) {
-      clearStale(dir);
-      notify("ok", `已从镜像克隆到 ${dir}`);
+    setResult(null);
+    const outcome = await run("同步更新", () => api.syncUpdates({
+      bundle: bundle?.payloadPath ?? null, mirrorDir, devDirs: dirs,
+      name: profile.userName ?? "", email: profile.userEmail ?? "",
+    }));
+    if (!isCurrent()) return;
+    if (outcome) {
+      setResult({ key: refreshKey, text: outcome.imported ? `已同步更新 #${outcome.imported.seq ?? ""}` : "已完成开发仓库同步" });
+      setPicked(null);
     }
-    reloadAll();
+    await reloadAll();
   };
 
-  const syncDev = async (dir: string) => {
-    const ok = await run("同步开发仓库", () => api.syncDevRepo(dir, mirrorDir));
-    if (ok !== undefined) {
-      clearStale(dir);
-      notify("ok", `${dir} 已同步到镜像的最新状态`);
-    }
-    reloadAll();
-  };
-
-  const syncAll = async () => {
-    const ok = await run("同步所有开发仓库", async () => {
-      for (const dir of devRepos.filter((path) => devExists[path])) {
-        await api.syncDevRepo(dir, mirrorDir);
-        clearStale(dir);
-      }
-      return null;
-    });
-    if (ok !== undefined) notify("ok", "所有开发仓库已同步");
-    // Even a partially failed batch must refresh the successfully synced rows.
-    reloadAll();
-  };
-
-  const saveIdentity = async () => {
-    const ok = await run("设置提交身份", () =>
-      api.configureRepo(devDir, profile.userName ?? "", profile.userEmail ?? ""),
-    );
-    if (ok !== undefined) notify("ok", "已写入 user.name / user.email / core.autocrlf=input");
-  };
-
-  // ---------- 3. 分支与 worktree ----------
+  const [selected, setSelected] = useState<string[]>([]);
+  const [mode, setMode] = useState<"bundle" | "patch">("bundle");
+  const [exportRes, setExportRes] = useState<ExportOutcome | null>(null);
+  const [opRes, setOpRes] = useState<OpOutcome | null>(null);
   const [newBranch, setNewBranch] = useState("feature/");
-  // null：跟随分支名前缀自动选择；用户手动选过后固定
   const [newBasePicked, setNewBasePicked] = useState<string | null>(null);
   const newBase = newBasePicked ?? defaultBaseFor(newBranch.trim(), profile);
   const newBranchWarning = prefixWarning(newBranch.trim(), newBase, profile);
   const [asWorktree, setAsWorktree] = useState(false);
   const [worktreePath, setWorktreePath] = useState("");
-  const [selected, setSelected] = useState<string[]>([]);
-  const [opRes, setOpRes] = useState<OpOutcome | null>(null);
   const [rebaseTarget, setRebaseTarget] = useState<{ name: string; onto: string } | null>(null);
+  const branches = (repo.status?.branches ?? []).filter((b) => !candidates.includes(b.name));
+  const selectedBranches = selected.filter((name) => branches.some((b) => b.name === name));
+  const rebaseInfo = branches.find((b) => b.name === rebaseTarget?.name);
+  const rebaseWarning = rebaseTarget ? prefixWarning(rebaseTarget.name, rebaseTarget.onto, profile) : null;
+  const canCreate = devReady && !!newBranch.trim() && !newBranch.trim().endsWith("/") && (!asWorktree || !!worktreePath.trim());
 
   useEffect(() => {
     setSelected([]);
+    setExportRes(null);
+    setOpRes(null);
     setRebaseTarget(null);
-  }, [profile.id, devDir]);
+    setNewBranch("feature/");
+    setNewBasePicked(null);
+    setWorktreePath("");
+  }, [refreshKey]);
+  useEffect(() => {
+    if (rebaseTarget && !rebaseInfo) setRebaseTarget(null);
+  }, [rebaseTarget, rebaseInfo]);
+  useEffect(() => {
+    if (repo.loading) return;
+    setSelected((previous) => previous.filter((name) => repo.status?.branches.some((b) => b.name === name && !candidates.includes(name))));
+  }, [repo.status, repo.loading, base, JSON.stringify(releases)]);
 
   const createBranch = async () => {
-    const name = newBranch.trim();
-    const wt = asWorktree ? worktreePath.trim() : undefined;
-    if (asWorktree && !wt) return;
-    const ok = await run("新建分支", () => api.createBranch(devDir, name, newBase, wt));
-    if (ok !== undefined) {
-      notify("ok", wt ? `已在 ${wt} 创建 worktree ${name}` : `已基于 origin/${newBase} 创建并切换到 ${name}`);
+    if (!canCreate) return;
+    const isCurrent = beginAction();
+    const outcome = await run("新建分支", () => api.createBranch(
+      devDir, newBranch.trim(), newBase, asWorktree ? worktreePath.trim() : undefined,
+    ));
+    if (!isCurrent()) return;
+    if (outcome !== undefined) {
       setNewBranch("feature/");
       setNewBasePicked(null);
       setWorktreePath("");
     }
-    reloadAll();
+    await reloadAll();
   };
-
-  const browseWorktree = async () => {
-    const p = await open({ directory: true, multiple: false });
-    if (typeof p === "string") setWorktreePath(p);
+  const saveIdentity = async () => {
+    const isCurrent = beginAction();
+    const outcome = await run("设置提交身份", () => api.configureRepo(
+      devDir, profile.userName ?? "", profile.userEmail ?? "",
+    ));
+    if (outcome !== undefined && isCurrent()) notify("ok", "已写入提交身份");
   };
-
-  const rebaseInfo = repo.status?.branches.find((b) => b.name === rebaseTarget?.name);
-  const rebaseWarning = rebaseTarget ? prefixWarning(rebaseTarget.name, rebaseTarget.onto, profile) : null;
-
-  useEffect(() => {
-    if (rebaseTarget && !rebaseInfo) setRebaseTarget(null);
-  }, [rebaseTarget, rebaseInfo]);
-
   const rebase = async () => {
-    if (!rebaseTarget || !rebaseInfo) return;
-    const r = await run("Rebase", () => api.rebaseOnto(devDir, rebaseTarget.name, rebaseTarget.onto, false));
-    if (r) {
-      setOpRes(r);
+    if (!rebaseTarget || !rebaseInfo || !devReady) return;
+    const isCurrent = beginAction();
+    const outcome = await run("Rebase", () => api.rebaseOnto(devDir, rebaseTarget.name, rebaseTarget.onto, false));
+    if (!isCurrent()) return;
+    if (outcome) {
+      setOpRes(outcome);
       setRebaseTarget(null);
     }
-    reloadAll();
+    await reloadAll();
   };
-
-  // ---------- 4. 回传 ----------
-  const [mode, setMode] = useState<"bundle" | "patch">("bundle");
-  const [exportRes, setExportRes] = useState<ExportOutcome | null>(null);
-  const candidates = baseCandidates(profile);
-  const branches = (repo.status?.branches ?? []).filter((b) => !candidates.includes(b.name));
-
-  const onModeChange = (keys: Set<Key>) => {
-    const m = [...keys][0] as "bundle" | "patch" | undefined;
-    if (!m) return;
-    setMode(m);
-    if (m === "patch") setSelected((s) => s.slice(0, 1));
-  };
-
   const doExport = async () => {
+    if (!ready || !devReady || !mirrorReady || !selectedBranches.length || mode === "patch" && selectedBranches.length !== 1) return;
+    const isCurrent = beginAction();
     const common = {
-      repo: devDir,
-      mirrorDir,
-      transferDir: profile.transferDir,
-      repoName: profile.repoName,
-      baseBranch: base,
-      releaseBranches: releases,
+      repo: devDir, mirrorDir, transferDir: profile.transferDir,
+      repoName: profile.repoName, baseBranch: base, releaseBranches: releases,
     };
-    const r =
-      mode === "bundle"
-        ? await run("导出回传包", () => api.exportBack({ ...common, branches: selected }))
-        : await run("导出补丁", () => api.exportPatches({ ...common, branch: selected[0] }));
-    if (r) setExportRes(r);
-    reloadAll();
+    setExportRes(null);
+    const outcome = mode === "bundle"
+      ? await run("导出回传", () => api.exportBack({ ...common, branches: selectedBranches }))
+      : await run("导出补丁", () => api.exportPatches({ ...common, branch: selectedBranches[0] }));
+    if (!isCurrent()) return;
+    if (outcome) setExportRes(outcome);
+    await reloadAll();
   };
 
-  const branchNameOk = newBranch.trim() !== "" && !newBranch.trim().endsWith("/");
-  const canCreate = branchNameOk && (!asWorktree || worktreePath.trim() !== "");
-
-  function nextStep() {
-    if (repo.status?.inProgress || repo.status?.inProgressTrees.length) return { title: "处理未完成的操作", detail: "检查开发工作树，再继续或中止。", step: 3 };
-    if (!current || mirror.loading || repo.loading) return { title: "检查同步状态", detail: "正在读取镜像、开发仓库和传输目录。", step: 1 };
-    if (packageError) return { title: "检查传输目录", detail: "确认路径和 U 盘连接后刷新。", step: 1 };
-    if (!mirrorReady) return { title: "导入全量包", detail: "先建立外网镜像，再克隆开发仓库。", step: 1 };
-    if (inPkgs.some((p) => p.manifest && p.manifest.seq > lastIn)) return { title: "检查新的内网包", detail: `从 #${lastIn + 1} 开始，按连续序号导入。`, step: 1 };
-    if (!devReady || staleDevs.size) return { title: "准备开发仓库", detail: "从镜像克隆或同步最新引用。", step: 2 };
-    if (selected.length) return { title: "回传所选分支", detail: "只打包内网尚未包含的已提交内容。", step: 4 };
-    return { title: "开发并选择分支", detail: "在特性分支提交代码，再选择需要回传的分支。", step: 3 };
-  }
-
-  return (
-    <Workflow>
-      <Pipeline onRefresh={reloadAll} lanes={[
-        { label: "出站 · 内网 → 外网", commands: ["import", "clone / fetch"], nodes: [
-          { title: "U 盘 · 内网包", detail: packageError ? "传输目录不可读" : current ? `${inPkgs.length} 个可见包` : "读取中…", step: 1, icon: "folder" },
-          { title: "外网镜像", detail: state ? `已导入 #${lastIn}` : "尚无导入记录", step: 1, icon: "folder" },
-          { title: "开发仓库", detail: current ? `${Object.values(devExists).filter(Boolean).length} / ${devRepos.length} 个已克隆` : "读取中…", step: 2, icon: "monitor" },
-        ] },
-        { label: "回站 · 外网 → 内网", commands: ["bundle / patch", "带回内网"], nodes: [
-          { title: "开发分支", detail: repo.loading ? "读取中…" : `${branches.length} 个分支 · 已选 ${selected.length}`, step: 3, icon: "branch" },
-          { title: "回传包", detail: state ? `已分配 #${state.backSeq ?? 0}` : "暂无回传记录", step: 4, icon: "folder" },
-          { title: "U 盘", detail: "回内网检查后推送", step: 4, icon: "folder" },
-        ] },
-      ]} next={nextStep()} />
-      <WorkflowNav steps={["导入内网包", "开发仓库", "开发分支", "回传到内网"]}
-        counts={[current ? inPkgs.length : undefined, devRepos.length, repo.status ? branches.length : undefined, selected.length]} />
-      {packageError && <Notice tone="danger" title="无法读取传输目录，请检查路径或 U 盘连接后刷新">{packageError}</Notice>}
-      <AlertDialog.Backdrop
-        isOpen={!!rebaseTarget}
-        onOpenChange={(open) => { if (!open && !busy) setRebaseTarget(null); }}
-      >
-        <AlertDialog.Container>
-          <AlertDialog.Dialog className="sm:max-w-md">
-            <AlertDialog.Header>
-              <AlertDialog.Heading>Rebase 分支</AlertDialog.Heading>
-            </AlertDialog.Header>
-            <AlertDialog.Body className="space-y-4">
-              <p>分支：<Code>{rebaseTarget?.name}</Code></p>
-              <BaseSelect
-                label="Rebase 到"
-                value={rebaseTarget?.onto ?? base}
-                options={candidates}
-                mainline={base}
-                onChange={(onto) => setRebaseTarget((target) => target ? { ...target, onto } : null)}
-              />
-              {rebaseWarning && <Notice tone="warning" title={rebaseWarning} />}
-            </AlertDialog.Body>
-            <AlertDialog.Footer>
-              <ActionButton variant="tertiary" onPress={() => setRebaseTarget(null)}>取消</ActionButton>
-              <ActionButton variant="primary" onPress={rebase} isDisabled={!rebaseInfo}>
-                Rebase 到 origin/{rebaseTarget?.onto}
-              </ActionButton>
-            </AlertDialog.Footer>
-          </AlertDialog.Dialog>
-        </AlertDialog.Container>
-      </AlertDialog.Backdrop>
-      <StepCard
-        step={1}
-        label="Import"
-        title="导入内网包到镜像"
-        description={
-          needsSetup ? (
-            <>还没有设置外网镜像目录</>
-          ) : mirrorReady ? (
-            <>
-              已导入到 #{lastIn}
-              {state?.lastImportAt ? `（${formatTime(state.lastImportAt)}）` : ""}，下一个应为 #{lastIn + 1}
-            </>
-          ) : (
-            <>
-              首次导入：用全量包在 <Code>{mirrorDir}</Code> 建立外网镜像（裸仓库）
-            </>
-          )
-        }
-        actions={
-          <>
-            <RefreshButton onPress={reloadAll} />
-            <ActionButton size="sm" variant="outline" onPress={browse}>
-              选择其他文件…
-            </ActionButton>
-          </>
-        }
-      >
-        {state && <SeqChain last={lastIn} sequences={inPkgs.flatMap((p) => p.manifest?.repoId === state.repoId ? [p.manifest.seq] : [])} />}
-        {needsSetup && (
-          <Notice tone="accent" title="先在「编辑配置」里填写外网镜像目录和开发仓库目录">
-            1.0.x 的外网仓库不再兼容：包要先导入到<b>外网镜像</b>（一个空目录，会建成裸仓库），
-            再从镜像克隆<b>开发仓库</b>。两个目录要分开填。旧的开发仓库目录可以删掉，
-            如果里面还有没回传的提交，先用旧版本导出回传包。
-          </Notice>
-        )}
-        {mirror.error && !needsSetup && <Notice tone="danger" title="读取外网镜像失败">{mirror.error}</Notice>}
-        {mirror.status?.isRepo && !mirror.status.isBare && (
-          <Notice tone="danger" title="这个目录不是裸仓库">
-            外网镜像必须是本工具建立的裸仓库。如果这里是旧版本的开发仓库，请把它删掉后重新导入全量包。
-          </Notice>
-        )}
-        {packageError ? null : inPkgs.length === 0 ? (
-          <Empty>
-            传输目录 <Code>{profile.transferDir}</Code> 中没有内网包。
-          </Empty>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {inPkgs.map((p) => {
-              const m = p.manifest;
-              const done = !!m && mirrorReady && m.seq <= lastIn;
-              const next = mirrorReady ? !!m && m.seq === lastIn + 1 : m?.kind === "full";
-              // 已导入的全量包仍可再次导入（重新同步）；已导入的增量包不可
-              const usable = mirrorReady ? !(done && m?.kind === "incr") : !m || m.kind === "full";
-              const wrongRepo = !!m && !!state?.repoId && m.repoId !== state.repoId;
-              const gap = !!m && mirrorReady && m.kind === "incr" && m.seq > lastIn + 1;
-              const reason = !p.payloadExists ? "包文件缺失" : wrongRepo ? "仓库身份不符" : gap && !allowGap ? `缺少 #${lastIn + 1}，不能跳号导入` : null;
-              return (
-                <PackageRow
-                  key={p.payloadPath}
-                  kind={m?.kind ?? null}
-                  title={m ? `#${m.seq} · ${m.payload}` : p.payloadPath}
-                  highlight={next && !done}
-                  dim={done}
-                  meta={
-                    <>
-                      {m ? formatTime(m.createdAt) : "无 manifest"}
-                      {m && ` · ${m.refs.filter((r) => r.name.startsWith("refs/heads/")).length} 个分支`}
-                      {done && " · 已导入"}
-                      {next && !done && " · 下一个"}
-                      {reason && <span className="block text-danger">{reason}</span>}
-                    </>
-                  }
-                >
-                  <ActionButton
-                    size="sm"
-                    variant={next && !done ? "primary" : "secondary"}
-                    onPress={() => importIn(p.payloadPath)}
-                    isDisabled={needsSetup || !usable || !!reason}
-                  >
-                    导入
-                  </ActionButton>
-                </PackageRow>
-              );
+  let summary = current?.packageError ? "暂时无法检查新包。" : "没有新的更新。";
+  if (pendingDevs) summary = "开发仓库尚未完成同步。";
+  if (needsFull) summary = "请选择本项目的全量包开始同步。";
+  if (chosen) summary = `本次更新 #${chosen.manifest!.seq} · ${chosen.manifest!.kind === "full" ? "全量" : "增量"}`;
+  return <>
+    <Tabs className="sync-workspace" variant="secondary" defaultSelectedKey="sync">
+    <Tabs.ListContainer><Tabs.List className="sync-tabs" aria-label="外网同步">
+      <Tabs.Tab id="sync">同步更新<Tabs.Indicator /></Tabs.Tab>
+      <Tabs.Tab id="return">回传提交<Tabs.Indicator /></Tabs.Tab>
+    </Tabs.List></Tabs.ListContainer>
+    <div className="sync-location">
+      <Icon name="folder" /><span className="min-w-0 flex-1 truncate" title={profile.transferDir}>{profile.transferDir}</span>
+      <RefreshButton onPress={reloadAll} />
+    </div>
+    {!mirrorDir.trim() && <Notice tone="accent" title="请在项目设置中填写外网镜像目录。" />}
+    {!devRepos.length && <Notice tone="accent" title="请在项目设置中添加开发仓库目录。" />}
+    {current?.stateError && <Notice tone="danger" title="无法读取同步记录，请检查后刷新。">{current.stateError}</Notice>}
+    {mirror.error && <Notice tone="danger" title="无法读取外网镜像。">{mirror.error}</Notice>}
+    {mirror.status?.isRepo && !mirror.status.isBare && <Notice tone="danger" title="镜像目录必须是裸仓库，请检查项目设置。" />}
+    {repo.error && <Notice tone="danger" title="无法读取开发仓库。">{repo.error}</Notice>}
+    <Tabs.Panel className="sync-panel" id="sync" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
+      {current?.packageError && <Notice tone="danger" title="无法读取传输目录，请检查连接后刷新。">{current.packageError}</Notice>}
+      {current?.devError && <Notice tone="danger" title="无法检查开发仓库同步状态，请刷新或重试同步。">{current.devError}</Notice>}
+      {!current || current.loading ? <p role="status">正在检查更新…</p>
+        : current.stateError ? null : <>
+          {missing && <Notice tone="warning" title={`缺少更新 #${lastIn + 1}，请补齐或选择较新的全量包。`} />}
+          {missingImpact && <Notice tone="warning" title="无法读取完整引用影响，请刷新后再使用全量包跳号。" />}
+        </>}
+      <div className="sync-action">
+        <span className="sync-action-icon" aria-hidden="true"><Icon name="branch" /></span>
+        <div className="sync-action-copy"><h1>同步内网更新</h1><p>{current?.stateError || mirror.error ? "请处理错误后刷新。" : !current || current.loading ? "正在检查更新…" : summary}</p></div>
+        <ActionButton variant="primary" onPress={() => sync()} isDisabled={!canSync}>
+          {!chosen && mirrorReady && pendingDevs ? "完成同步" : "同步更新"}
+        </ActionButton>
+      </div>
+      <Fold className="sync-details" title={"包详情与其他更新包"}>
+        {chosen && <p><Code>{chosen.payloadPath}</Code> · {formatTime(chosen.manifest?.createdAt)}</p>}
+        {chosen?.manifest?.refs.map((ref) => <p key={ref.name}><Code>{ref.name}</Code> · {shortSha(ref.sha)}</p>)}
+        <Select className="sync-select-field" fullWidth value={chosen?.payloadPath ?? "no-package"} isDisabled={!ready || !!busy}
+          disabledKeys={packages.filter((p) => !usable(p)).map((p) => p.payloadPath)}
+          onChange={(key) => { if (key != null) setPicked({ key: refreshKey, path: key === "no-package" ? "" : String(key) }); }}>
+          <Label>选择更新包</Label>
+          <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
+          <Select.Popover><ListBox>
+            <ListBox.Item id="no-package" textValue={mirrorReady ? "仅更新开发仓库" : "选择全量包"}>{mirrorReady ? "仅更新开发仓库" : "选择全量包"}<ListBox.ItemIndicator /></ListBox.Item>
+            {packages.map((p) => {
+              const label = `#${p.manifest!.seq} · ${p.manifest!.kind === "full" ? "全量" : "增量"} · ${p.manifest!.payload}${!p.payloadExists ? "（文件缺失）" : ""}`;
+              return <ListBox.Item key={p.payloadPath} id={p.payloadPath} textValue={label}>{label}<ListBox.ItemIndicator /></ListBox.Item>;
             })}
-          </div>
-        )}
-        <Check checked={allowGap} onChange={setAllowGap}>
-          允许跳号导入（确认中间的包不需要时）
-        </Check>
-        {importRes && (
-          <div className="flex flex-col gap-3">
-            <Notice
-              tone="success"
-              title={`${importRes.created ? "已建立外网镜像" : `已导入 #${importRes.seq ?? "?"}`}，${importRes.changes.length} 个引用变化`}
-            />
-            {importRes.changes.length > 0 && (
-              <Table variant="secondary">
-                <Table.ScrollContainer className="max-h-56">
-                  <Table.Content aria-label="引用变化">
-                    <Table.Header>
-                      <Table.Column isRowHeader>引用</Table.Column>
-                      <Table.Column>变化</Table.Column>
-                    </Table.Header>
-                    <Table.Body>
-                      {importRes.changes.slice(0, 100).map((c) => (
-                        <Table.Row key={c.name} id={c.name}>
-                          <Table.Cell className="font-mono text-[13px]">
-                            {c.name.replace(/^refs\/heads\//, "")}
-                          </Table.Cell>
-                          <Table.Cell className="font-mono text-xs">
-                            {shortSha(c.old)} → {c.new ? shortSha(c.new) : <span className="text-danger">已删除</span>}
-                          </Table.Cell>
-                        </Table.Row>
-                      ))}
-                    </Table.Body>
-                  </Table.Content>
-                </Table.ScrollContainer>
-              </Table>
-            )}
-          </div>
-        )}
-      </StepCard>
-
-      <StepCard
-        step={2}
-        label="Sync"
-        title="开发仓库"
-        description="开发仓库从镜像克隆，origin 指向本地镜像目录，可以随时 fetch、开 worktree"
-        actions={
-          <>
-            {devRepos.filter((d) => devExists[d]).length > 1 && (
-              <ActionButton size="sm" variant="secondary" onPress={syncAll}>
-                全部同步
-              </ActionButton>
-            )}
-            <RefreshButton onPress={reloadAll} />
-          </>
-        }
-      >
-        {!mirrorReady ? (
-          <Empty>先导入全量包建立镜像。</Empty>
-        ) : devRepos.length === 0 ? (
-          <Empty>还没有配置开发仓库目录，去配置里添加。</Empty>
-        ) : (
-          <>
-            {devRepos.some((dir) => staleDevs.has(dir)) && (
-              <Notice
-                tone="warning"
-                title="镜像已更新，开发仓库还没跟上"
-              >
-                导入只更新镜像。点下面的「同步」在开发仓库里执行 <Code>git fetch origin --prune</Code>。
-              </Notice>
-            )}
-            <div className="flex flex-col gap-2">
-              {devRepos.map((d, i) => (
-                <DevRepoRow
-                  key={d}
-                  path={d}
-                  current={i === devIdx}
-                  cloned={devExists[d]}
-                  stale={staleDevs.has(d)}
-                  onSelect={() => setDevIdx(i)}
-                  onSync={() => syncDev(d)}
-                  onClone={() => cloneDev(d)}
-                />
-              ))}
-            </div>
-            {repo.error && <Notice tone="danger" title="读取开发仓库失败">{repo.error}</Notice>}
-          </>
-        )}
-      </StepCard>
-
-      <StepCard
-        step={3}
-        label="Develop"
-        title="开发分支"
-        description="在特性分支上用 AI 开发并提交，不要直接改基准分支。多个分支并行时给每个分支开一个 worktree"
-        actions={
-          <>
-            {devReady && (profile.userName || profile.userEmail) && (
-              <ActionButton size="sm" variant="ghost" onPress={saveIdentity}>
-                写入提交身份
-              </ActionButton>
-            )}
-            <RefreshButton onPress={reloadAll} />
-          </>
-        }
-      >
-        {repo.loading && !repo.status ? (
-          <p role="status" className="py-6 text-sm text-muted">正在读取开发仓库和分支…</p>
-        ) : !devReady ? (
-          <Empty>先克隆开发仓库。</Empty>
-        ) : (
-          <>
-            {/* 每个卡住的工作树一条横幅，含 linked worktree：
-                重启应用后也能找到它们，不依赖上一次操作的返回值 */}
-            <InProgressBanners
-              status={repo.status}
-              onDone={(o) => {
-                if (o) setOpRes(o);
-                reloadAll();
-              }}
-            />
-            <div className="flex flex-wrap items-end gap-3">
-              <TextInput
-                label="新分支"
-                value={newBranch}
-                onChange={setNewBranch}
-                mono
-                className="max-w-sm min-w-56 flex-1"
-              />
-              <BaseSelect
-                label="基于"
-                value={newBase}
-                options={candidates}
-                mainline={base}
-                onChange={setNewBasePicked}
-              />
-              <ActionButton variant="secondary" onPress={createBranch} isDisabled={!canCreate}>
-                {asWorktree ? "新建 worktree" : "新建并切换"}
-              </ActionButton>
-            </div>
-            <Check checked={asWorktree} onChange={setAsWorktree}>
-              创建为独立 worktree（分支有自己的目录，可以和其他分支同时开着）
-            </Check>
-            {asWorktree && (
-              <div className="flex flex-wrap items-end gap-3">
-                <TextInput
-                  label="worktree 目录"
-                  value={worktreePath}
-                  onChange={setWorktreePath}
-                  mono
-                  className="max-w-lg min-w-64 flex-1"
-                />
-                <ActionButton size="sm" variant="outline" onPress={browseWorktree}>
-                  浏览…
-                </ActionButton>
-              </div>
-            )}
-            <p className="-mt-2 text-xs text-muted">feature/、bugfix/ 基于主线；hotfix/ 基于发布分支</p>
-            {newBranchWarning && <Notice tone="warning" title={`新分支：${newBranchWarning}`} />}
-            <BranchTable
-              branches={branches}
-              emptyText="还没有开发分支（主线和发布分支不在这里列出）"
-              selected={selected}
-              onSelect={setSelected}
-              multi={mode === "bundle"}
-              onRebase={(b) => setRebaseTarget({ name: b.name, onto: b.base })}
-              repoPath={devDir}
-              onDeleted={reloadAll}
-            />
-            <DetachedWorktreesNotice status={repo.status} />
-            <DirtyTreesNotice status={repo.status} suffix="回传只包含已提交的内容。" />
-            {opRes && <OutcomeView outcome={opRes} />}
-            {selected.length > 0 && <WorkflowJump step={4}>回传所选分支</WorkflowJump>}
-          </>
-        )}
-      </StepCard>
-
-      <StepCard step={4} label="Return" title="回传到内网" description="只打包内网还没有的提交（--not --remotes=origin）">
-        <WorkflowJump step={3}>选择开发分支</WorkflowJump>
-        <div className="flex flex-wrap items-center gap-3">
-          <ToggleButtonGroup
-            aria-label="回传方式"
-            selectionMode="single"
-            disallowEmptySelection
-            selectedKeys={new Set<Key>([mode])}
-            onSelectionChange={onModeChange}
-          >
-            <ToggleButton id="bundle">Bundle · 保留提交哈希</ToggleButton>
-            <ToggleButton id="patch">
-              <ToggleButtonGroup.Separator />
-              Patch · 逐个审阅
-            </ToggleButton>
-          </ToggleButtonGroup>
-          <span className="flex-1" />
-          <span role="status" className="min-w-0 break-all text-sm text-muted">
-            {selected.length ? `已选：${selected.join("、")}` : "尚未选择开发分支"}
-          </span>
-          <ActionButton
-            variant="primary"
-            onPress={doExport}
-            isDisabled={!devReady || selected.length === 0 || (mode === "patch" && selected.length !== 1)}
-          >
-            导出到 U 盘 →
-          </ActionButton>
+          </ListBox></Select.Popover>
+        </Select>
+      </Fold>
+      <Fold className="sync-details" title={"开发仓库管理"}>
+        {devRepos.map((path) => {
+          const status = current?.devs.find((d) => d.path === path);
+          const labels = { upToDate: "已同步", needsFetch: "待同步", notCloned: "尚未克隆", unknown: "状态未知" };
+          return <div key={path} className="sync-branch-row"><div className="sync-branch-copy"><Code>{path}</Code>
+            <small>{status ? labels[status.status] : "状态未知"}{path === devDir ? " · 当前仓库" : ""}</small>
+            {status?.error && <p role="alert" className="text-danger">{status.error}</p>}</div>
+            <div className="sync-button-group">
+            {path !== devDir && <ActionButton size="sm" variant="secondary" onPress={() => setDevPicked(path)}>切换</ActionButton>}
+            <ActionButton size="sm" variant="outline" onPress={() => sync(null, [path])}
+              isDisabled={!ready || !mirrorReady || needsFull}>{status?.status === "notCloned" ? "从镜像克隆" : "同步仓库"}</ActionButton>
+            </div></div>;
+        })}
+      </Fold>
+      {result?.key === refreshKey && <div className="sync-result" role="status">{result.text}</div>}
+    </Tabs.Panel>
+    <Tabs.Panel className="sync-panel" id="return" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
+      <InProgressBanners status={repo.status} onDone={(outcome) => {
+        if (outcome) setOpRes(outcome);
+        void reloadAll();
+      }} />
+      <DirtyTreesNotice status={repo.status} suffix="回传只包含已提交的内容。" />
+      {!devReady ? <p>{repo.loading ? "正在读取开发分支…" : "请先在同步更新页准备开发仓库。"}</p>
+        : <ReturnBranches branches={branches} selected={selectedBranches} onSelect={setSelected} single={mode === "patch"} isDisabled={!!busy} />}
+      <div className="sync-action">
+        <ActionButton variant="primary" onPress={doExport}
+          isDisabled={!ready || !devReady || !mirrorReady || !selectedBranches.length || mode === "patch" && selectedBranches.length !== 1}>
+          导出回传
+        </ActionButton>
+      </div>
+      <Fold className="sync-details" title={<>格式：{mode === "bundle" ? "Bundle" : "Patch"}</>}>
+        <RadioGroup className="sync-format-options" orientation="horizontal" aria-label="回传格式" value={mode} isDisabled={!!busy}
+          onChange={(value) => {
+            setMode(value as "bundle" | "patch");
+            if (value === "patch") setSelected((previous) => previous.slice(0, 1));
+          }}>
+        {(["bundle", "patch"] as const).map((value) => <Radio key={value} value={value}>
+          <Radio.Content><Radio.Control><Radio.Indicator /></Radio.Control>
+          {value === "bundle" ? "Bundle" : "Patch（单分支）"}
+          </Radio.Content></Radio>)}
+        </RadioGroup>
+      </Fold>
+      <Fold className="sync-details" title={"分支管理"}>
+        <div className="sync-branch-form">
+        <p>当前仓库：<Code>{devDir || "未配置"}</Code></p>
+        <TextInput label="新分支" value={newBranch} onChange={setNewBranch} mono />
+        <BaseSelect label="基于" value={newBase} options={candidates} mainline={base} onChange={setNewBasePicked} />
+        <Check checked={asWorktree} onChange={setAsWorktree}>创建为独立 worktree</Check>
+        {asWorktree && <><TextInput label="worktree 目录" value={worktreePath} onChange={setWorktreePath} mono />
+          <ActionButton variant="outline" onPress={async () => {
+            const isCurrent = beginAction();
+            const path = await open({ directory: true, multiple: false });
+            if (typeof path === "string" && isCurrent()) setWorktreePath(path);
+          }}>浏览目录</ActionButton></>}
+        {newBranchWarning && <Notice tone="warning" title={newBranchWarning} />}
+        <div className="sync-button-group">
+        <ActionButton variant="secondary" onPress={createBranch} isDisabled={!canCreate}>{asWorktree ? "新建 worktree" : "新建并切换"}</ActionButton>
+        {(profile.userName || profile.userEmail) && <ActionButton variant="ghost" onPress={saveIdentity} isDisabled={!devReady}>写入提交身份</ActionButton>}
         </div>
-        {exportRes?.status === "exported" && (
-          <Notice
-            tone="success"
-            title={
-              <span className="inline-flex items-center gap-2">
-                已生成 <KindChip kind={exportRes.kind} /> #{exportRes.seq}
-              </span>
-            }
-          >
-            <span className="font-mono text-xs break-all">{exportRes.payload}</span>
-            {exportRes.warnings.map((w) => (
-              <span key={w} className="block">
-                提示：{w}
-              </span>
-            ))}
-          </Notice>
-        )}
-        {exportRes?.status === "nothingToSync" && <Notice tone="accent" title={exportRes.message} />}
-      </StepCard>
-    </Workflow>
-  );
+        <BranchTable branches={branches} selected={selectedBranches}
+          onSelect={(names) => setSelected(mode === "patch" ? names.slice(0, 1) : names)}
+          multi={mode === "bundle"} onRebase={(b) => setRebaseTarget({ name: b.name, onto: b.base })}
+          repoPath={devDir} onDeleted={reloadAll} />
+        <DetachedWorktreesNotice status={repo.status} />
+        </div>
+      </Fold>
+      {opRes && <div className="sync-result"><OutcomeView outcome={opRes} /></div>}
+      {exportRes && <div className="sync-result" role="status">{exportRes.status === "exported"
+        ? <><p>已生成回传 #{exportRes.seq}</p><Fold className="sync-details" title={"查看文件"}><Code>{exportRes.payload}</Code></Fold>{exportRes.warnings.map((w) => <p key={w}>{w}</p>)}</>
+        : exportRes.message}</div>}
+    </Tabs.Panel>
+    </Tabs>
+    <AlertDialog.Backdrop isOpen={!!rebaseTarget} onOpenChange={(value) => { if (!value && !busy) setRebaseTarget(null); }}>
+      <AlertDialog.Container><AlertDialog.Dialog>
+        <AlertDialog.Header><AlertDialog.Heading>Rebase 分支</AlertDialog.Heading></AlertDialog.Header>
+        <AlertDialog.Body><p>分支：<Code>{rebaseTarget?.name}</Code></p>
+          <BaseSelect label="Rebase 到" value={rebaseTarget?.onto ?? base} options={candidates} mainline={base}
+            onChange={(onto) => setRebaseTarget((target) => target ? { ...target, onto } : null)} />
+          {rebaseWarning && <Notice tone="warning" title={rebaseWarning} />}
+        </AlertDialog.Body>
+        <AlertDialog.Footer><ActionButton variant="tertiary" onPress={() => setRebaseTarget(null)}>取消</ActionButton>
+          <ActionButton variant="primary" onPress={rebase} isDisabled={!rebaseInfo || !devReady}>Rebase 到 origin/{rebaseTarget?.onto}</ActionButton>
+        </AlertDialog.Footer>
+      </AlertDialog.Dialog></AlertDialog.Container>
+    </AlertDialog.Backdrop>
+  </>;
 }

@@ -228,7 +228,27 @@ fn finish_export(state_dir: &Path, journal: ExportJournal) -> Result<ExportOutco
         return invalid("待恢复的导出内容丢失，请保留导出日志并检查传输目录");
     }
     let mpath = journal.manifest.write_for(&journal.destination)?;
-    repo::save_state(state_dir, &journal.state)?;
+    // A return export owns only backSeq. Older journals also contain a full
+    // MirrorState snapshot: never restore its stale import cursor.
+    match journal.manifest.kind {
+        BundleKind::Back | BundleKind::Patch => {
+            let mut current: MirrorState = repo::load_state(state_dir)?;
+            let target = journal.manifest.seq;
+            if current.back_seq != target && current.back_seq != target - 1 {
+                return invalid("回传导出恢复冲突：当前 backSeq 与预期旧值/目标值不一致");
+            }
+            current.back_seq = target;
+            repo::save_state(state_dir, &current)?;
+        }
+        _ => {
+            let current: InternalState = repo::load_state(state_dir)?;
+            let target = journal.manifest.seq;
+            if current.out_seq != target && current.out_seq != target - 1 {
+                return invalid("导出恢复冲突：当前 outSeq 与预期旧值/目标值不一致");
+            }
+            repo::save_state(state_dir, &journal.state)?;
+        }
+    }
     fs::remove_file(&marker)?;
     fs::remove_file(export_journal(state_dir))?;
     let _ = fs::remove_dir_all(&journal.staging);
@@ -410,6 +430,9 @@ struct RebaseJournal {
     target: String,
     #[serde(default)]
     completed: bool,
+    /// Freeze the completed commit so a marker-write retry cannot mark later edits ready.
+    #[serde(default)]
+    completed_head: Option<String>,
 }
 
 fn rebase_journal(git_dir: &Path) -> PathBuf {
@@ -434,9 +457,22 @@ fn clear_rebase_journal(git_dir: &Path) -> Result<()> {
 
 fn finish_rebase(g: &Git, work: &Path, gd: &Path) -> Result<()> {
     if let Some(mut journal) = read_rebase_journal(gd)? {
+        if journal.completed_head.is_none() {
+            journal.completed_head = Some(repo::rev_parse(
+                g,
+                work,
+                &format!("refs/heads/{}", journal.branch),
+            )?);
+        }
         journal.completed = true;
         atomic_write(&rebase_journal(gd), &serde_json::to_vec(&journal)?)?;
         repo::set_sync_base(g, work, &journal.branch, &journal.new_base)?;
+        super::review::mark_review_ready(
+            g,
+            work,
+            &journal.branch,
+            journal.completed_head.as_deref().unwrap(),
+        )?;
         clear_rebase_journal(gd)?;
     }
     Ok(())
@@ -444,7 +480,8 @@ fn finish_rebase(g: &Git, work: &Path, gd: &Path) -> Result<()> {
 
 /// Recover a process interrupted after Git finished but before config/journal
 /// commit. An aborted/never-started operation retains its original (possibly unset) base.
-fn recover_rebase(g: &Git, work: &Path, gd: &Path) -> Result<()> {
+/// Caller holds the worktree operation lock.
+pub(super) fn recover_rebase(g: &Git, work: &Path, gd: &Path) -> Result<()> {
     if repo::in_progress(gd).is_some() {
         return Ok(());
     }
@@ -724,7 +761,7 @@ fn parse_list_heads(out: &str) -> Vec<(String, String)> {
 
 /// Load objects without touching any refs. Even a damaged snapshot must never
 /// partially fetch heads/tags before its deletion instructions have been checked.
-fn unpack_snapshot(
+pub(crate) fn unpack_snapshot(
     g: &Git,
     work: &Path,
     bundle: &Path,
@@ -1092,6 +1129,7 @@ pub fn rebase_onto(
         old_head: repo::rev_parse(g, &work, "HEAD")?,
         target: repo::rev_parse(g, repo, &target)?,
         completed: false,
+        completed_head: None,
     };
     atomic_write(&rebase_journal(&gd), &serde_json::to_vec(&journal)?)?;
     let a = match &old {
@@ -1191,17 +1229,8 @@ pub fn push_branch(
     branch: &str,
     force_with_lease: bool,
 ) -> Result<OpOutcome> {
-    if repo::is_bare(g, work)? || repo::is_mirror(g, work) {
-        return invalid("禁止在镜像仓库中推送：会覆盖或删除远程分支。请在工作仓库中推送");
-    }
-    let mut a = args!["push", "-u"];
-    if force_with_lease {
-        a.push("--force-with-lease".into());
-    }
-    a.push("origin".into());
-    a.push(format!("refs/heads/{branch}:refs/heads/{branch}").into());
-    g.run(work, a)?;
-    Ok(OpOutcome::done(format!("已推送 {branch}")))
+    let plan = super::review::prepare_push(g, work, branch, force_with_lease)?;
+    super::review::execute_push(g, &plan.plan_id)
 }
 
 // ======================================================================
@@ -1234,6 +1263,9 @@ pub fn import_in(
     allow_gap: bool,
 ) -> Result<ImportInResult> {
     let _lock = OperationLock::acquire(mirror_dir)?;
+    // Resolve shared state before reading the import cursor. If the transfer
+    // medium is unavailable recovery fails explicitly and import does not start.
+    recover_export(mirror_dir)?;
     let manifest = Manifest::read_for(bundle)?;
     if let Some(m) = &manifest {
         if matches!(m.kind, BundleKind::Back | BundleKind::Patch) {
@@ -1418,37 +1450,156 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// 先确认 `origin` 真的指向本工具的镜像再动手：这一步带 `--prune --prune-tags`，
 /// 万一配置里的开发仓库路径填错、落到某个无关仓库上，会删掉那个仓库的本地 tag。
 pub fn sync_dev_repo(g: &Git, dev_dir: &Path, mirror_dir: &Path) -> Result<()> {
-    let origin = g
-        .exec(
-            Some(dev_dir),
-            &args!["config", "--get", "remote.origin.url"],
-            None,
-            false,
-        )
-        .ok()
-        .filter(|o| o.ok())
-        .map(|o| o.stdout.trim().to_string())
-        .unwrap_or_default();
-    if origin.is_empty() {
-        return invalid(format!(
-            "{} 没有配置 origin，不是从镜像克隆出来的",
-            dev_dir.display()
-        ));
-    }
-    if !same_dir(Path::new(&origin), mirror_dir) {
-        return invalid(format!(
-            "{} 的 origin 指向 {}，不是外网镜像 {}。\
-             请检查配置里的开发仓库目录，或用「从镜像克隆」重新建一个",
-            dev_dir.display(),
-            origin,
-            mirror_dir.display()
-        ));
-    }
+    validate_dev_origin(g, dev_dir, mirror_dir)?;
     g.run(
         dev_dir,
-        args!["fetch", "origin", "--prune", "--prune-tags", "--tags"],
+        args![
+            "fetch",
+            "--no-tags",
+            "--prune",
+            "origin",
+            "+refs/heads/*:refs/remotes/origin/*",
+            "refs/tags/*:refs/tags/*"
+        ],
     )?;
     Ok(())
+}
+
+/// Validate the resolved fetch URL, including relative local paths and insteadOf.
+fn validate_dev_origin(g: &Git, dev: &Path, mirror: &Path) -> Result<()> {
+    if !repo::is_ext_mirror(g, mirror) {
+        return invalid("所选目录不是外网镜像");
+    }
+    if repo::is_bare(g, dev)? {
+        return invalid("开发仓库不能是裸仓库");
+    }
+    let top = g.query(dev, args!["rev-parse", "--show-toplevel"])?;
+    if !same_dir(dev, Path::new(top.trim())) {
+        return invalid("开发目录必须是工作树根目录");
+    }
+    let urls = g.query(dev, args!["remote", "get-url", "--all", "origin"])?;
+    let urls: Vec<_> = urls.lines().collect();
+    if urls.len() != 1 {
+        return invalid("开发仓库 origin 必须只有一个镜像地址");
+    }
+    let raw = urls[0].strip_prefix("file://").unwrap_or(urls[0]);
+    let path = Path::new(raw);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        dev.join(path)
+    };
+    if !same_dir(&path, mirror) {
+        return invalid("开发仓库的实际 origin 未绑定所选镜像");
+    }
+    Ok(())
+}
+
+/// Only a missing directory or a readable, empty real directory can be cloned.
+fn can_clone_into(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e.into()),
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            invalid("开发目录不是安全的普通目录")
+        }
+        Ok(_) => Ok(fs::read_dir(path)?.next().transpose()?.is_none()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncedRepository {
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncUpdatesResult {
+    pub imported: Option<ImportInResult>,
+    pub repositories: Vec<SyncedRepository>,
+}
+
+pub fn sync_updates(
+    g: &Git,
+    mirror: &Path,
+    bundle: Option<&Path>,
+    dev_dirs: &[String],
+    name: &str,
+    email: &str,
+) -> Result<SyncUpdatesResult> {
+    g.check_cancelled()?;
+    let imported = bundle.map(|b| import_in(g, b, mirror, false)).transpose()?;
+    let mut repositories = Vec::new();
+    for path in dev_dirs {
+        g.check_cancelled()?;
+        let dev = Path::new(path);
+        let status = if can_clone_into(dev)? {
+            create_dev_repo(g, mirror, dev, name, email)?;
+            "cloned"
+        } else {
+            sync_dev_repo(g, dev, mirror)?;
+            "fetched"
+        };
+        repositories.push(SyncedRepository {
+            path: path.clone(),
+            status: status.into(),
+        });
+    }
+    Ok(SyncUpdatesResult {
+        imported,
+        repositories,
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevSyncStatus {
+    pub path: String,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+pub fn dev_sync_status(g: &Git, mirror: &Path, dev_dirs: &[String]) -> Vec<DevSyncStatus> {
+    dev_dirs
+        .iter()
+        .map(|path| {
+            let inspected = (|| -> Result<&str> {
+                if can_clone_into(Path::new(path))? {
+                    return Ok("notCloned");
+                }
+                let dev = Path::new(path);
+                validate_dev_origin(g, dev, mirror)?;
+                let wanted = mirror_refs(g, mirror)?;
+                let actual: BTreeMap<_, _> =
+                    repo::list_refs(g, dev, &["refs/remotes/origin", "refs/tags"])?
+                        .into_iter()
+                        .filter(|(name, _)| name != "refs/remotes/origin/HEAD")
+                        .map(|(name, oid)| {
+                            (name.replacen("refs/remotes/origin/", "refs/heads/", 1), oid)
+                        })
+                        .collect();
+                Ok(if actual == wanted {
+                    "upToDate"
+                } else {
+                    "needsFetch"
+                })
+            })();
+            match inspected {
+                Ok(status) => DevSyncStatus {
+                    path: path.clone(),
+                    status: status.into(),
+                    error: None,
+                },
+                Err(error) => DevSyncStatus {
+                    path: path.clone(),
+                    status: "unknown".into(),
+                    error: Some(super::git::redact(&error.to_string())),
+                },
+            }
+        })
+        .collect()
 }
 
 /// 新建开发分支。给了 `worktree_path` 就建成独立 worktree（多分支并行开发），

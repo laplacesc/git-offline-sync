@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 
 type Appearance = "light" | "dark";
 export type AppearancePreference = Appearance | "system";
@@ -24,9 +24,11 @@ export function useAppearance() {
     update();
     return () => media.removeEventListener("change", update);
   }, []);
-  useEffect(() => {
+  useLayoutEffect(() => {
     document.documentElement.dataset.theme = appearance;
-    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", appearance === "dark" ? "#1c1e22" : "#f4f5f7");
+    document.documentElement.style.colorScheme = appearance;
+    document.documentElement.style.backgroundColor = appearance === "dark" ? "#0b1322" : "#f8f4eb";
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", appearance === "dark" ? "#0b1322" : "#f8f4eb");
   }, [appearance]);
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, preference); } catch { /* Keep the current session usable. */ }

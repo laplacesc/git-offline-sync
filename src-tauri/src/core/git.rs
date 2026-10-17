@@ -302,6 +302,23 @@ impl<'a> Git<'a> {
         self
     }
 
+    /// 必要的结果核验独立于已经取消的操作，并使用有限超时。
+    pub fn verification(&self) -> Self {
+        Self {
+            bin: self.bin.clone(),
+            log: self.log,
+            control: None,
+            timeout: Duration::from_secs(30),
+        }
+    }
+
+    pub fn check_cancelled(&self) -> Result<()> {
+        if self.control.as_ref().is_some_and(|c| c.is_cancelled()) {
+            return Err(SyncError::Cancelled);
+        }
+        Ok(())
+    }
+
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
