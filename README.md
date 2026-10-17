@@ -194,7 +194,7 @@ cp /tmp/win-icons/icon.ico /tmp/win-icons/Square*Logo.png /tmp/win-icons/StoreLo
 rm -rf src-tauri/icons/android src-tauri/icons/ios
 ```
 
-界面里的 logo（`ui.tsx` 中的 `AppGlyph`）和图标用的是同一个图形。
+界面里的 logo（`ui.tsx` 中的 `AppGlyph`）和打包图标使用同一组路径、圆点及图形比例。界面 logo 与打包图标统一采用白底（`#fff`）、黑色符号（`#000`），不随深浅主题改变；macOS 保留平台留边与投影，Windows 使用紧凑留边。
 
 同步状态保存位置：
 - 内网：`<内网镜像仓库>/offline-sync/state.json`

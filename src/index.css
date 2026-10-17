@@ -491,7 +491,7 @@
 
 
 /* Task hierarchy and dense desktop collections. */
-.brand-mark { width: 32px; height: 32px; border-radius: 9px; background: var(--primary); color: var(--primary-fg); }
+.brand-mark { width: 32px; height: 32px; border-radius: 8px; background: #fff; color: #000; }
 .brand-copy { display: grid; gap: 3px; }
 .brand-copy strong { font-size: 14px; font-weight: 600; }
 .brand-copy small { font-size: 11px; color: var(--muted); font-weight: 400; }
@@ -584,10 +584,9 @@
   flex-shrink: 0; padding: 14px 28px; border-bottom: 1px solid var(--border); user-select: none;
 }
 .compact-toolbar > * { min-width: 0; }
-.compact-toolbar .brand-mark { flex-shrink: 0; background: var(--bg-muted); color: var(--fg); border: 1px solid var(--border); }
+.compact-toolbar .brand-mark { flex-shrink: 0; border: 0; }
 .compact-brand { display: flex; gap: 10px; align-items: center; flex-shrink: 0; font-size: 15px; font-weight: 600; }
-.compact-brand .brand-mark { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; background: #302b42; color: #fff; border-radius: 8px; }
-:root[data-theme="dark"] .compact-brand .brand-mark { background: rgba(255, 255, 255, .08); color: var(--fg); border-radius: 16px; }
+.compact-brand .brand-mark { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; background: #fff; color: #000; border-radius: 8px; }
 .compact-toolbar-actions { display: flex; flex: 1; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; margin-left: auto; }
 .compact-toolbar-actions > .button:not(.compact-project) { flex-shrink: 0; }
 .compact-project { flex: 0 1 auto; min-width: 0; max-width: 280px; margin-left: auto; }

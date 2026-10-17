@@ -31,7 +31,7 @@
   --red: #a33838;
   --red-bg: rgba(163, 56, 56, .05);
   --red-line: rgba(163, 56, 56, .17);
-  --logo-bg: #302b42;
+  --logo-bg: #fff;
   --app-shadow: rgba(54, 44, 33, .12);
   --dialog-shadow: rgba(54, 44, 33, .18);
   --toast-shadow: rgba(54, 44, 33, .12);
@@ -74,7 +74,7 @@
   --red: rgba(255, 255, 255, .94);
   --red-bg: rgba(255, 255, 255, .05);
   --red-line: rgba(255, 255, 255, .30);
-  --logo-bg: rgba(255, 255, 255, .08);
+  --logo-bg: #fff;
   --app-shadow: rgba(3, 7, 18, .50);
   --dialog-shadow: rgba(3, 7, 18, .55);
   --toast-shadow: rgba(3, 7, 18, .45);
@@ -101,7 +101,7 @@ code, .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12p
 .skip:focus { top: 10px; }
 .app { max-width: 1000px; margin: 72px auto 0; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 34px var(--app-shadow); }
 .header { display: flex; align-items: center; gap: 12px; min-height: 76px; padding: 0 28px; border-bottom: 1px solid var(--line); }
-.logo { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; background: var(--logo-bg); color: var(--on-primary); border-radius: 8px; }
+.logo { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; background: var(--logo-bg); color: #000; border-radius: 8px; }
 .logo svg { display: block; width: 22px; height: 22px; }
 .app-name { font-weight: 650; font-size: 15px; white-space: nowrap; }
 .header-actions { display: flex; gap: 16px; margin-left: auto; align-items: center; min-width: 0; }
@@ -245,7 +245,6 @@ dialog::backdrop { background: var(--backdrop); }
 :root[data-theme="dark"] .app::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: url("./noise.svg"); opacity: .025; pointer-events: none; }
 :root[data-theme="dark"] .app { transition: border-color 500ms cubic-bezier(.16, 1, .3, 1), box-shadow 500ms cubic-bezier(.16, 1, .3, 1); }
 :root[data-theme="dark"] .app:hover { border-color: rgba(255, 255, 255, .30); box-shadow: 0 24px 64px rgba(3, 7, 18, .60), inset 0 1px 0 rgba(255, 255, 255, .28), inset 0 -1px 0 rgba(2, 6, 16, .35); }
-:root[data-theme="dark"] .logo { color: var(--text); border: 1px solid var(--line); border-radius: 16px; }
 :root[data-theme="dark"] .file-icon { border-radius: 16px; }
 :root[data-theme="dark"] .appearance-menu,
 :root[data-theme="dark"] .toast,
