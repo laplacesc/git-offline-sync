@@ -196,9 +196,9 @@ describe.each(["external", "internal"] as const)("%s 组合刷新", (role) => {
     else fireEvent.click(screen.getByRole("button", { name: "包详情与其他更新包", exact: true }));
     fireEvent.click(screen.getAllByRole("button", { name: "刷新" })[0]);
     await act(async () => latest.resolve([pkg("new.bundle", role === "internal" ? "back" : "full")]));
-    expect(await screen.findByText("new.bundle")).toBeTruthy();
+    expect(await screen.findAllByText("new.bundle")).not.toHaveLength(0);
     await act(async () => { old.resolve([pkg("old.bundle", role === "internal" ? "back" : "full")]); oldState.resolve({ ...stateValue, lastInSeq: 1, outSeq: 1 }); });
-    expect(screen.getByText("new.bundle")).toBeTruthy();
+    expect(screen.getAllByText("new.bundle")).not.toHaveLength(0);
     expect(screen.queryByText("old.bundle")).toBeNull();
     if (role === "external") expect(screen.getByText("本次更新 #10 · 全量")).toBeTruthy();
     else {
@@ -216,10 +216,10 @@ describe.each(["external", "internal"] as const)("%s 组合刷新", (role) => {
     else fireEvent.click(screen.getByRole("button", { name: "包详情与其他更新包", exact: true }));
     const updated = { ...profile, transferDir: "/new-usb" };
     rerender(<RunnerProvider>{role === "external" ? <ExternalView profile={updated} /> : <InternalView profile={updated} />}</RunnerProvider>);
-    expect(await screen.findByText("new-dir.bundle")).toBeTruthy();
+    expect(await screen.findAllByText("new-dir.bundle")).not.toHaveLength(0);
     await act(async () => old.reject(new Error("old USB removed")));
     expect(screen.queryByText("old USB removed")).toBeNull();
-    expect(screen.getByText("new-dir.bundle")).toBeTruthy();
+    expect(screen.getAllByText("new-dir.bundle")).not.toHaveLength(0);
   });
 });
 

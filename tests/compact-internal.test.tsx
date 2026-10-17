@@ -153,19 +153,19 @@ describe("内网双页签工作流", () => {
     expect(vi.mocked(invoke).mock.calls.some(([command]) => ["import_back", "rebase_onto", "execute_push"].includes(command))).toBe(false);
   });
 
-  it("已接收包默认收起，展开后可以继续整理", async () => {
+  it("已接收包默认不占列表，可切换查看并继续整理", async () => {
     vi.spyOn(api, "listReturnPackages").mockResolvedValue([returnPackage(true)]);
     render(view());
     openReturns();
     const management = screen.getByRole("button", { name: "其他回传与分支管理", exact: true });
     expect(management.getAttribute("aria-expanded")).toBe("false");
     expect(screen.getByRole("tab", { name: "导入回传" }).textContent).toBe("导入回传");
-    fireEvent.click(management);
-    const received = await screen.findByRole("button", { name: "已接收的包（1）" });
-    expect(received.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(received);
-    expect(received.getAttribute("aria-expanded")).toBe("true");
-    expect(within(received.closest(".disclosure") as HTMLElement).getByRole("button", { name: "继续整理" })).toBeTruthy();
+    expect(await screen.findByText("没有待接收的包。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "继续整理" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "查看已接收的包" }));
+    expect(await screen.findByRole("listbox", { name: "回传包列表" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "继续整理" })).toBeTruthy();
+    expect(management.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("已核实推送的当前提交不会再次列为待推送事项", async () => {
@@ -178,6 +178,26 @@ describe("内网双页签工作流", () => {
     openReturns();
     expect(await screen.findByText("没有待处理的回传。")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "检查并推送" })).toBeNull();
+  });
+
+  it.each(["missing", "foreign"])("选中的 %s 包不能导入，换到有效包才允许操作", async (problem) => {
+    const valid = { ...returnPackage(), payloadPath: "/usb/valid.bundle" };
+    const blocked = { ...returnPackage(), payloadPath: "/usb/blocked.bundle", payloadExists: problem !== "missing",
+      manifest: { ...returnPackage().manifest!, seq: 4, repoId: problem === "foreign" ? "other-project" : "project-id" } };
+    vi.spyOn(api, "listReturnPackages").mockResolvedValue([valid, blocked]);
+    const imported = vi.spyOn(api, "importReturn").mockResolvedValue({ branches: [], outcomes: [], warnings: [] });
+    render(view());
+    openReturns();
+    const button = await screen.findByRole<HTMLButtonElement>("button", { name: "导入回传" });
+    expect(button.disabled).toBe(true);
+    expect(screen.getByText(problem === "missing" ? "包文件缺失，请重新复制。" : "包属于其他项目。")).toBeTruthy();
+    fireEvent.click(button);
+    expect(imported).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("option", { name: /valid.bundle/ }));
+    const validButton = screen.getByRole<HTMLButtonElement>("button", { name: "导入回传" });
+    await waitFor(() => expect(validButton.disabled).toBe(false));
+    fireEvent.click(validButton);
+    await waitFor(() => expect(imported).toHaveBeenCalledExactlyOnceWith("/work", "/usb/valid.bundle", "main", ["release/1.0"]));
   });
 
   it("空仓库没有可推送分支，缺失工作仓库时不能接收回传", async () => {

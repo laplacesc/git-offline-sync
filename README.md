@@ -177,6 +177,8 @@ src/                    React 界面（全部使用 HeroUI v3 组件）
 
 - 组件统一使用 HeroUI v3（`@heroui/react`，基于 React Aria，需要 Tailwind CSS v4）。页面只使用 `ui.tsx` 里的组合组件或 HeroUI 原生组件，不写一次性样式。
 - 界面以 [精简同步设计](design-system/core-workbench/DESIGN.md)为准：内网“导出更新 / 导入回传”，外网“同步更新 / 回传提交”。项目通过顶栏切换，配置放在弹窗中，选项、管理和日志默认收起。页签支持方向键及 Home/End。
+- 内网回传包采用固定高度的分页列表，每页 20 项，可搜索文件名、分支和序号，并筛选待接收 / 已接收 / 全部。选中包后显示详情与单一导入入口，待检查分支单独滚动。
+- 首次启动采用最小尺寸 900×600；关闭前保存窗口状态，再次启动优先恢复用户大小、位置及最大化/全屏状态，只有真正超出显示器可用区域才缩小适配。
 - 顶栏外观菜单提供浅色、深色和跟随系统。默认跟随系统，偏好保存在 `localStorage.app-shell-theme`；加载样式前恢复，不写入同步配置。
 - 浅色使用真实 WebGL fbm 渐变、明亮内容面板和紫罗兰主操作；深色采用无色毛玻璃、深墨柔光与香槟金主操作。正文为系统字体，等宽字体随包分发，无需联网。
 - 着色器限制像素比与绘制频率，隐藏或离屏时暂停；减少动态效果时显示静帧，WebGL 不可用时显示 CSS 静态渐变。浅色控件不做位移或阴影动画，深色采用 500ms 过渡。
@@ -194,7 +196,7 @@ cp /tmp/win-icons/icon.ico /tmp/win-icons/Square*Logo.png /tmp/win-icons/StoreLo
 rm -rf src-tauri/icons/android src-tauri/icons/ios
 ```
 
-界面里的 logo（`ui.tsx` 中的 `AppGlyph`）和打包图标使用同一组路径、圆点及图形比例。界面 logo 与打包图标统一采用白底（`#fff`）、黑色符号（`#000`），不随深浅主题改变；macOS 保留平台留边与投影，Windows 使用紧凑留边。
+界面里的 logo（`ui.tsx` 中的 `AppGlyph`）和打包图标使用同一组路径、圆点及图形比例。界面 logo 与打包图标统一采用白底（`#fff`）、黑色符号（`#000`），不随深浅主题改变；macOS 保留平台留边与投影，Windows 使用紧凑留边。Windows 主程序通过 `bundle.icon` 引用 ICO；安装器和卸载器还必须分别配置 `bundle.windows.nsis.installerIcon` 与 `uninstallerIcon`，两者均指向 `icons/icon.ico`，否则 NSIS 会使用默认图标。
 
 同步状态保存位置：
 - 内网：`<内网镜像仓库>/offline-sync/state.json`

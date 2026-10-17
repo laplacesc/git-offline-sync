@@ -6,6 +6,7 @@ import { useRunner } from "./runner";
 import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus, useRequestGeneration } from "./repoBits";
 import { ActionButton, BaseSelect, Check, Code, Fold, CommitList, Empty, Notice, OutcomeView, RefreshButton, TextInput } from "./ui";
 import { Icon } from "./icons";
+import { ReturnPackageInbox } from "./ReturnPackageInbox";
 
 export function InternalView({ profile }: { profile: Profile }) {
   const { run, notify, confirm, busy } = useRunner();
@@ -31,7 +32,6 @@ export function InternalView({ profile }: { profile: Profile }) {
   const packageError = current?.packageError ?? null;
   const packages = (current?.packages ?? []).filter((p) => !p.manifest || p.manifest.kind === "back" || p.manifest.kind === "patch");
   const pending = packages.filter((p) => !p.received);
-  const received = packages.filter((p) => p.received);
   const mirrorReady = !!mirror.status?.isRepo;
   const workReady = !!work.status?.isRepo && !work.status.isBare;
   const branches = (work.status?.branches ?? []).filter((b) => !candidates.includes(b.name));
@@ -175,12 +175,15 @@ export function InternalView({ profile }: { profile: Profile }) {
     }
     await reloadAll();
   }
+  function packageIssue(pkg: ReturnPackageInfo) {
+    return !pkg.payloadExists ? "包文件缺失，请重新复制。"
+      : pkg.manifest && state?.repoId && pkg.manifest.repoId !== state.repoId ? "包属于其他项目。" : null;
+  }
   function packageRow(pkg: ReturnPackageInfo) {
     const manifest = pkg.manifest;
     const patch = manifest?.kind === "patch";
     const options = patchValues(pkg);
-    const reason = !pkg.payloadExists ? "包文件缺失，请重新复制。"
-      : manifest && state?.repoId && manifest.repoId !== state.repoId ? "包属于其他项目。" : null;
+    const reason = packageIssue(pkg);
     return <div className="sync-package" key={pkg.payloadPath}>
       <div className="sync-action">
         <span className="sync-action-icon" aria-hidden="true"><Icon name="branch" /></span>
@@ -188,7 +191,7 @@ export function InternalView({ profile }: { profile: Profile }) {
           <p className="text-sm text-muted break-all">{manifest?.refs.map((r) => r.name.replace(/^refs\/heads\//, "")).join("、") || pkg.payloadPath}</p>
           {reason && <p className="text-sm text-danger">{reason}</p>}
         </div>
-        <ActionButton variant={pkg.received ? "secondary" : "primary"} isDisabled={!workReady || !current || !!stateError || !!reason || unfinished}
+        <ActionButton variant={pkg.received ? "secondary" : "primary"} isDisabled={!workReady || work.loading || !current || !!stateError || !!reason || unfinished}
           onPress={() => patch ? receivePatch(pkg) : receive(pkg.payloadPath, !manifest)}>{pkg.received ? "继续整理" : "导入回传"}</ActionButton>
       </div>
       <Fold className="sync-details" title={patch ? "补丁选项" : "内容"}>
@@ -235,11 +238,12 @@ export function InternalView({ profile }: { profile: Profile }) {
       {work.error && <Notice tone="danger" title="读取工作仓库失败">{work.error}</Notice>}
       {!workReady && !work.loading && !work.error && <Notice tone="warning" title="请先在项目设置中填写已克隆的内网工作仓库。" />}
       <InProgressBanners status={work.status} onDone={(result) => { if (result) setOutcome(result); void reloadAll(); }} />
-      {!packageError && pending.map(packageRow)}
-      {!packageError && current && pending.length === 0 && pendingBranches.length === 0 && <Empty>没有待处理的回传。</Empty>}
+      {!packageError && current && packages.length > 0 && <ReturnPackageInbox key={refreshKey}
+        packages={packages} disabled={!!busy || work.loading} getIssue={packageIssue} renderDetails={packageRow} />}
+      {!packageError && current && packages.length === 0 && pendingBranches.length === 0 && <Empty>没有待处理的回传。</Empty>}
       {returnResult?.warnings.map((warning) => <Notice key={warning} tone="warning" title={warning} />)}
       {returnResult && pendingBranches.some((branch) => returnResult.branches.some((item) => item.local === branch.name)) && !returnResult.outcomes.some((o) => !o.ok) && <p className="sync-result" role="status">整理已完成，可以检查并推送。</p>}
-      {pendingBranches.length > 0 && <RadioGroup className="sync-branches" aria-label="可检查的分支"
+      {pendingBranches.length > 0 && <><h2 className="return-review-heading">待检查分支 <span>{pendingBranches.length}</span></h2><RadioGroup className="sync-branches" aria-label="可检查的分支"
         value={selected[0] ?? ""} onChange={(name) => setSelected([name])} isDisabled={!!busy}>
         {pendingBranches.map((branch) => <div className="sync-branch-row" key={branch.name}>
         <Radio className="sync-branch-choice" value={branch.name} aria-label={`选择 ${branchLabel(branch.name)}`}>
@@ -249,7 +253,7 @@ export function InternalView({ profile }: { profile: Profile }) {
         {branch.behind > 0 || (branch.name.startsWith("review/") && !branch.worktree)
           ? <ActionButton size="sm" variant="secondary" onPress={() => rebaseBranch(branch)} isDisabled={unfinished || work.loading}>继续整理</ActionButton>
           : <ActionButton size="sm" variant="primary" onPress={() => { setSelected([branch.name]); void push(branch); }} isDisabled={unfinished || work.loading || !workReady || !!stateError || (selected[0] === branch.name && changingBase)}>检查并推送</ActionButton>}
-      </div>)}</RadioGroup>}
+      </div>)}</RadioGroup></>}
       {selectedBranch && <Fold className="sync-details" title={"提交与分支选项"}><div className="space-y-4">
         <h3>{branchLabel(selectedBranch.name)}</h3>
         {visibleCommits?.error ? <Notice tone="danger" title="读取提交失败，请刷新">{visibleCommits.error}</Notice>
@@ -262,7 +266,6 @@ export function InternalView({ profile }: { profile: Profile }) {
       {outcome && (outcome.ok ? <p className="sync-result" role="status">{outcome.message}</p> : <OutcomeView outcome={outcome} />)}
       <Fold className="sync-details" title={"其他回传与分支管理"}><div className="space-y-4">
         <ActionButton size="sm" variant="secondary" onPress={browse} isDisabled={!workReady || !!stateError || unfinished}>选择其他文件…</ActionButton>
-        {received.length > 0 && <Fold title={<>已接收的包（{received.length}）</>}>{received.map(packageRow)}</Fold>}
         <DirtyTreesNotice status={work.status} suffix="回传在独立工作树中整理。" />
         <BranchTable branches={branches} selected={selected} onSelect={setSelected} repoPath={workDir} onDeleted={reloadAll}
           onRebase={(branch) => { setSelected([branch.name]); void rebaseBranch(branch); }} />
