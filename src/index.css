@@ -800,6 +800,11 @@
 .app-shell[data-platform="windows"] .compact-toolbar {
   position: relative; min-height: 52px; padding: 8px 150px 8px 20px;
 }
+.window-modal-drag { display: none; }
+:root:has(.modal__backdrop, .alert-dialog__backdrop) .window-modal-drag {
+  display: block; position: fixed; top: 0; left: 0; right: 138px; height: 52px;
+  z-index: calc(var(--z-index-overlay, 1000) + 1);
+}
 :root .window-controls {
   position: fixed; top: 0; right: 0; z-index: calc(var(--z-index-overlay, 1000) + 1); display: flex; width: 138px; height: 52px; gap: 0;
 }
