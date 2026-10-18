@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertDialog, Button, Card, Dropdown, Form, Link, Modal, Spinner, Toast } from "@heroui/react";
 import { api, AppConfig, Environment, newId, Profile, Role } from "./api";
-import { BackgroundScene } from "./BackgroundScene";
 import { ExternalView } from "./ExternalView";
 import { InternalView } from "./InternalView";
 import { LogPanel, useGitLog } from "./LogPanel";
@@ -12,7 +11,6 @@ import { AppGlyph, FormSection, Notice, PathInput, SectionLabel, TextInput } fro
 import { UpdatePanel } from "./UpdatePanel";
 import { startAutoCheck } from "./updater";
 import { useAppearance } from "./appearance";
-import { useInputModality } from "./motion";
 import "./index.css";
 
 const IS_MAC = navigator.userAgent.includes("Mac");
@@ -20,7 +18,6 @@ const IS_MAC = navigator.userAgent.includes("Mac");
 type Mode = { kind: "view" } | { kind: "edit"; profile: Profile; isNew: boolean } | { kind: "settings" };
 
 function Shell() {
-  useInputModality();
   const { preference, setPreference } = useAppearance();
   const appearanceLabel = preference === "system" ? "跟随系统" : preference === "light" ? "浅色" : "深色";
   const { busy, notify, confirm, operations, clearOperations } = useRunner();
@@ -121,7 +118,6 @@ function Shell() {
 
   return (
     <div className="app-shell compact-shell" data-platform={IS_MAC ? "mac" : "other"}>
-      <BackgroundScene />
       <Link href="#main-content" className="skip-link">跳到主要内容</Link>
       <main id="main-content" tabIndex={-1} className="compact-window">
         {IS_MAC && <div data-tauri-drag-region className="titlebar-drag" />}

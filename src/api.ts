@@ -376,13 +376,6 @@ export function newId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
-export const KIND_LABEL: Record<BundleKind, string> = {
-  full: "全量",
-  incr: "增量",
-  back: "回传",
-  patch: "补丁",
-};
-
 // ---------- 主线 / 发布分支 ----------
 
 export function releasesOf(p: Profile): string[] {

@@ -40,7 +40,7 @@ sequenceDiagram
 
 ## 核心逻辑设计
 
-[核心逻辑重新设计方案](docs/core-logic-redesign.md)描述目标业务模型和分阶段迁移计划。正式应用已采用 [UI 设计](design-system/core-workbench/DESIGN.md)中的单窗口、双页签与两种主题材质，并接入组合同步、回传审查和固定提交推送。实现范围及测试见 [验证记录](docs/implementation-verification.md)。[交互原型](design-system/core-workbench/index.html)仍可独立打开，使用模拟数据；format 2 等后续迁移目标尚未实施。
+[核心逻辑重新设计方案](docs/core-logic-redesign.md)描述目标业务模型和分阶段迁移计划。正式应用采用[界面规范](docs/ui-design.md)中的单窗口、双页签与 GitHub 风格深浅主题，并接入组合同步、回传审查和固定提交推送。实现范围及测试见[验证记录](docs/implementation-verification.md)。早期独立 HTML 原型已移除；format 2 等后续迁移目标尚未实施。
 
 ## 功能
 
@@ -111,6 +111,19 @@ fatal: couldn't find remote ref refs/heads/hotfix/628108
 
 把包导进一个已存在的旧仓库目录会被明确拒绝（“不是外网镜像”），不会把它改坏。
 
+### 内网通过 `\\tsclient` 导出时报文件锁 I/O 错误
+
+`\\tsclient\Projects\cloudtip.sync` 是远程桌面客户端重定向的目录。例如它实际对应外网 Mac 的 `~/Dev/Projects/cloudtip.sync`：Mac 上是本地路径，但内网 Windows 访问时经过远程桌面的文件系统接口。重定向服务可能不支持文件锁，也可能因连接或权限问题返回 I/O 错误；这不能直接认定为另一个同步实例占用。
+
+可采用本地导出再复制的方式：
+
+1. 将内网端的传输目录设为内网本地目录，例如 `C:\offline-sync\cloudtip`，镜像和工作仓库配置不变。
+2. 等待导出成功，将生成的 `.bundle` 和同名 `.manifest.json` 一起复制到 `\\tsclient\Projects\cloudtip.sync`。
+3. 外网端继续使用 Mac 本地路径 `~/Dev/Projects/cloudtip.sync` 导入。
+4. 外网生成回传后，将回传包与清单一起复制到内网本地传输目录，再在内网导入回传。
+
+不要通过删除锁文件或同步状态文件绕过该错误。若改为本地目录后仍提示恢复旧路径，应先核对镜像中的导出恢复记录，不要删除记录或重复分配包序号。
+
 ### macOS / Windows 上导入报 `cannot lock ref ... .lock': File exists`
 
 典型报错：
@@ -167,7 +180,6 @@ src-tauri/src/commands.rs  Tauri 命令（在后台线程执行，日志以 git-
 src-tauri/tests/e2e.rs     端到端测试：本地裸仓库模拟 GitLab，完整往返
 src/                    React 界面（全部使用 HeroUI v3 组件）
   index.css             主题材质、HeroUI 语义变量、单窗口双页签布局
-  BackgroundScene.tsx   装饰背景与 WebGL 渲染生命周期
   ui.tsx                基于 HeroUI 的表单、按钮、提示与提交列表
   runner.tsx            串行执行 + 操作记录 + 确认框
   motion.ts             键盘输入模式与折叠动效
@@ -176,12 +188,12 @@ src/                    React 界面（全部使用 HeroUI v3 组件）
 ### 界面约定
 
 - 组件统一使用 HeroUI v3（`@heroui/react`，基于 React Aria，需要 Tailwind CSS v4）。页面只使用 `ui.tsx` 里的组合组件或 HeroUI 原生组件，不写一次性样式。
-- 界面以 [精简同步设计](design-system/core-workbench/DESIGN.md)为准：内网“导出更新 / 导入回传”，外网“同步更新 / 回传提交”。项目通过顶栏切换，配置放在弹窗中，选项、管理和日志默认收起。页签支持方向键及 Home/End。
+- 界面以[界面规范](docs/ui-design.md)为准：内网“导出更新 / 导入回传”，外网“同步更新 / 回传提交”。项目通过顶栏切换，配置放在弹窗中，选项、管理和日志默认收起。页签支持方向键及 Home/End。
 - 内网回传包采用固定高度的分页列表，每页 20 项，可搜索文件名、分支和序号，并筛选待接收 / 已接收 / 全部。选中包后显示详情与单一导入入口，待检查分支单独滚动。
 - 首次启动采用最小尺寸 900×600；关闭前保存窗口状态，再次启动优先恢复用户大小、位置及最大化/全屏状态，只有真正超出显示器可用区域才缩小适配。
 - 顶栏外观菜单提供浅色、深色和跟随系统。默认跟随系统，偏好保存在 `localStorage.app-shell-theme`；加载样式前恢复，不写入同步配置。
-- 浅色使用真实 WebGL fbm 渐变、明亮内容面板和紫罗兰主操作；深色采用无色毛玻璃、深墨柔光与香槟金主操作。正文为系统字体，等宽字体随包分发，无需联网。
-- 着色器限制像素比与绘制频率，隐藏或离屏时暂停；减少动态效果时显示静帧，WebGL 不可用时显示 CSS 静态渐变。浅色控件不做位移或阴影动画，深色采用 500ms 过渡。
+- 深浅主题采用 GitHub 风格的纯色背景、灰色边框、蓝色链接/焦点和绿色主要操作。正文为系统字体，等宽字体随包分发，无需联网。
+- 不再使用 WebGL 背景、渐变、玻璃模糊和按钮缩放动效。
 - 外网一次操作完成导入与开发仓库更新；缺包不提供通用跳号开关，较新全量包跨序号时展示引用影响并确认。Bundle 回传一次操作完成接收和整理，推送保留一次确认。
 - “查看记录”展示界面操作和诊断日志，正常执行或错误都不会自动展开日志。冲突或结果未知的返回显示“需要处理”；“操作返回”不等于回滚或远程未生效。
 
