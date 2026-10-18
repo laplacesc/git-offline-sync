@@ -2,11 +2,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { api, type Profile } from "../src/api";
+import { StepCard, Workflow, WorkflowNav } from "../src/ui";
 import { useRunner } from "../src/runner";
 
 const operation = vi.hoisted(() => ({ run: vi.fn<() => Promise<void>>() }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
+vi.mock("../src/BackgroundScene", () => ({ BackgroundScene: () => null }));
 vi.mock("../src/ExternalView", () => ({ ExternalView: ({ profile }: { profile: Profile }) => {
   const { run } = useRunner();
   return <><p>外网工作区：{profile.name}</p><input aria-label="工作区输入" defaultValue="" />
@@ -108,6 +110,24 @@ it("首次使用可以选择内外网角色创建配置", async () => {
   fireEvent.click(screen.getByRole("button", { name: "新建内网端配置" }));
   await waitFor(() => expect((screen.getByRole("radio", { name: /内网端/ }) as HTMLInputElement).checked).toBe(true));
   expect(screen.getByRole("textbox", { name: "GitLab 仓库地址" })).toBeTruthy();
+});
+
+it("流程页签支持键盘切换，隐藏面板保留输入，导航关联正确", () => {
+  render(<Workflow><WorkflowNav steps={["导入内网包", "开发仓库"]} />
+    <StepCard step={1} label="Import" title="导入内网包"><input aria-label="包路径" defaultValue="/usb" /></StepCard>
+    <StepCard step={2} label="Sync" title="开发仓库">仓库内容</StepCard></Workflow>);
+  const tabs = screen.getAllByRole("tab");
+  fireEvent.change(screen.getByRole("textbox", { name: "包路径" }), { target: { value: "/changed" } });
+  act(() => tabs[0].focus());
+  fireEvent.keyDown(tabs[0], { key: "ArrowRight" });
+  expect(document.activeElement).toBe(tabs[1]);
+  expect(tabs[1].getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tabpanel").id).toBe(tabs[1].getAttribute("aria-controls"));
+  expect(screen.queryByRole("textbox", { name: "包路径" })).toBeNull();
+  fireEvent.keyDown(tabs[1], { key: "Home" });
+  expect((screen.getByRole("textbox", { name: "包路径" }) as HTMLInputElement).value).toBe("/changed");
+  fireEvent.click(tabs[1]);
+  expect(screen.getByRole("tabpanel").textContent).toContain("仓库内容");
 });
 
 it("设置不提供主题切换，保存 Git 路径后重新检测环境", async () => {

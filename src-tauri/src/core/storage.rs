@@ -1,6 +1,6 @@
 //! 小型状态文件的原子替换、备份和镜像级进程间互斥。
 
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -62,32 +62,6 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     })
 }
 
-fn lock_error(directory: &Path, error: TryLockError) -> SyncError {
-    match error {
-        TryLockError::WouldBlock => SyncError::Invalid(format!(
-            "目录正在被另一个同步实例使用：{}；请等待该操作结束后重试",
-            directory.display()
-        )),
-        TryLockError::Error(error) => {
-            let path = directory
-                .to_string_lossy()
-                .replace('/', "\\")
-                .to_ascii_lowercase();
-            let redirected =
-                path.starts_with(r"\\tsclient\") || path.starts_with(r"\\?\unc\tsclient\");
-            let hint = if redirected {
-                "；此路径是远程桌面重定向目录，需检查共享连接、权限和文件锁支持。可先导出到内网本地传输目录，再将生成的包及对应清单复制到共享目录"
-            } else {
-                "；请检查目录权限、存储连接和文件系统的文件锁支持"
-            };
-            SyncError::Invalid(format!(
-                "无法为目录建立文件锁 {}：{error}{hint}",
-                directory.display()
-            ))
-        }
-    }
-}
-
 /// 锁放在仓库的同级目录，避免首次 clone 时目标被锁文件变成非空。
 /// 锁文件保留，正常 drop 时显式解锁，异常退出时由操作系统释放。
 /// 不能删除后重建锁文件，否则会绕过活跃锁。
@@ -127,8 +101,12 @@ impl OperationLock {
             .create(true)
             .truncate(false)
             .open(parent.join(name))?;
-        file.try_lock()
-            .map_err(|error| lock_error(&directory, error))?;
+        file.try_lock().map_err(|e| {
+            SyncError::Invalid(format!(
+                "无法锁定仓库 {}，可能有另一个同步实例正在操作：{e}",
+                directory.display()
+            ))
+        })?;
         Ok(Self { file })
     }
 }
@@ -166,51 +144,6 @@ mod tests {
             read_json::<serde_json::Value>(&backup_path(&path)).unwrap()["seq"],
             1
         );
-    }
-
-    #[test]
-    fn lock_contention_is_reported_separately_from_io_errors() {
-        let directory = Path::new("transfer");
-        let busy = lock_error(directory, TryLockError::WouldBlock).to_string();
-        assert!(busy.contains("另一个同步实例"));
-        let unsupported = lock_error(
-            directory,
-            TryLockError::Error(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "file locking is not supported by this filesystem",
-            )),
-        )
-        .to_string();
-        assert!(unsupported.contains("file locking is not supported by this filesystem"));
-        assert!(!unsupported.contains("另一个同步实例"));
-        assert!(unsupported.contains("文件锁支持"));
-        assert!(!unsupported.contains("远程桌面"));
-    }
-
-    #[test]
-    fn redirected_drive_lock_errors_preserve_system_code_and_explain_local_export() {
-        for path in [
-            r"\\tsclient\Projects\cloudtip.sync",
-            r"\\?\UNC\TSCLIENT\Projects\cloudtip.sync",
-        ] {
-            let message = lock_error(
-                Path::new(path),
-                TryLockError::Error(std::io::Error::from_raw_os_error(50)),
-            )
-            .to_string();
-            assert!(message.contains(path));
-            assert!(message.contains("os error 50"));
-            assert!(message.contains("远程桌面重定向目录"));
-            assert!(message.contains("内网本地传输目录"));
-            assert!(message.contains("包及对应清单"));
-            assert!(!message.contains("另一个同步实例"));
-        }
-        let other_server = lock_error(
-            Path::new(r"\\tsclient-backup\Projects\cloudtip.sync"),
-            TryLockError::Error(std::io::Error::from_raw_os_error(50)),
-        )
-        .to_string();
-        assert!(!other_server.contains("远程桌面重定向目录"));
     }
 
     #[test]
