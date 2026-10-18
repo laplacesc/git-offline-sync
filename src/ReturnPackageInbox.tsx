@@ -37,7 +37,7 @@ export function ReturnPackageInbox({ packages, disabled, getIssue, renderDetails
     <div className="return-inbox-tools">
       <div className="return-inbox-heading"><h2>回传包</h2><span>{pendingCount} 个待接收 · {packages.length - pendingCount} 个已接收</span></div>
       <TextField value={query} onChange={(value) => { setQuery(value); setPage(0); setPicked(null); }} isDisabled={disabled}>
-        <Label className="sr-only">搜索回传包</Label><Input placeholder="搜索文件名、分支或序号" autoComplete="off" />
+        <Label className="sr-only">搜索回传包</Label><Input placeholder="搜索文件名、分支或序号" autoComplete="off" className="font-mono text-[13px]" />
       </TextField>
       <Select value={filter} isDisabled={disabled} onChange={(value) => {
         if (value === "pending" || value === "received" || value === "all") changeFilter(value);

@@ -198,9 +198,9 @@ export function InternalView({ profile }: { profile: Profile }) {
         <p className="text-xs break-all text-muted">{pkg.payloadPath}</p>
         {manifest && <p className="text-xs text-muted">{formatTime(manifest.createdAt)} · {manifest.refs.length} 个分支</p>}
         {patch && <div className="space-y-3 mt-3">
-          <TextInput label="应用到的新分支" value={options.branch} onChange={(branch) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, branch } }))} />
+          <TextInput label="应用到的新分支" value={options.branch} onChange={(branch) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, branch } }))} mono />
           <BaseSelect label="基准分支" value={options.base} options={candidates} mainline={base} onChange={(base) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, base } }))} />
-          <TextInput label="独立工作树目录" value={options.path} onChange={(path) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, path } }))} />
+          <TextInput label="独立工作树目录" value={options.path} onChange={(path) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, path } }))} mono />
         </div>}
       </Fold>
     </div>;

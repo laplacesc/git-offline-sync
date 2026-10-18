@@ -228,7 +228,7 @@ export function BranchTable({
   return (
     <div className="branch-table min-w-0 space-y-3">
       <div className="branch-table-tools">
-        <TextInput label="查找分支" value={query} onChange={setQuery} placeholder="输入分支名" className="min-w-0 flex-1 sm:max-w-sm" />
+        <TextInput label="查找分支" value={query} onChange={setQuery} placeholder="输入分支名" className="min-w-0 flex-1 sm:max-w-sm" mono />
         <span role="status" className="pb-3 text-sm text-muted">{visible.length} / {branches.length} 个分支 · 已选 {selected.length} 个</span>
         {query && <ActionButton variant="ghost" onPress={() => setQuery("")}>清除搜索</ActionButton>}
         {selected.length > 0 && <ActionButton variant="ghost" onPress={() => onSelect([])}>清空选择</ActionButton>}

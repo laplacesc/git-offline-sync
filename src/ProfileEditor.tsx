@@ -159,7 +159,7 @@ export function ProfileEditor({
 
         <FormSection title="基本信息" description="名称用于区分项目，包名前缀和基准分支需要在内外网保持一致。">
         <div className="form-fields">
-          <TextInput id="profile-name" error={errorFor("name")} label="名称" value={p.name} onChange={(v) => set("name", v)} placeholder="例如：订单服务" description="用于在顶部项目菜单中区分项目" />
+          <TextInput id="profile-name" error={errorFor("name")} label="名称" value={p.name} onChange={(v) => set("name", v)} placeholder="例如：订单服务" description="用于在顶部项目菜单中区分项目" mono />
           <TextInput
             id="profile-repoName" error={errorFor("repoName")} label="包名前缀"
             value={p.repoName}
@@ -258,8 +258,8 @@ export function ProfileEditor({
         </FormSection>
         {!internal && <FormSection title="提交身份" description="使用与内网账号一致的姓名和邮箱，确保回传提交的作者信息正确。">
           <div className="form-fields">
-            <TextInput label="提交用户名" value={p.userName ?? ""} onChange={(v) => set("userName", v)} description="与内网账号一致，推送后作者才正确" />
-            <TextInput label="提交邮箱" value={p.userEmail ?? ""} onChange={(v) => set("userEmail", v)} />
+            <TextInput label="提交用户名" value={p.userName ?? ""} onChange={(v) => set("userName", v)} description="与内网账号一致，推送后作者才正确" mono />
+            <TextInput label="提交邮箱" value={p.userEmail ?? ""} onChange={(v) => set("userEmail", v)} mono />
           </div>
         </FormSection>}
       </Card.Content>
