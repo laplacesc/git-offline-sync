@@ -18,11 +18,11 @@
 | 检查 | 结果 |
 |---|---|
 | `pnpm build` | TypeScript 与生产构建通过 |
-| `pnpm test` | 138 项前端测试、13 项发布脚本测试通过 |
-| `cargo test --manifest-path src-tauri/Cargo.toml`（分套件执行） | 44 项通过：19 单元、14 核心流程、10 端到端、1 版本 |
+| `pnpm test` | 145 项前端测试、13 项发布脚本测试通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml`（分套件执行） | 46 项通过：19 单元、14 核心流程、10 端到端、1 版本、2 窗口配置；文档测试通过 |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | 通过 |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` | 通过 |
-| `pnpm check:version v2.1.1` | package / Cargo / Tauri 均为 2.1.1 |
+| `pnpm check:version v2.1.3` | package / Cargo / Tauri 均为 2.1.3 |
 
 核心回归覆盖：确认后源提交或远程配置改变、普通推送预检后目标被删除、insteadOf/pushInsteadOf 重写、接收事务中断、回传重导、审查改基准后重导、冲突继续后的 ready 收尾、标记写入失败、取消后的远程核验、结果未知、开发仓库真实引用状态及旧导出恢复防倒退。
 
@@ -47,6 +47,15 @@
 - 自动测试覆盖分页、跨页搜索、状态筛选、接收后移除当前项、缺失或跨项目包不能导入，以及旧异步响应不能覆盖新目录。
 - 使用独立应用标识启动真实 Tauri 实例：无历史状态时测得内容区 900×600；通过原生窗口 API 调整为 1100×700、位置 (100, 50)，正常关闭后验证状态文件写入；再次启动恢复了完全相同的逻辑尺寸和位置。
 - 原生窗口验证通过窗口 API 自动执行，未把它当作人工鼠标拖拽验证。窗口几何单测还覆盖有效的 95% 屏幕尺寸、真正超屏、系统边框换算和异常零尺寸。
+
+## Windows 标题栏补充验证（v2.1.3）
+
+- 使用 Tauri 自动加载的 `tauri.windows.conf.json` 关闭 Windows 系统装饰，保留默认尺寸、最小尺寸、缩放、最大化、最小化、关闭及阴影；macOS 配置不变。配置测试防止平台数组替换造成几何参数遗漏。
+- 窗口按钮使用 HeroUI Button 和 Tauri Window API，权限仅授予 Windows 主窗口。关闭调用 `close()`，继续经过已有的 CloseRequested 和状态保存逻辑。
+- 自动测试覆盖命令分发、系统尺寸事件更新最大化状态、迟到查询、监听释放、操作失败反馈，以及应用弹窗中的按钮可访问性。
+- 隔离 Chromium 使用 Windows UA、模拟 IPC 与当前 Tauri crate 的拖动脚本，验证浅色/深色各 900×600、1280×800、560×700，共 6 个布局。按钮宽 46px、高 52px，与应用操作不重叠；拖动及双击最大化产生对应 IPC，按钮操作不触发拖动。
+- 设置弹窗内通过鼠标和空格键操作窗口按钮，确认按钮可见、可点击，关闭悬停为红色且无缩放/位移动画。切换 Mac UA 后，Windows 控件消失，36px 原生控制区保留。
+- 上述检查不等同于真实 Windows 窗口验收。边缘缩放、不同 DPI、系统拖动贴靠仍需实机复验；当前未适配最大化按钮悬停时的 Windows 11 原生贴靠布局菜单。
 
 ## 后续阶段
 

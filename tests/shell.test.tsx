@@ -6,6 +6,11 @@ import { StepCard, Workflow, WorkflowNav } from "../src/ui";
 import { useRunner } from "../src/runner";
 
 const operation = vi.hoisted(() => ({ run: vi.fn<() => Promise<void>>() }));
+const nativeWindow = vi.hoisted(() => ({
+  onResized: vi.fn(async () => () => {}), isMaximized: vi.fn(async () => false),
+  minimize: vi.fn(async () => {}), toggleMaximize: vi.fn(async () => {}), close: vi.fn(async () => {}),
+}));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => nativeWindow }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 vi.mock("../src/BackgroundScene", () => ({ BackgroundScene: () => null }));
@@ -30,6 +35,27 @@ beforeEach(() => {
   vi.spyOn(api, "environment").mockResolvedValue({ os: "macos", git: { Ok: "git version 2.49.0" }, configPath: "/config.json", version: "2.0.1" });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+it("Windows 顶栏可拖动，打开设置后仍可操作窗口按钮", async () => {
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+  render(<App />);
+  expect(screen.getByRole("banner").getAttribute("data-tauri-drag-region")).toBe("deep");
+  expect(document.querySelector(".titlebar-drag")).toBeNull();
+  expect(screen.getByRole("group", { name: "窗口控制" })).toBeTruthy();
+  fireEvent.click(await screen.findByRole("button", { name: "打开设置" }));
+  expect(await screen.findByRole("dialog", { name: "设置" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "最小化窗口" }));
+  expect(nativeWindow.minimize).toHaveBeenCalled();
+  expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
+});
+
+it("macOS 保留原生控制区，不显示 Windows 窗口按钮", async () => {
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+  render(<App />);
+  await screen.findByRole("button", { name: "打开设置" });
+  expect(document.querySelector(".titlebar-drag")).toBeTruthy();
+  expect(screen.queryByRole("group", { name: "窗口控制" })).toBeNull();
+});
 
 it("项目菜单列出全部项目，当前项目可辨认", async () => {
   render(<App />);

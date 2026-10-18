@@ -796,6 +796,30 @@
   .sync-details dl { grid-template-columns: 72px minmax(0, 1fr); }
   .sync-panel :is(h1, h2) { font-size: 18px; }
 }
+/* Windows uses one app header, with caption controls pinned to its top-right. */
+.app-shell[data-platform="windows"] .compact-toolbar {
+  position: relative; min-height: 52px; padding: 8px 150px 8px 20px;
+}
+:root .window-controls {
+  position: fixed; top: 0; right: 0; z-index: calc(var(--z-index-overlay, 1000) + 1); display: flex; width: 138px; height: 52px; gap: 0;
+}
+:root .window-controls .window-control.button {
+  flex: 0 0 46px; width: 46px; min-width: 46px; height: 52px; min-height: 52px; padding: 0;
+  border: 0; border-radius: 0; background: transparent; color: var(--fg); box-shadow: none;
+  opacity: 1; transform: none !important; -webkit-backdrop-filter: none; backdrop-filter: none;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+:root .window-controls .window-control.button:not(:disabled):is(:hover, [data-hovered="true"], [data-pressed="true"]) {
+  background: var(--bg-muted); color: var(--fg); box-shadow: none;
+}
+:root .window-controls .window-control.window-close.button:not(:disabled):is(:hover, [data-hovered="true"], [data-pressed="true"]) {
+  background: #c42b1c; color: #fff;
+}
+:root .window-controls .window-control.button:is(:focus-visible, [data-focus-visible="true"]) {
+  outline: 2px solid var(--focus); outline-offset: -3px; box-shadow: none;
+}
+.window-control svg { width: 12px; height: 12px; pointer-events: none; }
+
 @media (prefers-reduced-motion: reduce) {
   :root[data-theme="dark"] .button:is(:hover, :active, [data-pressed="true"]) { transform: none !important; }
   .compact-dialog { transition: none !important; }

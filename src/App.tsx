@@ -10,16 +10,16 @@ import { Icon } from "./icons";
 import { OperationStatus, RunnerProvider, useRunner } from "./runner";
 import { AppGlyph, FormSection, Notice, PathInput, SectionLabel, TextInput } from "./ui";
 import { UpdatePanel } from "./UpdatePanel";
+import { WindowControls } from "./WindowControls";
 import { startAutoCheck } from "./updater";
 import { useAppearance } from "./appearance";
 import { useInputModality } from "./motion";
 import "./index.css";
 
-const IS_MAC = navigator.userAgent.includes("Mac");
-
 type Mode = { kind: "view" } | { kind: "edit"; profile: Profile; isNew: boolean } | { kind: "settings" };
 
 function Shell() {
+  const platform = navigator.userAgent.includes("Windows") ? "windows" : navigator.userAgent.includes("Mac") ? "mac" : "other";
   useInputModality();
   const { preference, setPreference } = useAppearance();
   const appearanceLabel = preference === "system" ? "跟随系统" : preference === "light" ? "浅色" : "深色";
@@ -120,14 +120,14 @@ function Shell() {
   }
 
   return (
-    <div className="app-shell compact-shell" data-platform={IS_MAC ? "mac" : "other"}>
+    <div className="app-shell compact-shell" data-platform={platform}>
       <BackgroundScene />
       <Link href="#main-content" className="skip-link">跳到主要内容</Link>
       <main id="main-content" tabIndex={-1} className="compact-window">
-        {IS_MAC && <div data-tauri-drag-region className="titlebar-drag" />}
-        <header className="compact-toolbar" data-tauri-drag-region>
+        {platform === "mac" && <div data-tauri-drag-region className="titlebar-drag" />}
+        <header className="compact-toolbar" data-tauri-drag-region={platform === "windows" ? "deep" : true}>
           <div className="compact-brand"><span className="brand-mark"><AppGlyph className="size-[22px]" /></span><span>Git 离线同步</span></div>
-          <div className="compact-toolbar-actions" data-tauri-drag-region>
+          <div className="compact-toolbar-actions" data-tauri-drag-region={platform === "windows" ? "deep" : true}>
             <Dropdown>
               <Button ref={projectButtonRef} className="compact-project" size="sm" variant="ghost" isDisabled={locked || !config}
                 aria-label={`选择项目：${current?.name ?? "未配置"}`}>
@@ -179,6 +179,7 @@ function Shell() {
             <Button isIconOnly size="sm" variant="ghost" aria-label="打开设置" isDisabled={locked || !config}
               onPress={() => setMode({ kind: "settings" })}><Icon name="settings" /></Button>
           </div>
+          {platform === "windows" && <WindowControls />}
         </header>
         <OperationStatus />
         <div ref={contentRef} className="compact-scroll">
