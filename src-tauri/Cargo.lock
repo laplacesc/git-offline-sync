@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "git-offline-sync"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "libc",
  "regex",

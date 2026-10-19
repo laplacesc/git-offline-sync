@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use git_offline_sync_lib::args;
 use git_offline_sync_lib::core::git::{Git, LogEvent};
 use git_offline_sync_lib::core::repo;
 
@@ -139,6 +138,8 @@ fn preserves_trailing_spaces_newlines_tabs_and_crlf_in_paths() {
 #[cfg(unix)]
 #[test]
 fn nul_query_preserves_git_stdout_exactly() {
+    use git_offline_sync_lib::args;
+
     let f = Fixture::new("main");
     f.linked("原样\r\n制表\t尾空格  ", "topic");
     let log = |_: LogEvent| {};

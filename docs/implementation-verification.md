@@ -25,7 +25,8 @@
 - v2.1.7 的日期／日志时间、分页、空状态、表单错误摘要、表单分组、代码文本和提交差异刻度条使用 HeroUI。真实浏览器中检查了深浅主题与分页切换，确认时间字段不会进入 Tab 顺序；检查范围为组件验证页，不计作原生桌面端验收。
 - `pnpm build`、`pnpm check:version`、Rust 格式检查、Clippy（`--all-targets -- -D warnings`）及 `git diff --check` 通过。
 - v2.1.7 的 Windows CI 在两处 Patch 文件内容断言中因 CRLF/LF 差异失败，未构建安装包或公开 Release。测试夹具现固定 `core.autocrlf=false`、`core.eol=lf`；使用全局 `autocrlf=true` / `eol=crlf` 在本地复现原失败后，8 项 Patch 回归全部通过。产品的换行策略保持不变，后续发布版本为 v2.1.8。
-- 当前最低 Git 版本为 2.36，以支持 NUL 分隔的工作树列表。本次在 macOS 运行自动测试，未重新执行原生 Windows 桌面或真实更新安装验证。
+- v2.1.8 的 Windows Rust 测试全部通过，Clippy 因一个只在 Unix 测试中使用的宏被全局导入而失败，未公开 Release。该导入已移入对应的条件编译测试；CI 调整为先 Clippy、再执行 Rust 测试，保留全部检查。后续发布版本为 v2.1.9。
+- 当前最低 Git 版本为 2.36，以支持 NUL 分隔的工作树列表。当前已通过 macOS 和 Windows 的 Rust 测试；本轮尚未重新执行原生桌面交互或真实更新安装验证。
 
 ## 历史自动验证（v2.1.3）
 
