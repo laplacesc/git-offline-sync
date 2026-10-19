@@ -84,37 +84,46 @@ describe("内网双页签工作流", () => {
     expect(screen.queryByText(message)).toBeNull();
   });
 
-  it("审查工作树恢复前禁止改基准，恢复后按用户选择的新基准整理", async () => {
+  it("没有独立工作树的审查分支可直接换基准，在当前仓库整理", async () => {
     const local = "review/receipt-one/feature/returned";
-    let restored = false;
-    vi.spyOn(api, "listReturnPackages").mockResolvedValue([returnPackage(true)]);
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({
-      ...status(path), branches: [{ ...status(path).branches[0], name: local,
-        worktree: restored ? "/reviews/returned" : null }],
+      ...status(path), branches: [{ ...status(path).branches[0], name: local, worktree: null }],
       reviewSources: { [local]: "feature/returned" },
     }));
-    const imported = vi.spyOn(api, "importReturn").mockImplementation(async () => {
-      restored = true;
-      return { branches: [{ source: "feature/returned", local, sha: "oid", base: "main", commits: [] }],
-        warnings: [], outcomes: [success] };
-    });
+    const imported = vi.spyOn(api, "importReturn");
     const rebased = vi.spyOn(api, "rebaseOnto").mockResolvedValue(success);
     render(view());
     openReturns();
     fireEvent.click(await screen.findByRole("radio", { name: "选择 feature/returned" }));
     fireEvent.click(screen.getByRole("button", { name: "提交与分支选项" }));
     const baseSelect = screen.getByRole<HTMLButtonElement>("button", { name: /基准分支/ });
-    expect(baseSelect.disabled).toBe(true);
-    expect(screen.getByText("请先恢复审查工作树，再选择其他基准分支。")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "恢复审查工作树", exact: true }));
-    await waitFor(() => expect(imported).toHaveBeenCalledExactlyOnceWith("/work", "/usb/back.bundle", "main", ["release/1.0"]));
-    await waitFor(() => expect(baseSelect.disabled).toBe(false));
-    expect(rebased).not.toHaveBeenCalled();
+    expect(baseSelect.disabled).toBe(false);
+    expect(screen.queryByText(/恢复审查工作树/)).toBeNull();
     fireEvent.click(baseSelect);
     fireEvent.click(await screen.findByRole("option", { name: /release\/1.0/ }));
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "检查并推送" }).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "整理提交", exact: true }));
     await waitFor(() => expect(rebased).toHaveBeenCalledExactlyOnceWith("/work", local, "release/1.0", true));
+    expect(imported).not.toHaveBeenCalled();
   });
+  it("损坏补丁仅禁用自身导入，正常回传包仍可选择", async () => {
+    const healthy = returnPackage();
+    const broken: ReturnPackageInfo = {
+      ...returnPackage(), payloadPath: "/usb/incomplete", received: false, receiptKey: null,
+      error: "目录里没有 .patch 文件",
+      manifest: { ...returnPackage().manifest!, kind: "patch", seq: 4 },
+    };
+    vi.spyOn(api, "listReturnPackages").mockResolvedValue([healthy, broken]);
+    render(view());
+    openReturns();
+    expect(await screen.findByText("包内容异常")).toBeTruthy();
+    expect(screen.getByText(/包内容无法读取，请检查后重新复制/)).toBeTruthy();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "导入回传", exact: true }).disabled).toBe(true);
+    expect(screen.queryByText(/无法读取传输目录/)).toBeNull();
+    fireEvent.click(screen.getByRole("option", { name: /back.bundle/ }));
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "导入回传", exact: true }).disabled).toBe(false));
+  });
+
   it("通过 listReturnPackages 查询接收记录，导出更新沿用当前项目契约", async () => {
     render(view());
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["导出更新", "导入回传"]);
@@ -166,14 +175,14 @@ describe("内网双页签工作流", () => {
     expect(screen.queryByText("没有待处理的回传。")).toBeNull();
   });
 
-  it("importReturn 一键导入并整理，使用返回的独立审阅分支继续检查", async () => {
+  it("importReturn 一键导入并整理，在当前仓库使用专用审阅分支继续检查", async () => {
     let received = false;
     const local = "review/receipt-one/feature/returned";
     vi.spyOn(api, "listReturnPackages").mockImplementation(async () => [returnPackage(received)]);
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => {
       const value = status(path);
       if (received && path === "/work") {
-        value.branches = [{ ...value.branches[0], name: local, worktree: "/reviews/returned" }];
+        value.branches = [{ ...value.branches[0], name: local, worktree: null }];
         value.reviewSources = { [local]: "feature/returned" };
       }
       return value;
@@ -198,6 +207,37 @@ describe("内网双页签工作流", () => {
     expect(selected.checked).toBe(true);
     expect(within(selected.closest(".sync-branch-row") as HTMLElement).getByRole("button", { name: "检查并推送" })).toBeTruthy();
     expect(vi.mocked(invoke).mock.calls.some(([command]) => ["import_back", "rebase_onto", "execute_push"].includes(command))).toBe(false);
+    fireEvent.click(within(selected.closest(".sync-branch-row") as HTMLElement).getByRole("button", { name: "检查并推送" }));
+    expect(await screen.findByRole("alertdialog")).toBeTruthy();
+    expect(invoke).toHaveBeenCalledWith("prepare_push", { workDir: "/work", branch: local, forceWithLease: false });
+  });
+
+  it("补丁只传分支和基准，在已配置的工作仓库导入", async () => {
+    const pkg = returnPackage();
+    pkg.payloadPath = "/usb/patches";
+    pkg.manifest = { ...pkg.manifest!, kind: "patch", payload: "patches" };
+    vi.spyOn(api, "listReturnPackages").mockResolvedValue([pkg]);
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation(async (command, args) => command === "import_patches" ? success : original(command, args));
+    render(view());
+    openReturns();
+    const button = await screen.findByRole<HTMLButtonElement>("button", { name: "导入回传" });
+    await waitFor(() => expect(button.disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "补丁选项" }));
+    expect(screen.queryByRole("textbox", { name: "独立工作树目录" })).toBeNull();
+    expect(screen.getByText("补丁会在当前工作仓库切换到所填分支并应用，请保持工作区干净。")).toBeTruthy();
+    const branch = screen.getByRole("textbox", { name: "应用到的新分支" });
+    fireEvent.change(branch, { target: { value: "   " } });
+    fireEvent.click(button);
+    expect(await screen.findByText("请在补丁选项中填写分支")).toBeTruthy();
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "import_patches")).toBe(false);
+    fireEvent.change(branch, { target: { value: " hotfix/patch " } });
+    fireEvent.click(screen.getByRole("button", { name: /基准分支/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /release\/1.0/ }));
+    fireEvent.click(button);
+    await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "import_patches")).toEqual([
+      ["import_patches", { workDir: "/work", patchDir: "/usb/patches", branch: "hotfix/patch", baseBranch: "release/1.0", fetchUpstream: true }],
+    ]));
   });
 
   it("已接收包默认不占列表，可切换查看并继续整理", async () => {
@@ -267,6 +307,22 @@ describe("内网双页签工作流", () => {
 });
 
 describe("后端冻结推送计划", () => {
+  it("没有独立工作树也请求后端准备推送，未就绪时不进入确认", async () => {
+    const local = "review/receipt-one/feature/returned";
+    vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({
+      ...status(path), branches: [{ ...status(path).branches[0], name: local, worktree: null }],
+    }));
+    const prepared = vi.spyOn(api, "preparePush").mockRejectedValue(new Error("审查分支尚未就绪"));
+    const execute = vi.spyOn(api, "executePush");
+    render(view());
+    openReturns();
+    fireEvent.click(await screen.findByRole("button", { name: "检查并推送" }));
+    await waitFor(() => expect(prepared).toHaveBeenCalledExactlyOnceWith("/work", local, false));
+    expect(await screen.findByText(/审查分支尚未就绪/)).toBeTruthy();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("确认框展示计划中的目标、提交和 OID，确认后仅 executePush(planId)", async () => {
     render(view());
     openReturns();

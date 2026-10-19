@@ -27,8 +27,8 @@ export function useAppearance() {
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = appearance;
     document.documentElement.style.colorScheme = appearance;
-    document.documentElement.style.backgroundColor = appearance === "dark" ? "#0b1322" : "#f8f4eb";
-    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", appearance === "dark" ? "#0b1322" : "#f8f4eb");
+    document.documentElement.style.backgroundColor = appearance === "dark" ? "#181818" : "#ffffff";
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", appearance === "dark" ? "#181818" : "#ffffff");
   }, [appearance]);
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, preference); } catch { /* Keep the current session usable. */ }

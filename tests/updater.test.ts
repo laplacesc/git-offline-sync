@@ -50,6 +50,88 @@ describe("updater", () => {
     expect(relaunch).toHaveBeenCalled();
   });
 
+  it("重启失败后保留已安装状态，重试只重启", async () => {
+    const u = fakeUpdate();
+    check.mockResolvedValue(u);
+    await checkForUpdates();
+    await downloadUpdate();
+    relaunch.mockImplementationOnce(async () => {
+      expect(getUpdateState().status).toBe("installed");
+      throw new Error("relaunch failed");
+    }).mockResolvedValue(undefined);
+
+    await expect(installUpdate()).rejects.toThrow("relaunch failed");
+    expect(getUpdateState()).toMatchObject({
+      status: "installed", availableVersion: "2.1.0", error: "重启失败：relaunch failed",
+    });
+    expect(hasUpdate(getUpdateState())).toBe(true);
+
+    await installUpdate();
+    expect(u.install).toHaveBeenCalledTimes(1);
+    expect(relaunch).toHaveBeenCalledTimes(2);
+    expect(getUpdateState().error).toBeUndefined();
+    __resetUpdater();
+    expect(u.close).not.toHaveBeenCalled();
+  });
+
+  it("安装失败保留下载结果，允许重试安装", async () => {
+    const u = fakeUpdate();
+    u.install.mockRejectedValueOnce(new Error("install failed"));
+    check.mockResolvedValue(u);
+    await checkForUpdates();
+    await downloadUpdate();
+
+    await expect(installUpdate()).rejects.toThrow("install failed");
+    expect(getUpdateState()).toMatchObject({ status: "downloaded", error: "安装失败：install failed" });
+    expect(relaunch).not.toHaveBeenCalled();
+
+    await installUpdate();
+    expect(u.install).toHaveBeenCalledTimes(2);
+    expect(relaunch).toHaveBeenCalledTimes(1);
+    expect(getUpdateState()).toMatchObject({ status: "installed", error: undefined });
+  });
+
+  it("已安装待重启时，自动和手动检查都不能替换更新", async () => {
+    const u = fakeUpdate();
+    check.mockResolvedValue(u);
+    await checkForUpdates();
+    await downloadUpdate();
+    relaunch.mockRejectedValue(new Error("relaunch failed"));
+    await expect(installUpdate()).rejects.toThrow("relaunch failed");
+    const installed = getUpdateState();
+    expect(installed).toMatchObject({ status: "installed", releaseNotes: "修复若干问题" });
+    check.mockResolvedValue(fakeUpdate());
+
+    expect(await checkForUpdates()).toBe(installed);
+    expect(await checkForUpdates({ manual: true })).toBe(installed);
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(u.close).not.toHaveBeenCalled();
+  });
+
+  it("安装和重启未完成期间忽略并发调用", async () => {
+    const u = fakeUpdate();
+    let finishInstall!: () => void;
+    let finishRelaunch!: () => void;
+    u.install.mockImplementation(() => new Promise<void>((resolve) => { finishInstall = resolve; }));
+    relaunch.mockImplementation(() => new Promise<void>((resolve) => { finishRelaunch = resolve; }));
+    check.mockResolvedValue(u);
+    await checkForUpdates();
+    await downloadUpdate();
+
+    const first = installUpdate();
+    await installUpdate();
+    expect(u.install).toHaveBeenCalledTimes(1);
+    expect(relaunch).not.toHaveBeenCalled();
+    finishInstall();
+    await Promise.resolve();
+    expect(getUpdateState().status).toBe("installed");
+    await installUpdate();
+    expect(u.install).toHaveBeenCalledTimes(1);
+    expect(relaunch).toHaveBeenCalledTimes(1);
+    finishRelaunch();
+    await first;
+  });
+
   it("完整中文更新说明保留段落和列表，下载后仍可查看", async () => {
     const notes = "# v2.1.0\n\n更新说明。\n\n## 修复\n\n- 修复同步。\n- 保留 `Markdown`。\n\nhttps://example.com/releases/v2.1.0";
     check.mockResolvedValue({ ...fakeUpdate(), body: `\n${notes}\n` });

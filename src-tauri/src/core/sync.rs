@@ -17,7 +17,7 @@ use super::repo::{self, CommitInfo, InternalState, MirrorState};
 use super::storage::{atomic_write, OperationLock};
 use crate::args;
 
-pub const MIN_GIT: (u32, u32) = (2, 25);
+pub const MIN_GIT: (u32, u32) = (2, 36);
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -323,14 +323,17 @@ pub fn check_git(g: &Git) -> Result<String> {
     Ok(raw)
 }
 
-fn ensure_worktree_clean(g: &Git, repo: &Path) -> Result<()> {
+pub(super) fn ensure_worktree_clean(g: &Git, repo: &Path) -> Result<()> {
     if repo::is_bare(g, repo)? {
         return invalid("这是裸仓库（镜像），请选择工作仓库");
     }
     if let Some(op) = repo::in_progress(&repo::git_dir(g, repo)?) {
         return invalid(format!("仓库中有未完成的 {op}，请先解决冲突或中止"));
     }
-    let dirty = g.query(repo, args!["status", "--porcelain", "--untracked-files=no"])?;
+    let dirty = g.query(
+        repo,
+        args!["status", "--porcelain", "--untracked-files=normal"],
+    )?;
     if !dirty.trim().is_empty() {
         return invalid("工作区有未提交的修改，请先提交或暂存（stash）");
     }
@@ -555,6 +558,112 @@ fn operation_failure(
     })
 }
 
+#[derive(Serialize, Deserialize)]
+struct PatchJournal {
+    receipt: super::review::PatchReceipt,
+    old_head: String,
+    // Older journals cannot prove completion of an externally finished am.
+    #[serde(default)]
+    expected_commits: Option<usize>,
+    completed: bool,
+}
+
+fn patch_journal(gd: &Path) -> PathBuf {
+    gd.join("offline-sync-patch.json")
+}
+
+fn read_patch_journal(gd: &Path) -> Result<Option<PatchJournal>> {
+    let path = patch_journal(gd);
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
+}
+
+fn clear_patch_journal(gd: &Path) -> Result<()> {
+    match fs::remove_file(patch_journal(gd)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn finish_patch(g: &Git, work: &Path, gd: &Path) -> Result<()> {
+    if let Some(mut journal) = read_patch_journal(gd)? {
+        if !journal.completed {
+            journal.receipt.head = repo::rev_parse(g, work, "HEAD")?;
+            journal.completed = true;
+            atomic_write(&patch_journal(gd), &serde_json::to_vec(&journal)?)?;
+        }
+        super::review::record_patch_received(g, work, &journal.receipt)?;
+        clear_patch_journal(gd)?;
+    }
+    Ok(())
+}
+
+/// A failed receipt write is retryable after Git has completed, including after
+/// restarting the application or completing `git am` outside the application.
+fn recover_patch(g: &Git, work: &Path, gd: &Path) -> Result<()> {
+    if repo::in_progress(gd).is_some() {
+        return Ok(());
+    }
+    if let Some(journal) = read_patch_journal(gd)? {
+        if journal.completed {
+            return finish_patch(g, work, gd);
+        }
+        let head = repo::rev_parse(g, work, "HEAD")?;
+        if repo::current_branch(g, work).as_deref() != Some(&journal.receipt.branch) {
+            return invalid("补丁接收尚未完成，请先切回原补丁分支再继续");
+        }
+        if head == journal.old_head {
+            clear_patch_journal(gd)?;
+        } else if repo::rev_parse(g, work, "ORIG_HEAD").ok().as_deref() == Some(&journal.old_head)
+            && g.query(work, args!["reflog", "show", "-1", "--format=%gs", "HEAD"])?
+                .starts_with("am: ")
+            && g.exec(
+                Some(work),
+                &args!["merge-base", "--is-ancestor", &journal.old_head, &head],
+                None,
+                false,
+            )?
+            .ok()
+        {
+            let count = g.query(
+                work,
+                args![
+                    "rev-list",
+                    "--count",
+                    format!("{}..{head}", journal.old_head)
+                ],
+            )?;
+            if journal.expected_commits.is_none()
+                || count.trim().parse::<usize>().ok() != journal.expected_commits
+            {
+                return invalid(
+                    "无法确认整组补丁已应用完成，请保留恢复记录并检查；补丁包仍为待接收",
+                );
+            }
+            ensure_worktree_clean(g, work)?;
+            finish_patch(g, work, gd)?;
+        } else {
+            return invalid("补丁分支历史已变化，无法确认接收结果，请保留恢复记录并检查");
+        }
+    }
+    Ok(())
+}
+
+/// Do not attach an old patch receipt to an unrelated, manually started am.
+fn match_patch_journal(g: &Git, work: &Path, gd: &Path) -> Result<()> {
+    if let Some(journal) = read_patch_journal(gd)? {
+        if repo::current_branch(g, work).as_deref() != Some(&journal.receipt.branch)
+            || repo::rev_parse(g, work, "ORIG_HEAD")? != journal.old_head
+        {
+            return invalid("当前 am 与补丁接收记录不一致，请检查原工作树和分支");
+        }
+    }
+    Ok(())
+}
+
 /// 中止未完成的 rebase / am / merge。
 pub fn abort(g: &Git, repo: &Path) -> Result<OpOutcome> {
     let gd = repo::git_dir(g, repo)?;
@@ -567,13 +676,16 @@ pub fn abort(g: &Git, repo: &Path) -> Result<OpOutcome> {
             clear_rebase_journal(&gd)?;
         }
         Some("am") => {
+            match_patch_journal(g, repo, &gd)?;
             g.run(repo, args!["am", "--abort"])?;
+            clear_patch_journal(&gd)?;
         }
         Some("merge") => {
             g.run(repo, args!["merge", "--abort"])?;
         }
         _ => {
             recover_rebase(g, repo, &gd)?;
+            recover_patch(g, repo, &gd)?;
             return Ok(OpOutcome::done("没有需要中止的操作"));
         }
     }
@@ -590,9 +702,13 @@ pub fn continue_op(g: &Git, repo: &Path) -> Result<OpOutcome> {
             match_rebase_journal(&gd)?;
             args!["-c", "core.editor=true", "rebase", "--continue"]
         }
-        Some("am") => args!["am", "--continue"],
+        Some("am") => {
+            match_patch_journal(g, repo, &gd)?;
+            args!["am", "--continue"]
+        }
         _ => {
             recover_rebase(g, repo, &gd)?;
+            recover_patch(g, repo, &gd)?;
             return Ok(OpOutcome::done("没有进行中的操作"));
         }
     };
@@ -600,6 +716,8 @@ pub fn continue_op(g: &Git, repo: &Path) -> Result<OpOutcome> {
     if out.ok() {
         if rebasing {
             finish_rebase(g, repo, &gd)?;
+        } else {
+            finish_patch(g, repo, &gd)?;
         }
         Ok(OpOutcome::done("已继续完成"))
     } else {
@@ -1033,7 +1151,8 @@ pub fn import_patches(
     fetch_upstream: bool,
     worktree_path: Option<&Path>,
 ) -> Result<OpOutcome> {
-    if let Some(manifest) = Manifest::read_for(patch_dir)? {
+    let manifest = Manifest::read_for(patch_dir)?;
+    if let Some(manifest) = &manifest {
         if manifest.kind != BundleKind::Patch {
             return invalid("这不是补丁包（patch），请检查所选目录");
         }
@@ -1042,9 +1161,66 @@ pub fn import_patches(
             return invalid("补丁包与当前仓库不是同一个项目（根提交不同）");
         }
     }
+    let common = super::review::common_dir(g, work)?;
+    let _lock = OperationLock::acquire(&common.join("offline-sync-operation"))?;
+    // Hash exactly the bytes passed to git am, even if transfer media changes.
+    let frozen = tempfile::tempdir()?;
+    let mut patches = Vec::new();
+    for (index, source) in super::review::patch_files(patch_dir)?.iter().enumerate() {
+        let target = frozen.path().join(format!("{index:08}.patch"));
+        fs::copy(source, &target)?;
+        patches.push(target);
+    }
+    // A file can contain multiple mail messages; count the same input units as git am.
+    let mails = tempfile::tempdir()?;
+    let mut split = args!["mailsplit", format!("-o{}", mails.path().display()), "--"];
+    split.extend(patches.iter().map(|p| p.as_os_str().to_owned()));
+    let expected_commits = g
+        .query(work, split)?
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| SyncError::Invalid("无法读取补丁邮件数量".into()))?;
+    let key = super::review::patch_key(g, work, &patches, manifest.as_ref())?;
+    for tree in repo::list_worktrees(g, work)?
+        .into_iter()
+        .filter(|t| !t.bare)
+    {
+        let target = Path::new(&tree.path);
+        if !target.exists() {
+            continue;
+        }
+        let gd = repo::git_dir(g, target)?;
+        if read_patch_journal(&gd)?.is_some_and(|j| j.receipt.key == key) {
+            let _target_lock = if gd.canonicalize()? != common.canonicalize()? {
+                Some(OperationLock::acquire(&gd.join("offline-sync-operation"))?)
+            } else {
+                None
+            };
+            if repo::in_progress(&gd).is_some() {
+                return Ok(OpOutcome {
+                    ok: false,
+                    conflict: true,
+                    files: conflict_files(g, target),
+                    message: "该补丁包正在原工作树中应用，请解决冲突后继续或中止".into(),
+                    worktree: Some(tree.path),
+                });
+            }
+            recover_patch(g, target, &gd)?;
+        }
+    }
+    if let Some(receipt) = super::review::patch_receipts(g, work)?
+        .into_iter()
+        .find(|r| r.key == key)
+    {
+        return Ok(
+            OpOutcome::done(format!("该补丁包已接收至 {}，不会重复应用", receipt.branch))
+                .at(Some(receipt.worktree)),
+        );
+    }
     // 建成独立 worktree 时不碰主工作树，也就不要求它干净；
     // 只有要在主工作树上 switch 时才需要它干净。
     if worktree_path.is_none() {
+        recover_patch(g, work, &repo::git_dir(g, work)?)?;
         ensure_worktree_clean(g, work)?;
     } else if repo::is_bare(g, work)? {
         return invalid("这是裸仓库（镜像），请选择工作仓库");
@@ -1052,14 +1228,6 @@ pub fn import_patches(
     validate_branch_name(g, work, branch)?;
     if repo::rev_exists(g, work, &format!("refs/heads/{branch}")) {
         return invalid(format!("分支 {branch} 已存在，请换一个名字"));
-    }
-    let mut patches: Vec<PathBuf> = fs::read_dir(patch_dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "patch"))
-        .collect();
-    patches.sort();
-    if patches.is_empty() {
-        return invalid("目录里没有 .patch 文件");
     }
     if fetch_upstream {
         g.run(work, args!["fetch", "origin", "--prune"])?;
@@ -1084,11 +1252,31 @@ pub fn import_patches(
         }
     };
     repo::set_sync_base(g, work, branch, base_branch)?;
+    let gd = repo::git_dir(g, &target)?;
+    let _target_lock = if gd.canonicalize()? != common.canonicalize()? {
+        Some(OperationLock::acquire(&gd.join("offline-sync-operation"))?)
+    } else {
+        None
+    };
+    let old_head = repo::rev_parse(g, &target, "HEAD")?;
+    let journal = PatchJournal {
+        receipt: super::review::PatchReceipt {
+            key,
+            branch: branch.into(),
+            worktree: std::path::absolute(&target)?.to_string_lossy().into_owned(),
+            head: old_head.clone(),
+        },
+        old_head,
+        expected_commits: Some(expected_commits),
+        completed: false,
+    };
+    atomic_write(&patch_journal(&gd), &serde_json::to_vec(&journal)?)?;
     let wt_out = worktree_path.map(|p| p.to_string_lossy().into_owned());
     let mut a = args!["am", "--3way"];
     a.extend(patches.iter().map(Into::into));
     let out = g.exec(Some(&target), &a, None, true)?;
     if out.ok() {
+        finish_patch(g, &target, &gd)?;
         Ok(OpOutcome::done(format!("已应用 {} 个补丁到 {branch}", patches.len())).at(wt_out))
     } else {
         operation_failure(g, &target, out, wt_out, "git am --3way")
@@ -1116,6 +1304,7 @@ pub fn rebase_onto(
     let gd = repo::git_dir(g, &work)?;
     let _lock = OperationLock::acquire(&gd.join("offline-sync-operation"))?;
     recover_rebase(g, &work, &gd)?;
+    recover_patch(g, &work, &gd)?;
     ensure_worktree_clean(g, &work)?;
     validate_branch_name(g, &work, branch)?;
     validate_branch_name(g, &work, onto)?;
@@ -1174,6 +1363,52 @@ pub enum DeleteBranchOutcome {
     NeedsForce { sha: String },
 }
 
+// Lock every registered worktree HEAD through Git's ref backend (including reftable).
+// Recheck both symbolic HEADs and detached operations after prepare acquires those locks.
+fn deletion_heads(g: &Git, work: &Path, branch: &str) -> Result<Vec<PathBuf>> {
+    let mut heads = Vec::new();
+    for tree in repo::list_worktrees(g, work)?
+        .into_iter()
+        .filter(|t| !t.bare)
+    {
+        let gd = repo::git_dir(g, Path::new(&tree.path))?.canonicalize()?;
+        let mut occupied = tree.branch.as_deref() == Some(branch);
+        for state in [
+            "BISECT_START",
+            "rebase-merge/head-name",
+            "rebase-apply/head-name",
+        ] {
+            match fs::read_to_string(gd.join(state)) {
+                Ok(name) => occupied |= name.trim().trim_start_matches("refs/heads/") == branch,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if occupied {
+            return invalid(format!(
+                "分支 {branch} 正被工作树使用，请先结束操作或切换分支"
+            ));
+        }
+        heads.push(gd);
+    }
+    heads.sort();
+    Ok(heads)
+}
+
+fn with_locked_heads(
+    g: &Git,
+    heads: &[PathBuf],
+    action: &(dyn Fn() -> Result<()> + Sync),
+) -> Result<()> {
+    let Some((gd, rest)) = heads.split_first() else {
+        return action();
+    };
+    let oid = repo::rev_parse(g, gd, "HEAD")?;
+    g.ref_transaction(gd, &format!("verify HEAD {oid}\n"), &|| {
+        with_locked_heads(g, rest, action)
+    })
+}
+
 /// 普通删除遇到未合并分支时返回确认所需的提交；强制删除必须匹配该提交。
 pub fn delete_local_branch(
     g: &Git,
@@ -1190,12 +1425,7 @@ pub fn delete_local_branch(
     if !repo::rev_exists(g, repo, &format!("refs/heads/{branch}")) {
         return invalid(format!("本地分支 {branch} 不存在，请刷新列表"));
     }
-    if repo::list_worktrees(g, repo)?
-        .iter()
-        .any(|w| w.branch.as_deref() == Some(branch))
-    {
-        return invalid(format!("分支 {branch} 正被工作树使用，请先切换分支"));
-    }
+    let heads = deletion_heads(g, repo, branch)?;
     let sha = repo::rev_parse(g, repo, &format!("refs/heads/{branch}"))?;
     if let Some(expected) = force_at {
         if expected != sha {
@@ -1223,15 +1453,53 @@ pub fn delete_local_branch(
             }
         }
     }
-    g.run(
-        repo,
-        args![
-            "branch",
-            if force_at.is_some() { "-D" } else { "-d" },
-            "--",
-            branch
+    // CAS protects the checked tip. HEAD verification locks prevent a checkout
+    // from slipping between the final occupancy check and the deletion commit.
+    let common = super::review::common_dir(g, repo)?.canonicalize()?;
+    let mut updates = format!("delete refs/heads/{branch} {sha}\n");
+    if heads.contains(&common) {
+        let oid = repo::rev_parse(g, &common, "HEAD")?;
+        updates.push_str(&format!("verify HEAD {oid}\n"));
+    }
+    // Cross-worktree HEAD names are read-only to update-ref. Hold each linked
+    // HEAD in its own transaction, with the shared ref deletion innermost.
+    let linked: Vec<_> = heads.iter().filter(|gd| **gd != common).cloned().collect();
+    with_locked_heads(g, &linked, &|| {
+        g.ref_transaction(&common, &updates, &|| {
+            if deletion_heads(g, repo, branch)? != heads {
+                return invalid("工作树列表已变化，请刷新后重新删除");
+            }
+            Ok(())
+        })
+    })?;
+    let config = g.exec(
+        Some(repo),
+        &args![
+            "config",
+            "--local",
+            "--get-regexp",
+            format!("^branch\\.{}\\.", regex::escape(branch))
         ],
+        None,
+        false,
     )?;
+    if config.ok() {
+        g.run(
+            repo,
+            args![
+                "config",
+                "--local",
+                "--remove-section",
+                format!("branch.{branch}")
+            ],
+        )?;
+    } else if config.code != 1 {
+        return Err(SyncError::Git {
+            cmd: "git config --local --get-regexp".into(),
+            code: config.code,
+            stderr: config.stderr,
+        });
+    }
     Ok(DeleteBranchOutcome::Deleted {
         message: format!("已删除本地分支 {branch}"),
     })
@@ -1258,6 +1526,33 @@ fn mirror_refs(g: &Git, repo: &Path) -> Result<BTreeMap<String, String>> {
     Ok(repo::list_refs(g, repo, &["refs/heads", "refs/tags"])?
         .into_iter()
         .collect())
+}
+
+/// The bundle header is authoritative even for manually created bundles without
+/// a manifest. Version 2 and version 3 without an object-format capability use SHA-1.
+fn bundle_object_format(bundle: &Path) -> Result<String> {
+    use std::io::{BufRead, BufReader};
+
+    let mut lines = BufReader::new(fs::File::open(bundle)?).lines();
+    match lines.next().transpose()?.as_deref() {
+        Some("# v2 git bundle") => return Ok("sha1".into()),
+        Some("# v3 git bundle") => {}
+        _ => return invalid("不是受支持的 Git bundle 文件"),
+    }
+    let mut format = None;
+    for line in lines {
+        let line = line?;
+        if !line.starts_with('@') {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("@object-format=") {
+            if format.is_some() || !matches!(value, "sha1" | "sha256") {
+                return invalid("bundle 对象格式无效或不受支持");
+            }
+            format = Some(value.to_string());
+        }
+    }
+    Ok(format.unwrap_or_else(|| "sha1".into()))
 }
 
 /// 内网 → 外网：把包导入**外网镜像**（bare 仓库）。
@@ -1288,6 +1583,7 @@ pub fn import_in(
         }
     }
 
+    let object_format = bundle_object_format(bundle)?;
     // ---------- 首次：建空镜像 ----------
     let created = !repo::is_ext_mirror(g, mirror_dir);
     if created {
@@ -1298,9 +1594,40 @@ pub fn import_in(
                 mirror_dir.display()
             ));
         }
+        let (major, minor, _) = g.version()?;
+        let mut init = args!["init", "--bare"];
+        if (major, minor) >= (2, 29) {
+            init.push(format!("--object-format={object_format}").into());
+        } else if object_format != "sha1" {
+            return invalid("SHA-256 bundle 需要支持 SHA-256 的 Git（至少 2.29），请升级 Git");
+        }
+        // Older supported Git versions only support SHA-1 and lack --object-format.
         fs::create_dir_all(mirror_dir)?;
-        g.run(mirror_dir, args!["init", "--bare"])?;
+        g.run(mirror_dir, init)?;
         repo::mark_ext_mirror(g, mirror_dir)?;
+    }
+    let configured = g.exec(
+        Some(mirror_dir),
+        &args!["config", "--local", "--get", "extensions.objectFormat"],
+        None,
+        false,
+    )?;
+    let actual_format = match configured.code {
+        0 => configured.stdout.trim(),
+        1 => "sha1",
+        code => {
+            return Err(SyncError::Git {
+                cmd: "git config --local --get extensions.objectFormat".into(),
+                code,
+                stderr: configured.stderr,
+            })
+        }
+    };
+    if actual_format != object_format {
+        // An empty ref set does not imply an empty object database or state files.
+        return invalid(format!(
+            "镜像对象格式 {actual_format} 与 bundle 的 {object_format} 不一致；已保留全部数据。请选用新的空目录重新导入全量包"
+        ));
     }
 
     // 空镜像只能用全量包填。不能只看"这次新建了镜像"：
@@ -1785,8 +2112,18 @@ pub fn export_patches(
     if !repo::rev_exists(g, repo, &from) {
         return invalid(format!("找不到 {branch} 的基准分支 {from}"));
     }
-    let range = format!("{from}..refs/heads/{branch}");
-    if repo::commits_between(g, repo, &from, &format!("refs/heads/{branch}"))?.is_empty() {
+    // Freeze both ends: validation, format-patch and manifest must describe one snapshot.
+    let base = repo::rev_parse(g, repo, &from)?;
+    let tip = repo::rev_parse(g, repo, &format!("refs/heads/{branch}"))?;
+    let range = format!("{base}..{tip}");
+    if !g
+        .query(repo, args!["rev-list", "--merges", "--max-count=1", &range])?
+        .trim()
+        .is_empty()
+    {
+        return invalid("待导出范围包含合并提交，Patch 会遗漏合并时的改动；请使用 Bundle 回传");
+    }
+    if repo::commits_between(g, repo, &base, &tip)?.is_empty() {
         return Ok(ExportOutcome::NothingToSync {
             message: format!("{branch} 相对 {from} 没有新提交"),
         });
@@ -1796,7 +2133,7 @@ pub fn export_patches(
 
     let refs = vec![RefEntry {
         name: format!("refs/heads/{branch}"),
-        sha: repo::rev_parse(g, repo, &format!("refs/heads/{branch}"))?,
+        sha: tip,
         base: Some(branch_base),
     }];
     let manifest = Manifest {

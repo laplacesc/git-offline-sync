@@ -19,7 +19,7 @@ const AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const AUTO_CHECK_TIMEOUT_MS = 8_000;
 const MANUAL_CHECK_TIMEOUT_MS = 15_000;
 
-export type UpdateStatus = "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "error";
+export type UpdateStatus = "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "installed" | "error";
 
 export interface UpdateState {
   status: UpdateStatus;
@@ -34,6 +34,7 @@ export interface UpdateState {
 
 let state: UpdateState = { status: "idle", manual: false };
 let pending: Update | null = null;
+let installing = false;
 const listeners = new Set<() => void>();
 
 function setState(patch: Partial<UpdateState>) {
@@ -52,9 +53,9 @@ export function useUpdateState(): UpdateState {
   );
 }
 
-/** 有可操作的更新（可下载、下载中或待安装） */
+/** 有可操作的更新（可下载、下载中、待安装或已安装待重启） */
 export function hasUpdate(s: UpdateState): boolean {
-  return s.status === "available" || s.status === "downloading" || s.status === "downloaded";
+  return s.status === "available" || s.status === "downloading" || s.status === "downloaded" || s.status === "installed";
 }
 
 /**
@@ -84,7 +85,7 @@ function replacePending(next: Update | null) {
 
 /** 检查更新，返回检查结束后的状态。手动检查失败时抛出错误。 */
 export async function checkForUpdates({ manual = false } = {}): Promise<UpdateState> {
-  if (state.status === "checking" || state.status === "downloading" || state.status === "downloaded") return state;
+  if (state.status === "checking" || state.status === "downloading" || state.status === "downloaded" || state.status === "installed") return state;
   setState({ status: "checking", manual, error: undefined });
   try {
     const update = await check({ timeout: manual ? MANUAL_CHECK_TIMEOUT_MS : AUTO_CHECK_TIMEOUT_MS });
@@ -133,13 +134,23 @@ export async function downloadUpdate(): Promise<void> {
 
 /** 安装已下载的更新并重启。Windows 上安装程序会自行退出应用。 */
 export async function installUpdate(): Promise<void> {
-  if (!pending || state.status !== "downloaded") return;
+  if (installing) return;
+  if (state.status !== "installed" && (!pending || state.status !== "downloaded")) return;
+  installing = true;
+  setState({ error: undefined });
   try {
-    await pending.install();
+    if (state.status === "downloaded" && pending) {
+      await pending.install();
+      // 安装成功后插件资源已释放；后续重试只需重启。
+      pending = null;
+      setState({ status: "installed" });
+    }
     await relaunch();
   } catch (e) {
-    setState({ error: `安装失败：${describeUpdateError(e)}` });
+    setState({ error: `${state.status === "installed" ? "重启" : "安装"}失败：${describeUpdateError(e)}` });
     throw e;
+  } finally {
+    installing = false;
   }
 }
 
@@ -159,6 +170,7 @@ export function startAutoCheck(): () => void {
 /** 仅供测试：重置模块状态 */
 export function __resetUpdater() {
   replacePending(null);
+  installing = false;
   state = { status: "idle", manual: false };
   listeners.forEach((l) => l());
 }

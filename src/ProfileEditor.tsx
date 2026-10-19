@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { AlertDialog, Button, Card, Description, Form, Label, Link, Radio, RadioGroup } from "@heroui/react";
+import { Alert, AlertDialog, Button, Card, Description, Form, Label, Link, Radio, RadioGroup } from "@heroui/react";
 import { parseBranchList, Profile, releasesOf, Role } from "./api";
 import { FormSection, PathInput, SectionLabel, TextInput } from "./ui";
 import { useRunner } from "./runner";
@@ -113,13 +113,13 @@ export function ProfileEditor({
 
       <Card.Content className="flex flex-col gap-8 px-8 pb-8">
         {submitted && miss.length > 0 && (
-          <div ref={summary} role="alert" tabIndex={-1} className="rounded-2xl border border-danger p-4 text-sm">
-            <p className="font-semibold">请补全以下 {miss.length} 项</p>
+          <Alert ref={summary} status="danger" role="alert" tabIndex={-1} className="p-4 text-sm">
+            <Alert.Content><Alert.Title>请补全以下 {miss.length} 项</Alert.Title>
             <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
               {miss.map(({ key, label }) => <li key={key}><Link className="text-danger underline" href={`#profile-${key}`}
                 onClick={(event) => { event.preventDefault(); document.getElementById(`profile-${key}`)?.focus(); }}>{label}</Link></li>)}
-            </ul>
-          </div>
+            </ul></Alert.Content>
+          </Alert>
         )}
         <FormSection title="运行环境" description="选择这台电脑在同步流程中的角色。已有配置的角色不能更改。">
         {isNew ? <RadioGroup

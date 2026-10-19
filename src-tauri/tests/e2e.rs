@@ -500,8 +500,7 @@ fn full_round_trip() {
         2
     );
 
-    // 补丁也能应用到独立 worktree：主工作树的当前分支不被抢走，
-    // 而且主工作树脏着也不该挡住（改动落在别的目录里）
+    // 重导同包复用原接收结果，不创建新分支/工作树，也不改变现有修改。
     let before_head = sh(&work, &["rev-parse", "--abbrev-ref", "HEAD"]);
     fs::write(work.join("dirty.txt"), "uncommitted\n").unwrap();
     sh(&work, &["add", "dirty.txt"]);
@@ -517,16 +516,18 @@ fn full_round_trip() {
     )
     .unwrap();
     assert!(ip.ok, "{:?}", ip);
-    assert_same_path(ip.worktree.as_deref(), &pwt);
+    assert_same_path(ip.worktree.as_deref(), &work);
     assert_eq!(
         sh(&work, &["rev-parse", "--abbrev-ref", "HEAD"]),
         before_head,
         "主工作树的当前分支不该被换掉"
     );
-    assert!(pwt.join("e.txt").exists(), "补丁应落在 worktree 目录里");
+    assert!(!pwt.exists(), "同包重导不应创建额外工作树");
+    assert!(work.join("e.txt").exists(), "已应用补丁保留在原工作仓库");
+    assert!(!repo::rev_exists(&g, &work, "refs/heads/feature/patch-wt"));
     assert_eq!(
-        repo::get_sync_base(&g, &work, "feature/patch-wt").as_deref(),
-        Some("main")
+        fs::read_to_string(work.join("dirty.txt")).unwrap(),
+        "uncommitted\n"
     );
     // 脏工作树要被 status 报出来（只看主工作树以外的也一样）
     let st = repo::status(&g, &work, "main", &[]).unwrap();
@@ -535,10 +536,6 @@ fn full_round_trip() {
             .iter()
             .any(|w| same_path(Path::new(&w.path), &work)),
         "主工作树的未提交改动应出现在 dirty_trees"
-    );
-    sh(
-        &work,
-        &["worktree", "remove", "--force", pwt.to_str().unwrap()],
     );
     sh(&work, &["reset", "-q", "--hard"]);
     fs::remove_file(work.join("dirty.txt")).ok();

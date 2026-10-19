@@ -1,4 +1,4 @@
-//! Format-1 return receipts, isolated review worktrees and frozen push plans.
+//! Format-1 return receipts, in-place review branches and frozen push plans.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -21,9 +21,10 @@ use super::sync::{self, ImportedBranch, OpOutcome};
 use crate::args;
 
 const RECEIPTS: &str = "refs/offline-sync/return-receipts/";
+const PATCH_RECEIPTS: &str = "refs/offline-sync/patch-receipts/";
 const PUSHED: &str = "refs/offline-sync/review-pushed/";
 
-fn common_dir(g: &Git, work: &Path) -> Result<PathBuf> {
+pub(super) fn common_dir(g: &Git, work: &Path) -> Result<PathBuf> {
     let common = g.query(work, args!["rev-parse", "--git-common-dir"])?;
     let common = work.join(common.trim());
     // Keep Git-facing paths in its native spelling (Windows canonicalize adds
@@ -142,6 +143,108 @@ fn return_key(g: &Git, work: &Path, bundle: &Path, manifest: Option<&Manifest>) 
     )
 }
 
+/// Patch receipts stay separate from bundle review branches: applying mail patches
+/// creates new commits and retains the destination branch chosen by the user.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PatchReceipt {
+    pub key: String,
+    pub branch: String,
+    pub worktree: String,
+    pub head: String,
+}
+
+pub(super) fn patch_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut patches = fs::read_dir(dir)?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    patches.retain(|p| p.extension().is_some_and(|x| x == "patch"));
+    patches.sort();
+    for patch in &patches {
+        if !fs::metadata(patch)?.is_file() {
+            return invalid(format!("补丁条目不是文件：{}", patch.display()));
+        }
+    }
+    if patches.is_empty() {
+        return invalid("目录里没有 .patch 文件");
+    }
+    Ok(patches)
+}
+
+pub(super) fn patch_key(
+    g: &Git,
+    work: &Path,
+    patches: &[PathBuf],
+    manifest: Option<&Manifest>,
+) -> Result<String> {
+    let mut payload = Vec::new();
+    for patch in patches {
+        let path = std::path::absolute(patch)?;
+        let oid = g.query(work, args!["hash-object", "--no-filters", "--", &path])?;
+        // Only ordered contents matter; copying or renaming a package preserves identity.
+        payload.push(oid.trim().to_owned());
+    }
+    let mut canonical = manifest.cloned();
+    if let Some(m) = canonical.as_mut() {
+        m.payload.clear();
+        m.refs.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    Ok(g.query_stdin(
+        work,
+        args!["hash-object", "--stdin"],
+        &serde_json::to_string(&(payload, canonical))?,
+    )?
+    .trim()
+    .to_owned())
+}
+
+pub(super) fn patch_receipts(g: &Git, work: &Path) -> Result<Vec<PatchReceipt>> {
+    let refs = g.exec(
+        Some(work),
+        &args!["for-each-ref", "--format=%(refname)", PATCH_RECEIPTS],
+        None,
+        false,
+    )?;
+    if !refs.ok() || !refs.stderr.trim().is_empty() {
+        return invalid("无法完整读取补丁接收记录");
+    }
+    refs.stdout
+        .lines()
+        .map(|reference| {
+            let receipt: PatchReceipt =
+                serde_json::from_str(&g.query(work, args!["cat-file", "blob", reference])?)?;
+            if reference != format!("{PATCH_RECEIPTS}{}", receipt.key)
+                || !super::manifest::valid_oid(&receipt.head)
+                || !super::manifest::valid_ref(&format!("refs/heads/{}", receipt.branch))
+                || receipt.worktree.is_empty()
+            {
+                return invalid(format!("补丁接收记录损坏：{reference}"));
+            }
+            Ok(receipt)
+        })
+        .collect()
+}
+
+pub(super) fn record_patch_received(g: &Git, work: &Path, receipt: &PatchReceipt) -> Result<()> {
+    if patch_receipts(g, work)?
+        .iter()
+        .any(|r| r.key == receipt.key)
+    {
+        return Ok(());
+    }
+    let blob = g.query_stdin(
+        work,
+        args!["hash-object", "-w", "--stdin"],
+        &serde_json::to_string(receipt)?,
+    )?;
+    g.query_stdin(
+        work,
+        args!["update-ref", "--no-deref", "--stdin"],
+        &format!("create {PATCH_RECEIPTS}{} {}\n", receipt.key, blob.trim()),
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReturnPackageInfo {
@@ -149,11 +252,13 @@ pub struct ReturnPackageInfo {
     pub package: sync::PackageInfo,
     pub received: bool,
     pub receipt_key: Option<String>,
+    pub error: Option<String>,
 }
 
 pub fn list_return_packages(g: &Git, work: &Path, dir: &Path) -> Result<Vec<ReturnPackageInfo>> {
     let packages = sync::list_packages(dir)?;
     let mut received_keys = HashSet::new();
+    let mut patch_keys = HashSet::new();
     // An uncreated work directory must not prevent browsing transfer media.
     // A present but broken .git is an error, not an empty receipt collection.
     let has_repo = if !work.try_exists()? {
@@ -169,6 +274,11 @@ pub fn list_return_packages(g: &Git, work: &Path, dir: &Path) -> Result<Vec<Retu
         }
     };
     if has_repo {
+        patch_keys.extend(
+            patch_receipts(g, work)?
+                .into_iter()
+                .map(|receipt| receipt.key),
+        );
         received_keys.extend(
             read_receipts(g, work)?
                 .into_iter()
@@ -182,22 +292,41 @@ pub fn list_return_packages(g: &Git, work: &Path, dir: &Path) -> Result<Vec<Retu
                 .manifest
                 .as_ref()
                 .is_none_or(|m| m.kind == BundleKind::Back);
-            let receipt_key =
-                if has_repo && !received_keys.is_empty() && package.payload_exists && is_return {
+            let is_patch = package
+                .manifest
+                .as_ref()
+                .is_some_and(|m| m.kind == BundleKind::Patch);
+            let identity = (|| -> Result<Option<String>> {
+                if package.payload_exists && is_patch {
+                    let patches = patch_files(Path::new(&package.payload_path))?;
+                    if has_repo && !patch_keys.is_empty() {
+                        let key = patch_key(g, work, &patches, package.manifest.as_ref())?;
+                        return Ok(patch_keys.contains(&key).then_some(key));
+                    }
+                } else if has_repo
+                    && !received_keys.is_empty()
+                    && package.payload_exists
+                    && is_return
+                {
                     let key = return_key(
                         g,
                         work,
                         Path::new(&package.payload_path),
                         package.manifest.as_ref(),
                     )?;
-                    received_keys.contains(&key).then_some(key)
-                } else {
-                    None
-                };
+                    return Ok(received_keys.contains(&key).then_some(key));
+                }
+                Ok(None)
+            })();
+            let (receipt_key, error) = match identity {
+                Ok(key) => (key, None),
+                Err(error) => (None, Some(redact(&error.to_string()))),
+            };
             Ok(ReturnPackageInfo {
                 package,
                 received: receipt_key.is_some(),
                 receipt_key,
+                error,
             })
         })
         .collect()
@@ -249,7 +378,7 @@ pub struct ImportReturnResult {
 }
 
 /// The receipt and all inbox/review refs enter one CAS transaction. They are
-/// authoritative even if later config, worktree creation or rebase is interrupted.
+/// authoritative even if later config, branch switching or rebase is interrupted.
 pub fn import_return(
     g: &Git,
     work: &Path,
@@ -385,6 +514,9 @@ pub fn import_return(
             repo::set_sync_base(g, work, &item.local, &item.base)?;
         }
     }
+    // Reception keeps its CAS lock through metadata repair, but rebase acquires
+    // the worktree lock itself (the same lock for the main working repository).
+    drop(_lock);
     g.run(
         work,
         args![
@@ -397,61 +529,17 @@ pub fn import_return(
     let mut outcomes = Vec::new();
     for item in &receipt.items {
         g.check_cancelled()?;
-        let wt = common
-            .join("offline-sync/review-worktrees")
-            .join(&key)
-            .join(&item.item_id);
-        let wt_string = wt.to_string_lossy().into_owned();
+        let top_level = g.query(work, args!["rev-parse", "--show-toplevel"])?;
+        let mut wt_string = top_level
+            .strip_suffix('\n')
+            .unwrap_or(&top_level)
+            .to_owned();
         let outcome = (|| -> Result<OpOutcome> {
-            let trees = repo::list_worktrees(g, work)?;
-            let normalized_wt = if wt.exists() {
-                Some(wt.canonicalize()?)
-            } else {
-                None
-            };
-            let owned = trees.iter().find(|t| {
-                normalized_wt.as_ref().is_some_and(|expected| {
-                    Path::new(&t.path).canonicalize().ok().as_ref() == Some(expected)
-                })
-            });
-            if let Some(tree) = owned {
-                if common_dir(g, &wt)?.canonicalize()? != common.canonicalize()? {
-                    return invalid("审查工作树仓库不匹配");
-                }
-                let gd = repo::git_dir(g, &wt)?;
-                if repo::in_progress(&gd).is_some() {
-                    let files = g.query(&wt, args!["diff", "--name-only", "--diff-filter=U"])?;
-                    return Ok(OpOutcome {
-                        ok: false,
-                        conflict: true,
-                        files: files.lines().map(str::to_owned).collect(),
-                        message: "审查工作树中有未完成操作，请解决冲突后继续或中止".into(),
-                        worktree: Some(wt_string.clone()),
-                    });
-                }
-                if tree.branch.as_deref() != Some(item.local.as_str()) {
-                    return invalid("审查工作树分支已变化，不会切换用户分支");
-                }
-            } else {
-                if wt.exists() {
-                    return invalid("审查工作树目录已存在但未登记，保留目录等待检查");
-                }
-                if trees
-                    .iter()
-                    .any(|t| t.branch.as_deref() == Some(item.local.as_str()))
-                {
-                    return invalid("审查分支已被其他工作区使用，不会修改该工作区");
-                }
-                fs::create_dir_all(wt.parent().unwrap())?;
-                g.run(work, args!["worktree", "add", &wt, &item.local])?;
-            }
-            // Finish an interrupted Git success before deciding whether to rebase.
-            // Failed ready writes keep the journal and stop this import for retry.
-            {
-                let gd = repo::git_dir(g, &wt)?;
-                let _lock = OperationLock::acquire(&gd.join("offline-sync-operation"))?;
-                sync::recover_rebase(g, &wt, &gd)?;
-            }
+            let gd = repo::git_dir(g, work)?;
+            let lock = OperationLock::acquire(&gd.join("offline-sync-operation"))?;
+            // Recover a completed rebase before consulting its ready marker.
+            // A failed marker write retains the journal for a later retry.
+            sync::recover_rebase(g, work, &gd)?;
             let reference = format!("refs/heads/{}", item.local);
             let source = repo::rev_parse(g, work, &reference)?;
             let ready_ref = format!("refs/offline-sync/review-ready/{key}/{}", item.item_id);
@@ -459,7 +547,24 @@ pub fn import_return(
                 .into_iter()
                 .find(|(r, _)| r == &ready_ref)
                 .map(|(_, oid)| oid);
-            if ready.as_deref() == Some(source.as_str()) {
+            let active = repo::in_progress_all(g, work);
+            // Rebase detaches HEAD, so branch occupancy also needs operation metadata.
+            for tree in repo::list_worktrees(g, work)? {
+                let owns_branch = tree.branch.as_deref() == Some(item.local.as_str())
+                    || active.iter().any(|op| {
+                        op.path == tree.path && op.branch.as_deref() == Some(item.local.as_str())
+                    });
+                if owns_branch && Path::new(&tree.path).canonicalize()? != work.canonicalize()? {
+                    wt_string = tree.path;
+                    return invalid(format!(
+                        "审查分支已被现有工作区占用：{wt_string}；请先在那里完成或中止操作并切换分支"
+                    ));
+                }
+            }
+            let item_active = active
+                .iter()
+                .any(|op| op.branch.as_deref() == Some(item.local.as_str()));
+            if ready.as_deref() == Some(source.as_str()) && !item_active {
                 return Ok(OpOutcome {
                     ok: true,
                     message: "此回传分支已整理完成".into(),
@@ -467,10 +572,25 @@ pub fn import_return(
                     ..Default::default()
                 });
             }
-            // Call from the original repository so the existing helper selects
-            // the linked worktree and locks its own Git directory, not common-dir.
+            if let Some(operation) = repo::in_progress(&gd) {
+                let files = g.query(work, args!["diff", "--name-only", "--diff-filter=U"])?;
+                return Ok(OpOutcome {
+                    ok: false,
+                    conflict: true,
+                    files: files.lines().map(str::to_owned).collect(),
+                    message: format!("工作仓库中有未完成的 {operation}，请解决冲突后继续或中止"),
+                    worktree: Some(wt_string.clone()),
+                });
+            }
+            if gd.join("offline-sync-patch.json").try_exists()? {
+                return invalid("补丁接收记录尚未完成，请先在当前工作仓库继续或中止操作");
+            }
+            sync::ensure_worktree_clean(g, work)?;
             let base =
                 repo::get_sync_base(g, work, &item.local).unwrap_or_else(|| item.base.clone());
+            // rebase_onto rechecks local changes and unfinished operations under
+            // its own lock before switching to the dedicated review branch.
+            drop(lock);
             let mut outcome = sync::rebase_onto(g, work, &item.local, &base, false)?;
             outcome.worktree = Some(wt_string.clone());
             Ok(outcome)

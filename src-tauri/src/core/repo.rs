@@ -145,14 +145,14 @@ pub struct Worktree {
     pub main: bool,
 }
 
-/// 解析 `git worktree list --porcelain`：主仓库和所有 linked worktree。
+/// 解析 `git worktree list --porcelain -z`：主仓库和所有 linked worktree。
 pub fn list_worktrees(g: &Git, repo: &Path) -> Result<Vec<Worktree>> {
-    let out = g.query(repo, args!["worktree", "list", "--porcelain"])?;
+    let out = g.query(repo, args!["worktree", "list", "--porcelain", "-z"])?;
     let mut all: Vec<Worktree> = Vec::new();
     let mut cur: Option<Worktree> = None;
-    for line in out.lines() {
-        let line = line.trim_end();
-        if let Some(path) = line.strip_prefix("worktree ") {
+    // NUL 分隔字段，路径里的空格、换行和制表符都是实际路径的一部分。
+    for field in out.split('\0') {
+        if let Some(path) = field.strip_prefix("worktree ") {
             if let Some(w) = cur.take() {
                 all.push(w);
             }
@@ -163,9 +163,9 @@ pub fn list_worktrees(g: &Git, repo: &Path) -> Result<Vec<Worktree>> {
                 main: all.is_empty(),
             });
         } else if let Some(w) = cur.as_mut() {
-            if line == "bare" {
+            if field == "bare" {
                 w.bare = true;
-            } else if let Some(b) = line.strip_prefix("branch ") {
+            } else if let Some(b) = field.strip_prefix("branch ") {
                 w.branch = Some(b.trim_start_matches("refs/heads/").to_string());
             }
         }
@@ -176,7 +176,7 @@ pub fn list_worktrees(g: &Git, repo: &Path) -> Result<Vec<Worktree>> {
     Ok(all)
 }
 
-/// 有未提交修改的工作树（含主工作树）。
+/// 有未提交修改的工作树（含主工作树及非忽略的未跟踪文件）。
 ///
 /// 只看主工作树会漏掉：分支很可能是在某个 linked worktree 里开发的，
 /// 那里的改动同样不会被导出。取不到状态的工作树（目录已删、尚未 prune）跳过。
@@ -188,7 +188,7 @@ pub fn dirty_worktrees(g: &Git, repo: &Path) -> Vec<Worktree> {
         .filter(|w| {
             g.query(
                 Path::new(&w.path),
-                args!["status", "--porcelain", "--untracked-files=no"],
+                args!["status", "--porcelain", "--untracked-files=normal"],
             )
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false)

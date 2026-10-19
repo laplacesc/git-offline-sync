@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertDialog, Button, Card, Dropdown, Form, Link, Modal } from "@heroui/react";
 import { api, AppConfig, Environment, newId, Profile, Role } from "./api";
-import { BackgroundScene } from "./BackgroundScene";
 import { ExternalView } from "./ExternalView";
 import { InternalView } from "./InternalView";
 import { LogPanel, useGitLog } from "./LogPanel";
@@ -125,7 +124,6 @@ function Shell() {
 
   return (
     <div className="app-shell compact-shell" data-platform={platform}>
-      <BackgroundScene />
       <Link href="#main-content" className="skip-link">跳到主要内容</Link>
       <main id="main-content" tabIndex={-1} className="compact-window">
         <header className="compact-toolbar" data-tauri-drag-region={platform === "other" ? true : "deep"}>

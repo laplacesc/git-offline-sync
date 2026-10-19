@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Radio, RadioGroup, Tabs } from "@heroui/react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, baseCandidates, defaultBaseFor, formatTime, releasesOf, type BranchInfo, type CommitInfo, type ExportOutcome, type InternalState, type OpOutcome, type Profile, type ReturnImportResult, type ReturnPackageInfo } from "./api";
+import { api, baseCandidates, defaultBaseFor, releasesOf, type BranchInfo, type CommitInfo, type ExportOutcome, type InternalState, type OpOutcome, type Profile, type ReturnImportResult, type ReturnPackageInfo } from "./api";
 import { Feedback, FeedbackScope, useRunner } from "./runner";
 import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus, useRequestGeneration } from "./repoBits";
 import { ActionButton, BaseSelect, Check, Code, Fold, CommitList, Empty, Notice, OutcomeView, RefreshButton, TextInput } from "./ui";
 import { Icon } from "./icons";
 import { ReturnPackageInbox } from "./ReturnPackageInbox";
+import { DateTime } from "./DateTime";
 
 export function InternalView({ profile }: { profile: Profile }) {
   const { run, notify, confirm, busy } = useRunner();
@@ -65,8 +66,7 @@ export function InternalView({ profile }: { profile: Profile }) {
   const [selected, setSelected] = useState<string[]>([]);
   const selectedBranch = branches.find((b) => b.name === selected[0]);
   const [ontoPicked, setOntoPicked] = useState<string | null>(null);
-  const needsReviewRecovery = selectedBranch !== undefined && selectedBranch.name.startsWith("review/") && !selectedBranch.worktree;
-  const onto = needsReviewRecovery ? selectedBranch.base : ontoPicked ?? selectedBranch?.base ?? base;
+  const onto = ontoPicked ?? selectedBranch?.base ?? base;
   const changingBase = !!selectedBranch && onto !== selectedBranch.base;
   const [forceLease, setForceLease] = useState(false);
   useEffect(() => { setOntoPicked(null); setForceLease(false); }, [selected[0]]);
@@ -77,7 +77,6 @@ export function InternalView({ profile }: { profile: Profile }) {
 
   const branchLabel = (name: string) => work.status?.reviewSources?.[name]
     ?? returnResult?.branches.find((b) => b.local === name)?.source ?? name;
-  const packageFor = (name: string) => packages.find((p) => p.receiptKey && name.startsWith(`review/${p.receiptKey}/`));
   const unfinished = !!work.status?.inProgress || !!work.status?.inProgressTrees.length;
   const commitKey = JSON.stringify([workDir, selectedBranch?.name, selectedBranch?.base]);
   const beginCommits = useRequestGeneration(commitKey);
@@ -112,7 +111,7 @@ export function InternalView({ profile }: { profile: Profile }) {
   }
   async function receive(bundle: string, legacy = false) {
     if (legacy && !await confirm({ title: "导入没有清单的回传包", confirmLabel: "继续导入",
-      body: <p>此文件没有项目清单。请确认它属于当前工作仓库，导入后会在独立工作树整理。</p> })) return;
+      body: <p>此文件没有项目清单。请确认它属于当前工作仓库。导入和整理会在当前工作仓库切换到专用审查分支，请先提交或贮藏未提交的修改，保持工作区干净。</p> })) return;
     const result = await run("导入并整理回传", () => api.importReturn(workDir, bundle, base, releases));
     await reloadAll();
     if (result) {
@@ -129,31 +128,21 @@ export function InternalView({ profile }: { profile: Profile }) {
     const path = await open({ multiple: false, filters: [{ name: "Git bundle", extensions: ["bundle"] }] });
     if (typeof path === "string") await receive(path, true);
   }
-  const [patchOptions, setPatchOptions] = useState<Record<string, { branch: string; base: string; path: string }>>({});
+  const [patchOptions, setPatchOptions] = useState<Record<string, { branch: string; base: string }>>({});
   function patchValues(pkg: ReturnPackageInfo) {
     const source = pkg.manifest?.refs[0];
     const branch = source?.name.replace(/^refs\/heads\//, "") ?? "";
-    const separator = workDir.includes("\\") ? "\\" : "/";
-    return patchOptions[pkg.payloadPath] ?? { branch, base: source?.base ?? defaultBaseFor(branch, profile),
-      path: `${workDir.replace(/[\\/]+$/, "")}-reviews${separator}${branch.replace(/[^a-zA-Z0-9._-]/g, "_") || "patch"}` };
+    return patchOptions[pkg.payloadPath] ?? { branch, base: source?.base ?? defaultBaseFor(branch, profile) };
   }
   async function receivePatch(pkg: ReturnPackageInfo) {
     const options = patchValues(pkg);
-    if (!options.branch.trim() || !options.path.trim()) return notify("warn", "请在补丁选项中填写分支和独立工作树目录");
+    if (!options.branch.trim()) return notify("warn", "请在补丁选项中填写分支");
     const result = await run("导入补丁", () => api.importPatches({ workDir, patchDir: pkg.payloadPath,
-      branch: options.branch.trim(), baseBranch: options.base, fetchUpstream: true, worktreePath: options.path.trim() }));
+      branch: options.branch.trim(), baseBranch: options.base, fetchUpstream: true }));
     await reloadAll();
     if (result) { setOutcome(result); setSelected([options.branch.trim()]); }
   }
   async function rebaseBranch(branch: BranchInfo, target = branch.base) {
-    // 尚未创建独立工作树时，从接收记录继续，不能切换主工作仓库。
-    if (branch.name.startsWith("review/") && !branch.worktree) {
-      if (target !== branch.base) return notify("warn", "请先恢复审查工作树，再选择其他基准分支。");
-      setOntoPicked(null);
-      const pkg = packageFor(branch.name);
-      if (pkg) return receive(pkg.payloadPath);
-      return notify("warn", "请接回原回传包，再继续整理此分支");
-    }
     const result = await run("整理提交", () => api.rebaseOnto(workDir, branch.name, target, true));
     if (result) setOutcome(result);
     setOntoPicked(null);
@@ -191,6 +180,7 @@ export function InternalView({ profile }: { profile: Profile }) {
   }
   function packageIssue(pkg: ReturnPackageInfo) {
     return !pkg.payloadExists ? "包文件缺失，请重新复制。"
+      : pkg.error ? `包内容无法读取，请检查后重新复制：${pkg.error}`
       : pkg.manifest && state?.repoId && pkg.manifest.repoId !== state.repoId ? "包属于其他项目。" : null;
   }
   function packageRow(pkg: ReturnPackageInfo) {
@@ -210,11 +200,11 @@ export function InternalView({ profile }: { profile: Profile }) {
       </div>
       <Fold className="sync-details" title={patch ? "补丁选项" : "内容"}>
         <p className="text-xs break-all text-muted">{pkg.payloadPath}</p>
-        {manifest && <p className="text-xs text-muted">{formatTime(manifest.createdAt)} · {manifest.refs.length} 个分支</p>}
+        {manifest && <div className="text-xs text-muted"><DateTime value={manifest.createdAt} label="包创建时间" /> · {manifest.refs.length} 个分支</div>}
         {patch && <div className="space-y-3 mt-3">
           <TextInput label="应用到的新分支" value={options.branch} onChange={(branch) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, branch } }))} mono />
           <BaseSelect label="基准分支" value={options.base} options={candidates} mainline={base} onChange={(base) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, base } }))} />
-          <TextInput label="独立工作树目录" value={options.path} onChange={(path) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, path } }))} mono />
+          <p className="text-xs text-muted">补丁会在当前工作仓库切换到所填分支并应用，请保持工作区干净。</p>
         </div>}
       </Fold>
     </div>;
@@ -243,7 +233,7 @@ export function InternalView({ profile }: { profile: Profile }) {
         <Check checked={fetchFirst} onChange={setFetchFirst}>先拉取 GitLab 最新代码</Check>
         <Check checked={forceFull} onChange={setForceFull}>强制全量</Check>
         <p className="text-xs text-muted break-all">镜像：{mirrorDir || "请在项目设置中填写"}</p>
-        {state && <p className="text-xs text-muted">{state.outSeq ? `最近已导出 #${state.outSeq} · ${formatTime(state.lastExportAt)}` : "尚未导出"}</p>}
+        {state && <div className="text-xs text-muted">{state.outSeq ? <>最近已导出 #{state.outSeq} · <DateTime value={state.lastExportAt} label="最近导出时间" /></> : "尚未导出"}</div>}
       </div></Fold>
       {exportResult?.status === "exported" && <Fold className="sync-details" title={`查看更新 #${exportResult.seq} 文件`}>
         <Code>{exportResult.payload}</Code>
@@ -255,6 +245,7 @@ export function InternalView({ profile }: { profile: Profile }) {
       {packageError && <Feedback kind="error" text={`无法读取传输目录，请检查连接后刷新\n${packageError}`} />}
       {work.error && <Feedback kind="error" text={`读取工作仓库失败\n${work.error}`} />}
       {!workReady && !work.loading && !work.error && <Feedback kind="warn" text="请先在项目设置中填写已克隆的内网工作仓库。" />}
+      <p className="text-sm text-muted">导入和整理在已配置的工作仓库中处理，会切换分支；请先提交或贮藏未提交的修改，保持工作区干净。</p>
       <InProgressBanners status={work.status} onDone={(result) => { if (result) setOutcome(result); void reloadAll(); }} />
       {!packageError && current && packages.length > 0 && <ReturnPackageInbox key={refreshKey}
         packages={packages} disabled={!!busy || work.loading} getIssue={packageIssue} renderDetails={packageRow} />}
@@ -266,7 +257,7 @@ export function InternalView({ profile }: { profile: Profile }) {
           <Radio.Content><Radio.Control><Radio.Indicator /></Radio.Control>
           <span className="min-w-0"><code className="break-all">{branchLabel(branch.name)}</code><small className="block text-muted">{branch.ahead} 个提交 · {branch.base}{branch.behind > 0 ? " · 需要整理" : ""}</small></span>
           </Radio.Content></Radio>
-        {branch.behind > 0 || (branch.name.startsWith("review/") && !branch.worktree)
+        {branch.behind > 0
           ? <ActionButton size="sm" variant="secondary" onPress={() => rebaseBranch(branch)} isDisabled={unfinished || work.loading}>继续整理</ActionButton>
           : <ActionButton size="sm" variant="primary" onPress={() => { setSelected([branch.name]); void push(branch); }} isDisabled={unfinished || work.loading || !workReady || !!stateError || (selected[0] === branch.name && changingBase)}>检查并推送</ActionButton>}
       </div>)}</RadioGroup></>}
@@ -274,16 +265,15 @@ export function InternalView({ profile }: { profile: Profile }) {
         <h3>{branchLabel(selectedBranch.name)}</h3>
         {visibleCommits?.error ? <Feedback kind="error" text={`读取提交失败，请刷新\n${visibleCommits.error}`} />
           : visibleCommits ? <CommitList commits={visibleCommits.commits} /> : !busy && <Feedback kind="progress" text="正在读取提交…" />}
-        <BaseSelect label="基准分支" value={onto} options={candidates} mainline={base} onChange={setOntoPicked} isDisabled={needsReviewRecovery} />
-        {needsReviewRecovery && <p className="text-sm text-muted">请先恢复审查工作树，再选择其他基准分支。</p>}
+        <BaseSelect label="基准分支" value={onto} options={candidates} mainline={base} onChange={setOntoPicked} />
         {changingBase && <p className="text-sm text-muted">将提交整理到 origin/{onto}，不会推送。</p>}
         <Check checked={forceLease} onChange={setForceLease}>允许非快进更新（推送前再次确认覆盖）</Check>
-        <ActionButton variant="secondary" isDisabled={!workReady || unfinished} onPress={() => rebaseBranch(selectedBranch, onto)}>{needsReviewRecovery ? "恢复审查工作树" : "整理提交"}</ActionButton>
+        <ActionButton variant="secondary" isDisabled={!workReady || unfinished} onPress={() => rebaseBranch(selectedBranch, onto)}>整理提交</ActionButton>
       </div></Fold>}
       {outcome && !outcome.ok && <OutcomeView outcome={outcome} />}
       <Fold className="sync-details" title={"其他回传与分支管理"}><div className="space-y-4">
         <ActionButton size="sm" variant="secondary" onPress={browse} isDisabled={!workReady || !!stateError || unfinished}>选择其他文件…</ActionButton>
-        <DirtyTreesNotice status={work.status} suffix="回传在独立工作树中整理。" />
+        <DirtyTreesNotice status={work.status} suffix="导入和整理会在当前工作仓库切换分支，请先保持工作区干净。" />
         <BranchTable branches={branches} selected={selected} onSelect={setSelected} repoPath={workDir} onDeleted={reloadAll}
           onRebase={(branch) => { setSelected([branch.name]); void rebaseBranch(branch); }} />
         <DetachedWorktreesNotice status={work.status} />

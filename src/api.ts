@@ -134,6 +134,7 @@ export interface PackageInfo {
 export interface ReturnPackageInfo extends PackageInfo {
   received: boolean;
   receiptKey?: string | null;
+  error?: string | null;
 }
 
 export type ExportOutcome =
@@ -312,9 +313,7 @@ export const api = {
     branch: string;
     baseBranch: string;
     fetchUpstream: boolean;
-    /** 给了就把分支建成独立 worktree，不抢主工作树 */
-    worktreePath?: string;
-  }) => mutate<OpOutcome>("import_patches", { ...a, worktreePath: a.worktreePath ?? null }),
+  }) => mutate<OpOutcome>("import_patches", a),
   importReturn: (workDir: string, bundle: string, baseBranch: string, releaseBranches: string[]) =>
     mutate<ReturnImportResult>("import_return", { workDir, bundle, baseBranch, releaseBranches }),
   preparePush: (workDir: string, branch: string, forceWithLease: boolean) =>

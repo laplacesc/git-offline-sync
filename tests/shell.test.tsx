@@ -13,7 +13,6 @@ const nativeWindow = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => nativeWindow }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
-vi.mock("../src/BackgroundScene", () => ({ BackgroundScene: () => null }));
 vi.mock("../src/ExternalView", () => ({ ExternalView: ({ profile }: { profile: Profile }) => {
   const { run } = useRunner();
   return <><p>外网工作区：{profile.name}</p><input aria-label="工作区输入" defaultValue="" />
@@ -316,7 +315,7 @@ it("配置读取失败可以重试，并保留 Git 不可用提示", async () =>
   expect((await screen.findByText(/无法读取同步配置/)).closest(".operation-popups")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "重新读取配置" }));
   expect(await screen.findByText("外网工作区：订单服务")).toBeTruthy();
-  expect(screen.getByText(/找不到可用的 git/).closest(".operation-popups")).toBeTruthy();
+  expect((await screen.findByText(/找不到可用的 git/)).closest(".operation-popups")).toBeTruthy();
 });
 
 it("项目菜单可直接新建外网配置，取消后回到原项目", async () => {

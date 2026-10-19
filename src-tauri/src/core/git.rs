@@ -4,7 +4,7 @@
 //! 每条命令和输出都会通过 logger 回调推送给界面。
 
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -383,9 +383,39 @@ impl<'a> Git<'a> {
 
     fn exec_command(
         &self,
+        cmd: Command,
+        stdin: Option<&str>,
+        echo_stdout: bool,
+    ) -> Result<GitOutput> {
+        self.exec_command_prepared(cmd, stdin, echo_stdout, None)
+    }
+
+    /// Validate while Git holds the transaction's reference locks, before committing.
+    pub(super) fn ref_transaction(
+        &self,
+        cwd: &Path,
+        updates: &str,
+        validate: &(dyn Fn() -> Result<()> + Sync),
+    ) -> Result<()> {
+        self.check_cancelled()?;
+        let args = args!["update-ref", "--no-deref", "--stdin"];
+        self.emit(LogKind::Cmd, Self::display(&args));
+        let input = format!("start\n{updates}prepare\n");
+        let out = self.exec_command_prepared(
+            self.build(Some(cwd), &args),
+            Some(&input),
+            true,
+            Some(validate),
+        )?;
+        self.check(&args, out).map(|_| ())
+    }
+
+    fn exec_command_prepared(
+        &self,
         mut cmd: Command,
         stdin: Option<&str>,
         echo_stdout: bool,
+        validate: Option<&(dyn Fn() -> Result<()> + Sync)>,
     ) -> Result<GitOutput> {
         #[cfg(unix)]
         {
@@ -421,20 +451,48 @@ impl<'a> Git<'a> {
         let out = child.stdout.take().expect("stdout piped");
         let err = child.stderr.take().expect("stderr piped");
         let started = Instant::now();
+        let transaction_prepared = AtomicBool::new(false);
 
         thread::scope(|scope| {
+            let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
             let input = match (input_pipe, stdin) {
-                (Some(mut pipe), Some(bytes)) => {
-                    Some(scope.spawn(move || pipe.write_all(bytes.as_bytes())))
-                }
+                (Some(mut pipe), Some(bytes)) => Some(scope.spawn(move || -> Result<()> {
+                    pipe.write_all(bytes.as_bytes())?;
+                    if let Some(validate) = validate {
+                        pipe.flush()?;
+                        prepared_rx
+                            .recv()
+                            .map_err(|_| SyncError::Invalid("Git 未能准备引用事务".into()))?;
+                        if let Err(error) = self
+                            .check_cancelled()
+                            .and_then(|_| validate())
+                            .and_then(|_| self.check_cancelled())
+                        {
+                            let _ = pipe.write_all(b"abort\n");
+                            return Err(error);
+                        }
+                        pipe.write_all(b"commit\n")?;
+                    }
+                    Ok(())
+                })),
                 _ => None,
             };
-            let stdout = scope.spawn(|| -> std::io::Result<String> {
+            let prepared = &transaction_prepared;
+            let stdout = scope.spawn(move || -> std::io::Result<String> {
                 let mut acc = String::new();
+                if !echo_stdout {
+                    // 查询可能使用 NUL 分隔字段；按行读取会改写路径里的 CRLF。
+                    BufReader::new(out).read_to_string(&mut acc)?;
+                    return Ok(acc);
+                }
                 for line in BufReader::new(out).lines() {
                     let line = line?;
-                    if echo_stdout {
-                        self.emit(LogKind::Stdout, &line);
+                    if validate.is_some() && line == "prepare: ok" {
+                        prepared.store(true, Ordering::SeqCst);
+                    }
+                    self.emit(LogKind::Stdout, &line);
+                    if validate.is_some() && line == "prepare: ok" {
+                        let _ = prepared_tx.send(());
                     }
                     acc.push_str(&line);
                     acc.push('\n');
@@ -470,7 +528,10 @@ impl<'a> Git<'a> {
                 {
                     break;
                 }
-                if self.control.as_ref().is_some_and(|c| c.is_cancelled()) {
+                // Let prepared transactions abort and release their HEAD locks.
+                if self.control.as_ref().is_some_and(|c| c.is_cancelled())
+                    && !transaction_prepared.load(Ordering::SeqCst)
+                {
                     interrupted = Some(SyncError::Cancelled);
                     break;
                 }

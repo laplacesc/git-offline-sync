@@ -322,7 +322,6 @@ pub async fn import_back(
 }
 
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub async fn import_patches(
     app: AppHandle,
     work_dir: String,
@@ -330,10 +329,8 @@ pub async fn import_patches(
     branch: String,
     base_branch: String,
     fetch_upstream: bool,
-    worktree_path: Option<String>,
 ) -> CmdResult<OpOutcome> {
     mutating(app, move |g| {
-        let wt = worktree_path.filter(|s| !s.trim().is_empty()).map(p);
         sync::import_patches(
             g,
             &p(work_dir),
@@ -341,7 +338,7 @@ pub async fn import_patches(
             &branch,
             &base_branch,
             fetch_upstream,
-            wt.as_deref(),
+            None,
         )
     })
     .await

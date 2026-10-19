@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Button, Chip, Disclosure, ToggleButton } from "@heroui/react";
 import { LOG_EVENT, LogEvent } from "./api";
 import { Icon } from "./icons";
+import { Time } from "./DateTime";
 import { OperationRecord, useRunner } from "./runner";
 
 export type RecordedLog = LogEvent & { operationId?: number };
@@ -122,12 +123,12 @@ export function LogPanel({
             return <Disclosure key={id ?? "background"} className="log-group" defaultExpanded>
               <Disclosure.Heading><Disclosure.Trigger><Disclosure.Indicator /><Icon name="terminal" /><strong>{op?.label ?? (id === undefined ? "仓库状态与其他输出" : `较早操作 #${id}`)}</strong>
                 <span className={failed ? "text-danger" : "log-count"}>{status}</span>
-                {op && <span className="log-duration">{time(op.startedAt)}{op.endedAt !== undefined ? ` · ${((op.endedAt - op.startedAt) / 1000).toFixed(1)}s` : ""}</span>}
+                {op && <div className="log-duration"><Time value={op.startedAt} label="操作开始时间" />{op.endedAt !== undefined ? ` · ${((op.endedAt - op.startedAt) / 1000).toFixed(1)}s` : ""}</div>}
               </Disclosure.Trigger></Disclosure.Heading>
               <Disclosure.Content><Disclosure.Body>
               {op?.stopRequested && <p className="log-line text-warning">已请求停止；停止不代表回滚，请检查操作结果。</p>}
               {group.lines.map((line, i) => <div key={i} className="log-line">
-                <span className="log-time">{time(line.ts)}</span><span className={`log-${line.kind}`}>{line.text}</span>
+                <div className="log-time"><Time value={line.ts} label="日志时间" /></div><span className={`log-${line.kind}`}>{line.text}</span>
               </div>)}
               {!group.lines.length && <p className="log-line log-count">暂无命令输出</p>}
               </Disclosure.Body></Disclosure.Content>

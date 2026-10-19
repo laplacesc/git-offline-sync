@@ -21,9 +21,13 @@ import {
   Surface,
   TextField,
   FieldError,
+  Fieldset,
+  Meter,
+  Typography,
   Tabs,
 } from "@heroui/react";
 import type { ButtonProps } from "@heroui/react";
+import { DateTime } from "./DateTime";
 import { BundleKind, CommitInfo, KIND_LABEL, OpOutcome, shortSha } from "./api";
 import { useRunner } from "./runner";
 import { Icon } from "./icons";
@@ -125,11 +129,11 @@ export function Pipeline({ lanes, next, onRefresh }: {
 
 export function AheadBehind({ ahead, behind }: { ahead: number; behind: number }) {
   const total = Math.max(ahead + behind, 1);
-  return <div className="ahead-behind" aria-label={`落后 ${behind} 个提交，领先 ${ahead} 个提交`}>
+  return <Meter className="ahead-behind" aria-label="分支提交差异" aria-valuetext={`落后 ${behind} 个提交，领先 ${ahead} 个提交`} value={behind} maxValue={total}>
     <span className={behind ? "text-warning" : "text-muted"}>↓{behind}</span>
-    <span className="ahead-behind-track" aria-hidden="true"><i style={{ width: `${behind / total * 100}%` }} /><b style={{ width: `${ahead / total * 100}%` }} /></span>
+    <Meter.Track className="ahead-behind-track" data-has-ahead={ahead > 0}><Meter.Fill className="ahead-behind-fill" /></Meter.Track>
     <span className={ahead ? "text-success" : "text-muted"}>↑{ahead}</span>
-  </div>;
+  </Meter>;
 }
 
 /** Only show observed sequences and the immediate next expected number. */
@@ -403,9 +407,9 @@ export function CommitList({ commits, empty = "没有提交" }: { commits: Commi
           <div key={c.sha} className="commit-row">
             <Code className="commit-sha">{shortSha(c.sha)}</Code>
             <span className="text-sm font-medium">{c.subject}</span>
-            <span className="commit-author text-xs text-muted">
-              {c.author} &lt;{c.email}&gt; · {c.date}
-            </span>
+            <div className="commit-author text-xs text-muted">
+              {c.author} &lt;{c.email}&gt; · <DateTime value={c.date} label="提交时间" />
+            </div>
           </div>
         ))}
       </ListSurface>
@@ -415,9 +419,9 @@ export function CommitList({ commits, empty = "没有提交" }: { commits: Commi
 
 export function Code({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
-    <code className={"rounded-2xl bg-default px-1.5 py-0.5 font-mono text-[12px] break-all text-foreground " + className}>
+    <Typography.Code className={"rounded-2xl bg-default px-1.5 py-0.5 font-mono text-[12px] break-all text-foreground " + className}>
       {children}
-    </code>
+    </Typography.Code>
   );
 }
 
@@ -480,11 +484,12 @@ export function AppGlyph({ className = "size-5" }: { className?: string }) {
 
 /** 配置与设置共用的分组布局，说明列与字段列随可用宽度切换。 */
 export function FormSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
-  return <section className="form-section">
+  const titleId = useId();
+  return <Fieldset<"section"> render={(props) => <section {...props} />} role="group" aria-labelledby={titleId} className="form-section">
     <div className="space-y-1">
-      <h2 className="text-base font-semibold">{title}</h2>
-      <p className="text-sm leading-relaxed text-muted">{description}</p>
+      <Fieldset.Legend<"h2"> render={(props) => <h2 {...props} />} id={titleId} className="text-base font-semibold">{title}</Fieldset.Legend>
+      <Description className="text-sm leading-relaxed text-muted">{description}</Description>
     </div>
-    <div className="min-w-0">{children}</div>
-  </section>;
+    <Fieldset.Group className="min-w-0">{children}</Fieldset.Group>
+  </Fieldset>;
 }

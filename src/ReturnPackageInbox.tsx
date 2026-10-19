@@ -1,9 +1,15 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { Button, Input, Label, ListBox, Select, TextField } from "@heroui/react";
+import { Button, EmptyState, Input, Label, ListBox, Pagination, Select, TextField } from "@heroui/react";
 import { formatTime, type ReturnPackageInfo } from "./api";
 
 const PAGE_SIZE = 20;
 type PackageFilter = "pending" | "received" | "all";
+
+function packageStatus(pkg: ReturnPackageInfo, issue: string | null) {
+  if (!issue) return pkg.received ? "已接收" : "待接收";
+  if (!pkg.payloadExists) return "文件缺失";
+  return pkg.error ? "包内容异常" : "其他项目";
+}
 
 /** 只渲染当前页与一个详情区，大量历史包不会挤走后续的审查操作。 */
 export function ReturnPackageInbox({ packages, disabled, getIssue, renderDetails }: {
@@ -63,22 +69,24 @@ export function ReturnPackageInbox({ packages, disabled, getIssue, renderDetails
                 <div className="return-package-title"><span className="return-package-name" title={`${name}${pkg.manifest ? ` · ${formatTime(pkg.manifest.createdAt)}` : ""}`}>{name}</span>
                   <span className="return-package-seq">{pkg.manifest ? `#${pkg.manifest.seq}` : "无清单"}</span></div>
                 <div className="return-package-meta"><span title={branches.join("、")}>{branches[0] || "未标注分支"}{branches.length > 1 ? ` 等 ${branches.length} 个分支` : ""}</span>
-                  <span data-issue={!!issue}>{issue ? !pkg.payloadExists ? "文件缺失" : "其他项目" : pkg.received ? "已接收" : "待接收"}</span></div>
+                  <span data-issue={!!issue}>{packageStatus(pkg, issue)}</span></div>
               </div><ListBox.ItemIndicator />
             </ListBox.Item>;
           })}
         </ListBox>
-        <div className="return-inbox-pagination">
-          <span role="status">{currentPage * PAGE_SIZE + 1}–{Math.min((currentPage + 1) * PAGE_SIZE, filtered.length)} / {filtered.length}</span>
-          <Button size="sm" variant="ghost" isDisabled={disabled || currentPage === 0} onPress={() => { setPage(currentPage - 1); setPicked(null); }}>上一页</Button>
-          <Button size="sm" variant="ghost" isDisabled={disabled || currentPage + 1 >= pageCount} onPress={() => { setPage(currentPage + 1); setPicked(null); }}>下一页</Button>
-        </div>
+        <Pagination className="return-inbox-pagination" aria-label="回传包分页" size="sm">
+          <Pagination.Summary role="status">{currentPage * PAGE_SIZE + 1}–{Math.min((currentPage + 1) * PAGE_SIZE, filtered.length)} / {filtered.length}</Pagination.Summary>
+          <Pagination.Content>
+            <Pagination.Item><Pagination.Previous aria-label="上一页" isDisabled={disabled || currentPage === 0} onPress={() => { setPage(currentPage - 1); setPicked(null); }}>上一页</Pagination.Previous></Pagination.Item>
+            <Pagination.Item><Pagination.Next aria-label="下一页" isDisabled={disabled || currentPage + 1 >= pageCount} onPress={() => { setPage(currentPage + 1); setPicked(null); }}>下一页</Pagination.Next></Pagination.Item>
+          </Pagination.Content>
+        </Pagination>
       </div>
       <section className="return-inbox-detail" aria-label="选中的回传包">{renderDetails(selected.pkg)}</section>
-    </div> : <div className="return-inbox-empty" role="status">
+    </div> : <EmptyState className="return-inbox-empty" role="status">
       <p>{term ? "没有匹配的回传包。" : filter === "received" ? "还没有已接收的包。" : "没有待接收的包。"}</p>
       {term ? <Button size="sm" variant="secondary" isDisabled={disabled} onPress={() => { setQuery(""); setPage(0); }}>清除搜索</Button>
         : filter === "pending" && packages.length > 0 ? <Button size="sm" variant="secondary" isDisabled={disabled} onPress={() => changeFilter("received")}>查看已接收的包</Button> : null}
-    </div>}
+    </EmptyState>}
   </section>;
 }

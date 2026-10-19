@@ -22,10 +22,11 @@ export function UpdatePanel({ currentVersion }: { currentVersion?: string }) {
     await run("下载更新", downloadUpdate);
     if (getUpdateState().status === "downloaded") notify("ok", "新版本已下载，重启后完成更新");
   };
-  const onInstall = () => run("安装更新", installUpdate);
+  const onInstall = () => run(s.status === "installed" ? "重启应用" : "安装更新", installUpdate);
 
   let summary = currentVersion ? `当前版本 v${currentVersion}` : "当前版本未知";
-  if (hasUpdate(s)) summary = `${s.status === "downloaded" ? "待安装版本" : "可用版本"} v${s.availableVersion}`;
+  if (s.status === "installed") summary = `已安装版本 v${s.availableVersion}，待重启`;
+  else if (hasUpdate(s)) summary = `${s.status === "downloaded" ? "待安装版本" : "可用版本"} v${s.availableVersion}`;
 
   return (
     <div className="update-panel" aria-live="polite">
@@ -58,6 +59,9 @@ export function UpdatePanel({ currentVersion }: { currentVersion?: string }) {
         {s.status === "downloaded" && (
           <Button variant="primary" onPress={onInstall} isDisabled={!!busy}>重启并安装</Button>
         )}
+        {s.status === "installed" && (
+          <Button variant="primary" onPress={onInstall} isDisabled={!!busy}>{s.error ? "重试重启" : "立即重启"}</Button>
+        )}
         <Button variant="tertiary" onPress={openReleases}>查看发布页</Button>
       </div>
     </div>
@@ -74,7 +78,8 @@ export function VersionChip({ version, onOpenUpdates, isDisabled }: { version?: 
   const ready = hasUpdate(s);
   let label = version ? `v${version}` : "";
   if (ready) label = `v${s.availableVersion}`;
-  const title = ready ? `新版本 v${s.availableVersion} 可用，点击查看` : "检查更新";
+  let title = ready ? `新版本 v${s.availableVersion} 可用，点击查看` : "检查更新";
+  if (s.status === "installed") title = `新版本 v${s.availableVersion} 已安装，待重启，点击查看`;
 
   const onPress = async () => {
     if (ready) return onOpenUpdates();

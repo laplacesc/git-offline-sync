@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertDialog, Checkbox, CheckboxGroup, Label, ListBox, Radio, RadioGroup, Select, Tabs } from "@heroui/react";
+import { DateTime } from "./DateTime";
 import {
-  api, baseCandidates, defaultBaseFor, BranchInfo, ExportOutcome, formatTime, MirrorState,
+  api, baseCandidates, defaultBaseFor, BranchInfo, ExportOutcome, MirrorState,
   OpOutcome, PackageInfo, prefixWarning, Profile, RefEntry, releasesOf, shortSha,
 } from "./api";
 import { Feedback, FeedbackScope, useRunner } from "./runner";
@@ -277,7 +278,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
         </ActionButton>
       </div>
       <Fold className="sync-details" title={"更新包详情与选择"}>
-        {chosen && <p><Code>{chosen.payloadPath}</Code> · {formatTime(chosen.manifest?.createdAt)}</p>}
+        {chosen && <div><Code>{chosen.payloadPath}</Code> · <DateTime value={chosen.manifest?.createdAt} label="包创建时间" /></div>}
         {chosen?.manifest?.refs.map((ref) => <p key={ref.name}><Code>{ref.name}</Code> · {shortSha(ref.sha)}</p>)}
         <Select className="sync-select-field" fullWidth value={chosen?.payloadPath ?? "no-package"} isDisabled={!ready || !!busy}
           disabledKeys={packages.filter((p) => !usable(p)).map((p) => p.payloadPath)}
