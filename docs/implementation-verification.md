@@ -24,6 +24,7 @@
 - `pnpm test`：163 项前端测试、15 项发布脚本测试通过。`cargo test --locked`：82 项 Rust 全量测试通过；本轮修复及组件统一新增 7 项 Rust 回归和 4 项前端回归。
 - v2.1.7 的日期／日志时间、分页、空状态、表单错误摘要、表单分组、代码文本和提交差异刻度条使用 HeroUI。真实浏览器中检查了深浅主题与分页切换，确认时间字段不会进入 Tab 顺序；检查范围为组件验证页，不计作原生桌面端验收。
 - `pnpm build`、`pnpm check:version`、Rust 格式检查、Clippy（`--all-targets -- -D warnings`）及 `git diff --check` 通过。
+- v2.1.7 的 Windows CI 在两处 Patch 文件内容断言中因 CRLF/LF 差异失败，未构建安装包或公开 Release。测试夹具现固定 `core.autocrlf=false`、`core.eol=lf`；使用全局 `autocrlf=true` / `eol=crlf` 在本地复现原失败后，8 项 Patch 回归全部通过。产品的换行策略保持不变，后续发布版本为 v2.1.8。
 - 当前最低 Git 版本为 2.36，以支持 NUL 分隔的工作树列表。本次在 macOS 运行自动测试，未重新执行原生 Windows 桌面或真实更新安装验证。
 
 ## 历史自动验证（v2.1.3）

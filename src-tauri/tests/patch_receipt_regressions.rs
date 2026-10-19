@@ -42,6 +42,9 @@ impl Fixture {
         git(&work, &["config", "user.name", "Patch Tester"]);
         git(&work, &["config", "user.email", "patch@example.invalid"]);
         git(&work, &["config", "commit.gpgSign", "false"]);
+        // These fixtures assert exact bytes; do not inherit the host's checkout EOL policy.
+        git(&work, &["config", "core.autocrlf", "false"]);
+        git(&work, &["config", "core.eol", "lf"]);
         fs::write(work.join("file"), "base\n").unwrap();
         git(&work, &["add", "file"]);
         git(&work, &["commit", "-m", "base"]);
