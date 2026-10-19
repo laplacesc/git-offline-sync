@@ -206,7 +206,8 @@ it("设置保存失败时保留输入供重试", async () => {
   const path = screen.getByRole("textbox", { name: "git 可执行文件" }) as HTMLInputElement;
   fireEvent.change(path, { target: { value: "/custom/git" } });
   fireEvent.click(screen.getByRole("button", { name: "保存并重新检测" }));
-  expect(await screen.findByText("保存失败，请检查错误提示后重试。")).toBeTruthy();
+  expect((await screen.findByText("保存配置失败：Error: 配置不可写")).closest(".operation-popups")).toBeTruthy();
+  expect(screen.queryByText("保存失败，请检查错误提示后重试。")).toBeNull();
   expect(path.value).toBe("/custom/git");
   fireEvent.click(screen.getByRole("button", { name: "保存并重新检测" }));
   await waitFor(() => expect(screen.queryByRole("button", { name: "保存并重新检测" })).toBeNull());
@@ -236,7 +237,8 @@ it("配置保存失败时保留模态和填写内容，重试成功后返回工�
   const name = within(dialog).getByRole("textbox", { name: "名称" }) as HTMLInputElement;
   fireEvent.change(name, { target: { value: "订单新版" } });
   fireEvent.click(within(dialog).getByRole("button", { name: "保存", exact: true }));
-  expect(await screen.findByText("保存失败，请检查错误提示后重试。填写内容已保留。")).toBeTruthy();
+  expect((await screen.findByText("保存配置失败：Error: 配置不可写")).closest(".operation-popups")).toBeTruthy();
+  expect(within(dialog).queryByRole("alert")).toBeNull();
   expect(name.value).toBe("订单新版");
   expect(screen.getByRole("dialog", { name: "编辑同步配置" })).toBeTruthy();
   fireEvent.click(within(dialog).getByRole("button", { name: "保存", exact: true }));
@@ -311,10 +313,10 @@ it("配置读取失败可以重试，并保留 Git 不可用提示", async () =>
   vi.mocked(api.loadConfig).mockRejectedValueOnce(new Error("配置损坏"));
   vi.mocked(api.environment).mockResolvedValue({ os: "macos", git: { Err: "找不到 git" }, configPath: "/config.json", version: "2.0.1" });
   render(<App />);
-  expect(await screen.findByText("无法读取同步配置")).toBeTruthy();
+  expect((await screen.findByText(/无法读取同步配置/)).closest(".operation-popups")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "重新读取配置" }));
   expect(await screen.findByText("外网工作区：订单服务")).toBeTruthy();
-  expect(screen.getByText("找不到可用的 git")).toBeTruthy();
+  expect(screen.getByText(/找不到可用的 git/).closest(".operation-popups")).toBeTruthy();
 });
 
 it("项目菜单可直接新建外网配置，取消后回到原项目", async () => {

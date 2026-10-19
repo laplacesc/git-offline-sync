@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertDialog, Button, Card, Dropdown, Form, Link, Modal, Spinner, Toast } from "@heroui/react";
+import { AlertDialog, Button, Card, Dropdown, Form, Link, Modal } from "@heroui/react";
 import { api, AppConfig, Environment, newId, Profile, Role } from "./api";
 import { BackgroundScene } from "./BackgroundScene";
 import { ExternalView } from "./ExternalView";
@@ -7,8 +7,8 @@ import { InternalView } from "./InternalView";
 import { LogPanel, useGitLog } from "./LogPanel";
 import { blankProfile, ProfileEditor } from "./ProfileEditor";
 import { Icon } from "./icons";
-import { OperationStatus, RunnerProvider, useRunner } from "./runner";
-import { AppGlyph, FormSection, Notice, PathInput, SectionLabel, TextInput } from "./ui";
+import { Feedback, OperationStatus, RunnerProvider, useRunner } from "./runner";
+import { AppGlyph, FormSection, PathInput, SectionLabel, TextInput } from "./ui";
 import { UpdatePanel } from "./UpdatePanel";
 import { WindowControls } from "./WindowControls";
 import { startAutoCheck } from "./updater";
@@ -23,7 +23,7 @@ function Shell() {
   useInputModality();
   const { preference, setPreference } = useAppearance();
   const appearanceLabel = preference === "system" ? "跟随系统" : preference === "light" ? "浅色" : "深色";
-  const { busy, notify, confirm, operations, clearOperations } = useRunner();
+  const { busy, notify, run, confirm, operations, clearOperations } = useRunner();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [env, setEnv] = useState<Environment | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -60,12 +60,10 @@ function Shell() {
   const persist = async (next: AppConfig) => {
     setSavingConfig(true);
     try {
-      await api.saveConfig(next);
+      const saved = await run("保存配置", async () => { await api.saveConfig(next); return true; });
+      if (!saved) return false;
       setConfig(next);
       return true;
-    } catch (e) {
-      notify("error", `保存配置失败：${String(e)}`);
-      return false;
     } finally {
       setSavingConfig(false);
     }
@@ -81,7 +79,10 @@ function Shell() {
     const exists = config.profiles.some((x) => x.id === p.id);
     const profiles = exists ? config.profiles.map((x) => (x.id === p.id ? p : x)) : [...config.profiles, p];
     const saved = await persist({ ...config, profiles, lastProfileId: p.id });
-    if (saved) setMode({ kind: "view" });
+    if (saved) {
+      setMode({ kind: "view" });
+      notify("ok", "同步配置已保存");
+    }
     return saved;
   };
   const deleteProfile = async (p: Profile) => {
@@ -94,7 +95,10 @@ function Shell() {
     });
     if (!ok) return;
     const profiles = config.profiles.filter((x) => x.id !== p.id);
-    if (await persist({ ...config, profiles, lastProfileId: profiles[0]?.id })) setMode({ kind: "view" });
+    if (await persist({ ...config, profiles, lastProfileId: profiles[0]?.id })) {
+      setMode({ kind: "view" });
+      notify("ok", `已删除配置“${p.name}”`);
+    }
   };
   const closeDialog = () => {
     if (savingConfig) return;
@@ -184,12 +188,10 @@ function Shell() {
         <div ref={contentRef} className="compact-scroll">
           <div className="compact-content">
             {loadError ? <div className="space-y-4">
-              <Notice tone="danger" title="无法读取同步配置">{loadError}</Notice>
+              <Feedback kind="error" text={`无法读取同步配置\n${loadError}`} />
               <Button onPress={() => setLoadAttempt((n) => n + 1)}>重新读取配置</Button>
-            </div> : !config ? <Spinner size="lg" aria-label="正在读取配置" /> : <>
-              {env && "Err" in env.git && <Notice tone="danger" title="找不到可用的 git">
-                {env.git.Err}。请安装 Git，或在设置中指定 git 可执行文件路径。
-              </Notice>}
+            </div> : !config ? <Feedback kind="progress" text="正在读取配置…" /> : <>
+              {env && "Err" in env.git && <Feedback kind="error" text={`找不到可用的 git\n${env.git.Err}。请安装 Git，或在设置中指定 git 可执行文件路径。`} />}
               {current ? (current.role === "internal"
                 ? <InternalView key={current.id} profile={current} />
                 : <ExternalView key={current.id} profile={current} />)
@@ -228,6 +230,7 @@ function Shell() {
                   if (!await persist(next)) return false;
                   setEnv(await api.environment().catch(() => null));
                   setMode({ kind: "view" });
+                  notify("ok", "设置已保存并重新检测");
                   return true;
                 }} onCancel={() => setMode({ kind: "view" })} />}
             </div>
@@ -249,17 +252,16 @@ function Settings({
   onSave: (c: AppConfig) => boolean | void | Promise<boolean | void>;
   onCancel: () => void;
 }) {
+  const { notify } = useRunner();
   const [gitPath, setGitPath] = useState(config.gitPath ?? "");
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
   const [discardOpen, setDiscardOpen] = useState(false);
   const dirty = gitPath !== (config.gitPath ?? "");
   async function save() {
     setSaving(true);
-    setError("");
     try {
-      if (await onSave({ ...config, gitPath: gitPath.trim() || undefined }) === false) setError("保存失败，请检查错误提示后重试。");
-    } catch (e) { setError(String(e)); }
+      await onSave({ ...config, gitPath: gitPath.trim() || undefined });
+    } catch (e) { notify("error", `保存失败：${String(e)}`); }
     finally { setSaving(false); }
   }
   return (
@@ -280,7 +282,6 @@ function Settings({
         <Card.Title render={(props) => <h1 {...props} />} className="text-xl font-semibold">设置</Card.Title>
       </Card.Header>
       <Card.Content className="flex flex-col gap-5 px-8 pb-8">
-        {error && <p role="alert" className="text-danger">{error}</p>}
         <FormSection title="Git 环境" description="默认自动检测 Git。只有自动检测失败或需要指定版本时，才填写可执行文件路径。">
         <PathInput
           label="git 可执行文件"
@@ -316,8 +317,8 @@ function Settings({
         <Button variant="tertiary" onPress={() => dirty ? setDiscardOpen(true) : onCancel()} isDisabled={saving}>
           取消
         </Button>
-        <Button variant="primary" type="submit" isDisabled={saving}>
-          {saving ? "保存并检测中…" : "保存并重新检测"}
+        <Button variant="primary" type="submit" isDisabled={saving} aria-busy={saving}>
+          保存并重新检测
         </Button>
       </Card.Footer>
     </Card>
@@ -328,7 +329,6 @@ function Settings({
 export default function App() {
   return (
     <RunnerProvider>
-      <Toast.Provider placement="top end" />
       <Shell />
     </RunnerProvider>
   );

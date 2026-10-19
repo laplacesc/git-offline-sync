@@ -70,7 +70,28 @@ export function stageAssets(label, output, version, root = projectRoot) {
   for (const [source, name] of files) copyFileSync(source, join(output, name));
 }
 
-export function prepareAssets(directory, version, repository, tag = `v${version}`) {
+function requireReleaseNotes(notes, version) {
+  const content = typeof notes === 'string' ? notes.trim() : '';
+  if (!content || content === `GitOfflineSync ${version}` || content === `# v${version}`) {
+    throw new Error(`Release notes must contain the changes for v${version}`);
+  }
+  return content;
+}
+
+export function readReleaseNotes(version, root = projectRoot) {
+  const path = join(root, 'docs/releases', `v${version}.md`);
+  let notes;
+  try {
+    notes = readFileSync(path, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new Error(`Missing release notes: ${path}`);
+    throw error;
+  }
+  return requireReleaseNotes(notes, version);
+}
+
+export function prepareAssets(directory, version, repository, tag = `v${version}`, notes = readReleaseNotes(version)) {
+  notes = requireReleaseNotes(notes, version);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? '')) throw new Error('Invalid GitHub repository');
   if (tag !== `v${version}`) throw new Error('Release tag/version mismatch');
   const names = assetNames(version);
@@ -85,7 +106,7 @@ export function prepareAssets(directory, version, repository, tag = `v${version}
   });
   const manifest = {
     version,
-    notes: `GitOfflineSync ${version}`,
+    notes,
     pub_date: new Date().toISOString(),
     platforms: {
       'windows-x86_64': platform(names.slim),
@@ -97,9 +118,9 @@ export function prepareAssets(directory, version, repository, tag = `v${version}
   // A retry must not silently overwrite a stale or tampered updater manifest.
   if (!readdirSync(directory).includes('latest.json')) writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   const saved = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  if (saved.version !== version || typeof saved.notes !== 'string' || !Number.isFinite(Date.parse(saved.pub_date)) ||
+  if (saved.version !== version || saved.notes !== manifest.notes || !Number.isFinite(Date.parse(saved.pub_date)) ||
       JSON.stringify(saved.platforms) !== JSON.stringify(manifest.platforms)) {
-    throw new Error('Invalid latest.json version, date, platform URLs or signatures');
+    throw new Error('Invalid latest.json version, release notes, date, platform URLs or signatures');
   }
   return [...expected, 'latest.json'].map((name) => ({ name, path: join(directory, name), size: nonemptyFile(join(directory, name)) }));
 }
@@ -147,6 +168,11 @@ function requireDraft(release, tag) {
 }
 
 export async function publishAssets(client, assets, tag) {
+  const manifestAsset = assets.find(({ name }) => name === 'latest.json');
+  if (!manifestAsset) throw new Error('Missing latest.json');
+  const manifest = JSON.parse(readFileSync(manifestAsset.path, 'utf8'));
+  if (tag !== `v${manifest.version}`) throw new Error('Release tag/version mismatch');
+  const notes = requireReleaseNotes(manifest.notes, manifest.version);
   let release = await client.request(`/releases/tags/${encodeURIComponent(tag)}`, { missing: true });
   // GitHub documents the tag endpoint for published releases only. Discover
   // authenticated drafts through the paginated release list when it returns 404.
@@ -164,7 +190,7 @@ export async function publishAssets(client, assets, tag) {
     // Do not let the release API create a tag at an unintended branch HEAD.
     await client.request(`/git/ref/tags/${encodeURIComponent(tag)}`);
     release = await client.request('/releases', {
-      method: 'POST', body: { tag_name: tag, name: tag, draft: true, prerelease: tag.includes('-'), make_latest: 'false', generate_release_notes: true },
+      method: 'POST', body: { tag_name: tag, name: tag, draft: true, prerelease: tag.includes('-'), make_latest: 'false', body: notes },
     });
     requireDraft(release, tag);
   }
@@ -193,7 +219,7 @@ export async function publishAssets(client, assets, tag) {
   // This is the sole publication operation. Failed uploads/checks leave a draft,
   // so releases/latest cannot point at a release missing latest.json or a bundle.
   await client.request(path, {
-    method: 'PATCH', body: { draft: false, prerelease: tag.includes('-'), make_latest: tag.includes('-') ? 'false' : 'legacy' },
+    method: 'PATCH', body: { draft: false, prerelease: tag.includes('-'), make_latest: tag.includes('-') ? 'false' : 'legacy', body: notes },
   });
 }
 

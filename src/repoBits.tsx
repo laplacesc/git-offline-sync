@@ -4,9 +4,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Alert, Button, Checkbox, Chip, Table } from "@heroui/react";
 import type { Selection } from "@heroui/react";
 import { api, BranchInfo, InProgressOp, OpOutcome, RepoStatus, shortSha } from "./api";
-import { useRunner } from "./runner";
+import { Feedback, useRunner } from "./runner";
 import { Icon } from "./icons";
-import { ActionButton, Code, Empty, Notice, TextInput } from "./ui";
+import { ActionButton, Code, Empty, TextInput } from "./ui";
 
 /**
  * 应用窗口回到前台时调用 reload。
@@ -330,34 +330,14 @@ export function DirtyTreesNotice({ status, suffix }: { status: RepoStatus | null
   const trees = status?.dirtyTrees ?? [];
   if (trees.length === 0) return null;
   const names = trees.map((w) => (w.branch ? `${w.branch}（${baseName(w.path)}）` : baseName(w.path)));
-  return (
-    <Notice tone="warning" title={`${names.join("、")} 有未提交的修改，${suffix}`}>
-      {trees.map((w) => (
-        <span key={w.path} className="block font-mono text-xs break-all">
-          {w.path}
-        </span>
-      ))}
-    </Notice>
-  );
+  return <Feedback kind="warn" text={`${names.join("、")} 有未提交的修改，${suffix}\n${trees.map((w) => w.path).join("\n")}`} />;
 }
 
 /** 未绑定分支的工作树无法出现在分支表里，单独展示，避免遗漏。 */
 export function DetachedWorktreesNotice({ status }: { status: RepoStatus | null }) {
   const trees = (status?.worktrees ?? []).filter((w) => !w.bare && !w.branch);
   if (trees.length === 0) return null;
-  return (
-    <Notice tone="warning" title="以下 worktree 未绑定分支（detached HEAD）">
-      {trees.map((w) => (
-        <span key={w.path} className="block font-mono text-xs break-all">
-          {w.path}
-        </span>
-      ))}
-      <p className="mt-2">
-        如需回传或推送其中的提交，请先在对应目录中运行 <Code>git switch -c feature/你的分支名</Code>，
-        再刷新列表。若正在 rebase，请先完成或中止该操作。
-      </p>
-    </Notice>
-  );
+  return <Feedback kind="warn" text={`以下 worktree 未绑定分支（detached HEAD）\n${trees.map((w) => w.path).join("\n")}\n如需回传或推送，请先在对应目录运行 git switch -c feature/你的分支名，再刷新列表。若正在 rebase，请先完成或中止该操作。`} />;
 }
 
 /** 路径的最后一段，用于在分支表里简短标出 worktree */

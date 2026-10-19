@@ -70,6 +70,51 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.mocked(invoke).mockReset(); vi.unstubAllGlobals(); });
 
 describe("内网双页签工作流", () => {
+  it("工作仓库提示只在回传页显示，离开页签后清理", async () => {
+    vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({
+      ...status(path), isRepo: path === "/mirror", branches: [],
+    }));
+    render(view());
+    await waitFor(() => expect(screen.queryByText("正在读取仓库与回传包…")).toBeNull());
+    const message = "请先在项目设置中填写已克隆的内网工作仓库。";
+    expect(screen.queryByText(message)).toBeNull();
+    openReturns();
+    expect(await screen.findByText(message)).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "导出更新" }));
+    expect(screen.queryByText(message)).toBeNull();
+  });
+
+  it("审查工作树恢复前禁止改基准，恢复后按用户选择的新基准整理", async () => {
+    const local = "review/receipt-one/feature/returned";
+    let restored = false;
+    vi.spyOn(api, "listReturnPackages").mockResolvedValue([returnPackage(true)]);
+    vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({
+      ...status(path), branches: [{ ...status(path).branches[0], name: local,
+        worktree: restored ? "/reviews/returned" : null }],
+      reviewSources: { [local]: "feature/returned" },
+    }));
+    const imported = vi.spyOn(api, "importReturn").mockImplementation(async () => {
+      restored = true;
+      return { branches: [{ source: "feature/returned", local, sha: "oid", base: "main", commits: [] }],
+        warnings: [], outcomes: [success] };
+    });
+    const rebased = vi.spyOn(api, "rebaseOnto").mockResolvedValue(success);
+    render(view());
+    openReturns();
+    fireEvent.click(await screen.findByRole("radio", { name: "选择 feature/returned" }));
+    fireEvent.click(screen.getByRole("button", { name: "提交与分支选项" }));
+    const baseSelect = screen.getByRole<HTMLButtonElement>("button", { name: /基准分支/ });
+    expect(baseSelect.disabled).toBe(true);
+    expect(screen.getByText("请先恢复审查工作树，再选择其他基准分支。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "恢复审查工作树", exact: true }));
+    await waitFor(() => expect(imported).toHaveBeenCalledExactlyOnceWith("/work", "/usb/back.bundle", "main", ["release/1.0"]));
+    await waitFor(() => expect(baseSelect.disabled).toBe(false));
+    expect(rebased).not.toHaveBeenCalled();
+    fireEvent.click(baseSelect);
+    fireEvent.click(await screen.findByRole("option", { name: /release\/1.0/ }));
+    fireEvent.click(screen.getByRole("button", { name: "整理提交", exact: true }));
+    await waitFor(() => expect(rebased).toHaveBeenCalledExactlyOnceWith("/work", local, "release/1.0", true));
+  });
   it("通过 listReturnPackages 查询接收记录，导出更新沿用当前项目契约", async () => {
     render(view());
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["导出更新", "导入回传"]);
@@ -97,14 +142,15 @@ describe("内网双页签工作流", () => {
     await waitFor(() => expect(exportButton.disabled).toBe(false));
     state.mockRejectedValueOnce(new Error("state disk unavailable"));
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
-    expect(await screen.findByText("无法读取同步记录，请检查后重试")).toBeTruthy();
-    expect(screen.getByText("Error: state disk unavailable")).toBeTruthy();
+    const error = await screen.findByText(/无法读取同步记录，请检查后重试/);
+    expect(error.textContent).toContain("Error: state disk unavailable");
+    expect(error.closest(".operation-popups")).toBeTruthy();
     expect(exportButton.disabled).toBe(true);
     fireEvent.click(exportButton);
     expect(exported).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     await waitFor(() => expect(exportButton.disabled).toBe(false));
-    expect(screen.queryByText("Error: state disk unavailable")).toBeNull();
+    expect(screen.queryByText(/Error: state disk unavailable/)).toBeNull();
     fireEvent.click(exportButton);
     await waitFor(() => expect(exported).toHaveBeenCalledTimes(1));
   });
@@ -114,8 +160,9 @@ describe("内网双页签工作流", () => {
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({ ...status(path), branches: [] }));
     render(view());
     openReturns();
-    expect(await screen.findByText("无法读取传输目录，请检查连接后刷新")).toBeTruthy();
-    expect(screen.getByText("Error: USB unavailable")).toBeTruthy();
+    const error = await screen.findByText(/无法读取传输目录，请检查连接后刷新/);
+    expect(error.textContent).toContain("Error: USB unavailable");
+    expect(error.closest(".operation-popups")).toBeTruthy();
     expect(screen.queryByText("没有待处理的回传。")).toBeNull();
   });
 

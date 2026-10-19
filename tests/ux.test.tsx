@@ -14,7 +14,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it("配置表单提交后显示字段错误，错误链接定位到输入框", async () => {
   const save = vi.fn();
-  render(<ProfileEditor initial={blankProfile("external", "test")} isNew onSave={save} onCancel={() => {}} />);
+  render(<RunnerProvider><ProfileEditor initial={blankProfile("external", "test")} isNew onSave={save} onCancel={() => {}} /></RunnerProvider>);
   fireEvent.click(screen.getByRole("button", { name: "保存", exact: true }));
   const summary = await screen.findByRole("alert");
   await waitFor(() => expect(document.activeElement).toBe(summary));
@@ -26,17 +26,19 @@ it("配置表单提交后显示字段错误，错误链接定位到输入框", a
 
 it("保存失败后保留配置内容并允许重试", async () => {
   const profile = { ...blankProfile("external", "test"), name: "项目", repoName: "project", transferDir: "/usb", mirrorDir: "/mirror" };
-  const save = vi.fn().mockResolvedValue(false);
-  render(<ProfileEditor initial={profile} isNew onSave={save} onCancel={() => {}} />);
+  const save = vi.fn().mockRejectedValue(new Error("配置不可写"));
+  render(<RunnerProvider><ProfileEditor initial={profile} isNew onSave={save} onCancel={() => {}} /><OperationStatus /></RunnerProvider>);
   fireEvent.click(screen.getByRole("button", { name: "保存", exact: true }));
-  expect(await screen.findByRole("alert")).toBeTruthy();
+  const error = await screen.findByRole("alert");
+  expect(error.closest(".operation-popups")).toBeTruthy();
+  expect(error.textContent).toContain("配置不可写");
   expect((screen.getByRole("textbox", { name: "名称", exact: true }) as HTMLInputElement).value).toBe("项目");
   expect((screen.getByRole("button", { name: "保存", exact: true }) as HTMLButtonElement).disabled).toBe(false);
 });
 
 it("取消编辑前保护未保存内容", async () => {
   const cancel = vi.fn();
-  render(<ProfileEditor initial={blankProfile("external", "test")} isNew onSave={() => {}} onCancel={cancel} />);
+  render(<RunnerProvider><ProfileEditor initial={blankProfile("external", "test")} isNew onSave={() => {}} onCancel={cancel} /></RunnerProvider>);
   fireEvent.change(screen.getByRole("textbox", { name: "名称", exact: true }), { target: { value: "未保存项目" } });
   fireEvent.click(screen.getByRole("button", { name: "取消", exact: true }));
   expect(await screen.findByRole("alertdialog")).toBeTruthy();
@@ -65,9 +67,11 @@ it("搜索内全选与取消全选保留搜索外的选择，清空选择覆盖�
 it("刷新期间展示进度并拦截重复点击", async () => {
   let finish!: () => void;
   const refresh = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
-  render(<RunnerProvider><RefreshButton onPress={refresh} /></RunnerProvider>);
+  render(<RunnerProvider><RefreshButton onPress={refresh} /><OperationStatus /></RunnerProvider>);
   fireEvent.click(screen.getByRole("button", { name: "刷新" }));
-  const pending = screen.getByRole("button", { name: /刷新中/ });
+  const pending = screen.getByRole("button", { name: "刷新" });
+  expect(screen.getByText("正在刷新，请稍候…").closest(".operation-popups")).toBeTruthy();
+  expect(screen.queryByText("刷新中…")).toBeNull();
   expect((pending as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(pending);
   expect(refresh).toHaveBeenCalledTimes(1);
@@ -76,7 +80,7 @@ it("刷新期间展示进度并拦截重复点击", async () => {
 });
 
 it("日志允许暂停和恢复跟随", () => {
-  render(<LogPanel lines={[]} clear={() => {}} open setOpen={() => {}} />);
+  render(<RunnerProvider><LogPanel lines={[]} clear={() => {}} open setOpen={() => {}} /></RunnerProvider>);
   fireEvent.click(screen.getByRole("button", { name: "暂停跟随" }));
   expect(screen.getByRole("button", { name: "跟随最新" }).getAttribute("aria-pressed")).toBe("false");
   fireEvent.click(screen.getByRole("button", { name: "跟随最新" }));

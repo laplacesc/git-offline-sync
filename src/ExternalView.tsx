@@ -5,7 +5,7 @@ import {
   api, baseCandidates, defaultBaseFor, BranchInfo, ExportOutcome, formatTime, MirrorState,
   OpOutcome, PackageInfo, prefixWarning, Profile, RefEntry, releasesOf, shortSha,
 } from "./api";
-import { useRunner } from "./runner";
+import { Feedback, FeedbackScope, useRunner } from "./runner";
 import { Icon } from "./icons";
 import {
   BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners,
@@ -40,6 +40,7 @@ function ReturnBranches({ branches, selected, onSelect, single, isDisabled }: {
 }
 
 export function ExternalView({ profile }: { profile: Profile }) {
+  const [activeTab, setActiveTab] = useState("sync");
   const { run, notify, confirm, busy } = useRunner();
   const base = profile.baseBranch;
   const releases = releasesOf(profile);
@@ -73,7 +74,6 @@ export function ExternalView({ profile }: { profile: Profile }) {
   const devReady = !!repo.status?.isRepo && !repo.status.isBare && !repo.loading;
   const needsFull = !state?.repoId || !mirrorReady;
   const [picked, setPicked] = useState<{ key: string; path: string } | null>(null);
-  const [result, setResult] = useState<{ key: string; text: string } | null>(null);
 
   const reloadAll = useCallback(async () => {
     const isCurrent = beginRefresh();
@@ -138,14 +138,13 @@ export function ExternalView({ profile }: { profile: Profile }) {
       });
       if (!approved || !isCurrent() || startedAt !== revision.current) return;
     }
-    setResult(null);
     const outcome = await run("同步更新", () => api.syncUpdates({
       bundle: bundle?.payloadPath ?? null, mirrorDir, devDirs: dirs,
       name: profile.userName ?? "", email: profile.userEmail ?? "",
     }));
     if (!isCurrent()) return;
     if (outcome) {
-      setResult({ key: refreshKey, text: outcome.imported ? `已同步更新 #${outcome.imported.seq ?? ""}` : "已完成开发仓库同步" });
+      notify("ok", outcome.imported ? `已同步更新 #${outcome.imported.seq ?? ""}` : "已完成开发仓库同步");
       setPicked(null);
     }
     await reloadAll();
@@ -193,6 +192,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
     ));
     if (!isCurrent()) return;
     if (outcome !== undefined) {
+      notify("ok", `已创建分支 ${newBranch.trim()}`);
       setNewBranch("feature/");
       setNewBasePicked(null);
       setWorktreePath("");
@@ -229,7 +229,12 @@ export function ExternalView({ profile }: { profile: Profile }) {
       ? await run("导出回传", () => api.exportBack({ ...common, branches: selectedBranches }))
       : await run("导出补丁", () => api.exportPatches({ ...common, branch: selectedBranches[0] }));
     if (!isCurrent()) return;
-    if (outcome) setExportRes(outcome);
+    if (outcome) {
+      setExportRes(outcome);
+      if (outcome.status === "exported") {
+        notify(outcome.warnings.length ? "warn" : "ok", [`已生成回传 #${outcome.seq}`, ...outcome.warnings].join("\n"));
+      } else notify("ok", outcome.message);
+    }
     await reloadAll();
   };
 
@@ -238,7 +243,8 @@ export function ExternalView({ profile }: { profile: Profile }) {
   if (needsFull) summary = "请选择本项目的全量包开始同步。";
   if (chosen) summary = `本次更新 #${chosen.manifest!.seq} · ${chosen.manifest!.kind === "full" ? "全量" : "增量"}`;
   return <>
-    <Tabs className="sync-workspace" variant="secondary" defaultSelectedKey="sync">
+    {!current && <Feedback kind="progress" text="正在检查更新…" />}
+    <Tabs className="sync-workspace" variant="secondary" selectedKey={activeTab} onSelectionChange={(key) => setActiveTab(String(key))}>
     <Tabs.ListContainer><Tabs.List className="sync-tabs" aria-label="外网同步">
       <Tabs.Tab id="sync">同步更新<Tabs.Indicator /></Tabs.Tab>
       <Tabs.Tab id="return">回传提交<Tabs.Indicator /></Tabs.Tab>
@@ -247,23 +253,25 @@ export function ExternalView({ profile }: { profile: Profile }) {
       <Icon name="folder" /><span className="min-w-0 flex-1 truncate" title={profile.transferDir}>{profile.transferDir}</span>
       <RefreshButton onPress={reloadAll} />
     </div>
-    {!mirrorDir.trim() && <Notice tone="accent" title="请在项目设置中填写外网镜像目录。" />}
-    {!devRepos.length && <Notice tone="accent" title="请在项目设置中添加开发仓库目录。" />}
-    {current?.stateError && <Notice tone="danger" title="无法读取同步记录，请检查后刷新。">{current.stateError}</Notice>}
-    {mirror.error && <Notice tone="danger" title="无法读取外网镜像。">{mirror.error}</Notice>}
-    {mirror.status?.isRepo && !mirror.status.isBare && <Notice tone="danger" title="镜像目录必须是裸仓库，请检查项目设置。" />}
-    {repo.error && <Notice tone="danger" title="无法读取开发仓库。">{repo.error}</Notice>}
+    {!mirrorDir.trim() && <Feedback kind="warn" text="请在项目设置中填写外网镜像目录。" />}
+    {!devRepos.length && <Feedback kind="warn" text="请在项目设置中添加开发仓库目录。" />}
+    {current?.stateError && <Feedback kind="error" text={`无法读取同步记录，请检查后刷新。\n${current.stateError}`} />}
+    {mirror.error && <Feedback kind="error" text={`无法读取外网镜像。\n${mirror.error}`} />}
+    {mirror.status?.isRepo && !mirror.status.isBare && <Feedback kind="error" text="镜像目录必须是裸仓库，请检查项目设置。" />}
+    {repo.error && <Feedback kind="error" text={`无法读取开发仓库。\n${repo.error}`} />}
     <Tabs.Panel className="sync-panel" id="sync" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
-      {current?.packageError && <Notice tone="danger" title="无法读取传输目录，请检查连接后刷新。">{current.packageError}</Notice>}
-      {current?.devError && <Notice tone="danger" title="无法检查开发仓库同步状态，请刷新或重试同步。">{current.devError}</Notice>}
-      {!current || current.loading ? <p role="status">正在检查更新…</p>
-        : current.stateError ? null : <>
-          {missing && <Notice tone="warning" title={`缺少更新 #${lastIn + 1}，请补齐或选择较新的全量包。`} />}
-          {missingImpact && <Notice tone="warning" title="无法读取完整引用影响，请刷新后再使用全量包跳号。" />}
-        </>}
+      <FeedbackScope value={activeTab === "sync"}>
+      {current?.packageError && <Feedback kind="error" text={`无法读取传输目录，请检查连接后刷新。\n${current.packageError}`} />}
+      {current?.devError && <Feedback kind="error" text={`无法检查开发仓库同步状态，请刷新或重试同步。\n${current.devError}`} />}
+      {current && !current.loading && !current.stateError && <>
+        {missing && <Feedback kind="warn" text={`缺少更新 #${lastIn + 1}，请补齐或选择较新的全量包。`} />}
+        {missingImpact && <Feedback kind="warn" text="无法读取完整引用影响，请刷新后再使用全量包跳号。" />}
+      </>}
       <div className="sync-action">
         <span className="sync-action-icon" aria-hidden="true"><Icon name="branch" /></span>
-        <div className="sync-action-copy"><h1>同步内网更新</h1><p>{current?.stateError || mirror.error ? "请处理错误后刷新。" : !current || current.loading ? "正在检查更新…" : summary}</p></div>
+        <div className="sync-action-copy"><h1>同步内网更新</h1>
+          {current && !current.loading && !current.stateError && !mirror.error && <p>{summary}</p>}
+        </div>
         <ActionButton variant="primary" onPress={() => sync()} isDisabled={!canSync}>
           {!chosen && mirrorReady && pendingDevs ? "完成同步" : "同步更新"}
         </ActionButton>
@@ -291,7 +299,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
           const labels = { upToDate: "已同步", needsFetch: "待同步", notCloned: "尚未克隆", unknown: "状态未知" };
           return <div key={path} className="sync-branch-row"><div className="sync-branch-copy"><Code>{path}</Code>
             <small>{status ? labels[status.status] : "状态未知"}{path === devDir ? " · 当前仓库" : ""}</small>
-            {status?.error && <p role="alert" className="text-danger">{status.error}</p>}</div>
+            {status?.error && <Feedback kind="error" text={`${path}\n${status.error}`} />}</div>
             <div className="sync-button-group">
             {path !== devDir && <ActionButton size="sm" variant="secondary" onPress={() => setDevPicked(path)}>切换</ActionButton>}
             <ActionButton size="sm" variant="outline" onPress={() => sync(null, [path])}
@@ -299,15 +307,16 @@ export function ExternalView({ profile }: { profile: Profile }) {
             </div></div>;
         })}
       </Fold>
-      {result?.key === refreshKey && <div className="sync-result" role="status">{result.text}</div>}
+      </FeedbackScope>
     </Tabs.Panel>
     <Tabs.Panel className="sync-panel" id="return" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
+      <FeedbackScope value={activeTab === "return"}>
       <InProgressBanners status={repo.status} onDone={(outcome) => {
         if (outcome) setOpRes(outcome);
         void reloadAll();
       }} />
       <DirtyTreesNotice status={repo.status} suffix="回传只包含已提交的内容。" />
-      {!devReady ? <p>{repo.loading ? "正在读取开发分支…" : "请先在同步更新页准备开发仓库。"}</p>
+      {!devReady ? (!repo.loading && <Feedback kind="warn" text="请先在同步更新页准备开发仓库。" />)
         : <ReturnBranches branches={branches} selected={selectedBranches} onSelect={setSelected} single={mode === "patch"} isDisabled={!!busy} />}
       <div className="sync-action">
         <ActionButton variant="primary" onPress={doExport}
@@ -351,10 +360,11 @@ export function ExternalView({ profile }: { profile: Profile }) {
         <DetachedWorktreesNotice status={repo.status} />
         </div>
       </Fold>
-      {opRes && <div className="sync-result"><OutcomeView outcome={opRes} /></div>}
-      {exportRes && <div className="sync-result" role="status">{exportRes.status === "exported"
-        ? <><p>已生成回传 #{exportRes.seq}</p><Fold className="sync-details" title={"查看文件"}><Code>{exportRes.payload}</Code></Fold>{exportRes.warnings.map((w) => <p key={w}>{w}</p>)}</>
-        : exportRes.message}</div>}
+      {opRes && !opRes.ok && <OutcomeView outcome={opRes} />}
+      {exportRes?.status === "exported" && <Fold className="sync-details" title={`查看回传 #${exportRes.seq} 文件`}>
+        <Code>{exportRes.payload}</Code>
+      </Fold>}
+      </FeedbackScope>
     </Tabs.Panel>
     </Tabs>
     <AlertDialog.Backdrop isOpen={!!rebaseTarget} onOpenChange={(value) => { if (!value && !busy) setRebaseTarget(null); }}>

@@ -74,6 +74,41 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("精简外网同步", () => {
+  it("隐藏回传页不发提示，切换页签会清理并恢复各自的状态提示", async () => {
+    vi.mocked(api.repoStatus).mockImplementation(async (path) => ({
+      ...status(path), isRepo: path === "/mirror", branches: [],
+    }));
+    vi.mocked(api.listPackages).mockResolvedValue([pkg(4)]);
+    await loaded();
+    const missing = "缺少更新 #3，请补齐或选择较新的全量包。";
+    const unprepared = "请先在同步更新页准备开发仓库。";
+    expect(screen.getByText(missing)).toBeTruthy();
+    expect(screen.queryByText(unprepared)).toBeNull();
+    returnTab();
+    expect(await screen.findByText(unprepared)).toBeTruthy();
+    expect(screen.queryByText(missing)).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "同步更新", exact: true }));
+    expect(await screen.findByText(missing)).toBeTruthy();
+    expect(screen.queryByText(unprepared)).toBeNull();
+  });
+  it("同步仓库及后续刷新只显示浮动提示，不重复显示页面加载文字", async () => {
+    await loaded();
+    const sync = deferred<Awaited<ReturnType<typeof api.syncUpdates>>>();
+    const refresh = deferred<Awaited<ReturnType<typeof api.mirrorState>>>();
+    vi.mocked(api.syncUpdates).mockReturnValueOnce(sync.promise);
+    vi.mocked(api.mirrorState).mockReturnValueOnce(refresh.promise);
+    expand("开发仓库管理");
+    fireEvent.click(screen.getAllByRole("button", { name: "同步仓库", exact: true })[0]);
+    expect(screen.getByText("正在同步更新，请稍候…").closest(".operation-popups")).toBeTruthy();
+    expect(document.querySelector(".sync-workspace")?.textContent).not.toMatch(/正在检查更新|正在读取开发分支/);
+    await act(async () => sync.resolve({ imported: null, repositories: [] }));
+    expect(screen.getByText("已完成开发仓库同步").closest(".operation-popups")).toBeTruthy();
+    expect(screen.queryByText("正在检查更新…")).toBeNull();
+    expect(screen.queryByText("正在读取开发分支…")).toBeNull();
+    await act(async () => refresh.resolve({ repoId: "matching", lastInSeq: 2, backSeq: 0, lastImportAt: null }));
+    expect(screen.getByText("本次更新 #3 · 增量")).toBeTruthy();
+  });
+
   it("原生页签隐藏非活动面板，来回切换保留分支选择与管理表单", async () => {
     await loaded();
     expect(screen.queryByRole("checkbox", { name: "feature/one", exact: true })).toBeNull();
@@ -152,8 +187,9 @@ describe("精简外网同步", () => {
   it("同步记录损坏单独展示并禁用同步和导出", async () => {
     vi.mocked(api.mirrorState).mockRejectedValue(new Error("corrupt cursor"));
     await loaded();
-    expect(screen.getByText("无法读取同步记录，请检查后刷新。")).toBeTruthy();
-    expect(screen.getByText("Error: corrupt cursor")).toBeTruthy();
+    const error = await screen.findByText(/无法读取同步记录，请检查后刷新。/);
+    expect(error.textContent).toContain("Error: corrupt cursor");
+    expect(error.closest(".operation-popups")).toBeTruthy();
     expect(screen.queryByText("请选择本项目的全量包开始同步。")).toBeNull();
     const sync = screen.getByRole<HTMLButtonElement>("button", { name: "同步更新", exact: true });
     expect(sync.disabled).toBe(true); fireEvent.click(sync);
@@ -231,6 +267,22 @@ describe("精简外网同步", () => {
     const row = screen.getByText("/dev-two", { exact: true }).closest(".sync-branch-row")!;
     fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "同步仓库" }));
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({ bundle: null, devDirs: ["/dev-two"] })));
+  });
+
+  it("导出结果与警告弹出提示，文件详情留在原页面", async () => {
+    vi.mocked(api.exportBack).mockResolvedValue({
+      status: "exported", kind: "back", seq: 4, payload: "/usb/back-4.bundle",
+      manifest: "/usb/back-4.json", refs: [], warnings: ["部分分支没有新增提交"],
+    });
+    await loaded();
+    returnTab(); selectBranch("feature/one");
+    fireEvent.click(screen.getByRole("button", { name: "导出回传" }));
+    const banner = await screen.findByRole("alert");
+    expect(banner.textContent).toContain("已生成回传 #4");
+    expect(banner.textContent).toContain("部分分支没有新增提交");
+    expect(banner.closest(".operation-popups")?.parentElement).toBe(document.body);
+    fireEvent.click(screen.getByRole("button", { name: "查看回传 #4 文件" }));
+    expect(screen.getByText("/usb/back-4.bundle").closest(".sync-panel")).toBeTruthy();
   });
 
   it("Bundle 默认多选直接导出；Patch 切换后仅保留一个分支", async () => {

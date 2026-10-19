@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Radio, RadioGroup, Tabs } from "@heroui/react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, baseCandidates, defaultBaseFor, formatTime, releasesOf, type BranchInfo, type CommitInfo, type ExportOutcome, type InternalState, type OpOutcome, type Profile, type ReturnImportResult, type ReturnPackageInfo } from "./api";
-import { useRunner } from "./runner";
+import { Feedback, FeedbackScope, useRunner } from "./runner";
 import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus, useRequestGeneration } from "./repoBits";
 import { ActionButton, BaseSelect, Check, Code, Fold, CommitList, Empty, Notice, OutcomeView, RefreshButton, TextInput } from "./ui";
 import { Icon } from "./icons";
@@ -56,6 +56,7 @@ export function InternalView({ profile }: { profile: Profile }) {
   useEffect(() => { void reloadAll(); }, [reloadAll]);
   useRefreshOnFocus(reloadAll);
 
+  const [activeTab, setActiveTab] = useState("export");
   const [forceFull, setForceFull] = useState(false);
   const [fetchFirst, setFetchFirst] = useState(true);
   const [exportResult, setExportResult] = useState<ExportOutcome | null>(null);
@@ -64,7 +65,8 @@ export function InternalView({ profile }: { profile: Profile }) {
   const [selected, setSelected] = useState<string[]>([]);
   const selectedBranch = branches.find((b) => b.name === selected[0]);
   const [ontoPicked, setOntoPicked] = useState<string | null>(null);
-  const onto = ontoPicked ?? selectedBranch?.base ?? base;
+  const needsReviewRecovery = selectedBranch !== undefined && selectedBranch.name.startsWith("review/") && !selectedBranch.worktree;
+  const onto = needsReviewRecovery ? selectedBranch.base : ontoPicked ?? selectedBranch?.base ?? base;
   const changingBase = !!selectedBranch && onto !== selectedBranch.base;
   const [forceLease, setForceLease] = useState(false);
   useEffect(() => { setOntoPicked(null); setForceLease(false); }, [selected[0]]);
@@ -99,7 +101,13 @@ export function InternalView({ profile }: { profile: Profile }) {
   async function exportUpdate() {
     const result = await run("导出更新", () => api.exportOut({ mirrorDir, transferDir: profile.transferDir,
       repoName: profile.repoName, baseBranch: base, fetchUpstream: fetchFirst, forceFull }));
-    if (result) { setExportResult(result); setForceFull(false); }
+    if (result) {
+      setExportResult(result);
+      setForceFull(false);
+      if (result.status === "exported") {
+        notify(result.warnings.length ? "warn" : "ok", [`已导出更新 #${result.seq}`, ...result.warnings].join("\n"));
+      } else notify("ok", result.message);
+    }
     await reloadAll();
   }
   async function receive(bundle: string, legacy = false) {
@@ -109,7 +117,11 @@ export function InternalView({ profile }: { profile: Profile }) {
     await reloadAll();
     if (result) {
       setReturnResult(result);
-      setOutcome(result.outcomes.find((o) => !o.ok) ?? null);
+      const issue = result.outcomes.find((o) => !o.ok);
+      setOutcome(issue ?? null);
+      let kind: "ok" | "warn" | "error" = result.warnings.length ? "warn" : "ok";
+      if (issue) kind = issue.conflict ? "warn" : "error";
+      notify(kind, [issue?.message ?? "整理已完成，可以检查并推送。", ...result.warnings].join("\n"));
       if (result.branches[0]) setSelected([result.branches[0].local]);
     }
   }
@@ -136,6 +148,8 @@ export function InternalView({ profile }: { profile: Profile }) {
   async function rebaseBranch(branch: BranchInfo, target = branch.base) {
     // 尚未创建独立工作树时，从接收记录继续，不能切换主工作仓库。
     if (branch.name.startsWith("review/") && !branch.worktree) {
+      if (target !== branch.base) return notify("warn", "请先恢复审查工作树，再选择其他基准分支。");
+      setOntoPicked(null);
       const pkg = packageFor(branch.name);
       if (pkg) return receive(pkg.payloadPath);
       return notify("warn", "请接回原回传包，再继续整理此分支");
@@ -206,16 +220,17 @@ export function InternalView({ profile }: { profile: Profile }) {
     </div>;
   }
 
-  return <Tabs className="sync-workspace" variant="secondary" defaultSelectedKey="export">
+  return <Tabs className="sync-workspace" variant="secondary" selectedKey={activeTab} onSelectionChange={(key) => setActiveTab(String(key))}>
+    {!current && <Feedback kind="progress" text="正在读取仓库与回传包…" />}
     <Tabs.ListContainer><Tabs.List className="sync-tabs" aria-label="同步操作">
       <Tabs.Tab id="export">导出更新<Tabs.Indicator /></Tabs.Tab>
       <Tabs.Tab id="return">导入回传{pending.length > 0 && <span className="counter">{pending.length}</span>}<Tabs.Indicator /></Tabs.Tab>
     </Tabs.List></Tabs.ListContainer>
     <div className="sync-location"><Icon name="folder" /><span className="min-w-0 flex-1 truncate" title={profile.transferDir}>{profile.transferDir}</span><RefreshButton onPress={reloadAll} /></div>
-    {stateError && <Notice tone="danger" title="无法读取同步记录，请检查后重试"><Fold title={"查看原因"}>{stateError}</Fold></Notice>}
-    {packageError && <Notice tone="danger" title="无法读取传输目录，请检查连接后刷新"><Fold title={"查看原因"}>{packageError}</Fold></Notice>}
+    {stateError && <Feedback kind="error" text={`无法读取同步记录，请检查后重试\n${stateError}`} />}
     <Tabs.Panel className="sync-panel" id="export" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
-      {mirror.error && <Notice tone="danger" title="读取镜像失败">{mirror.error}</Notice>}
+      <FeedbackScope value={activeTab === "export"}>
+      {mirror.error && <Feedback kind="error" text={`读取镜像失败\n${mirror.error}`} />}
       <div className="sync-action">
         <span className="sync-action-icon" aria-hidden="true"><Icon name="branch" /></span>
         <div className="min-w-0 flex-1"><h1>{mirrorReady ? "导出最新代码" : "建立内网镜像"}</h1>
@@ -230,19 +245,20 @@ export function InternalView({ profile }: { profile: Profile }) {
         <p className="text-xs text-muted break-all">镜像：{mirrorDir || "请在项目设置中填写"}</p>
         {state && <p className="text-xs text-muted">{state.outSeq ? `最近已导出 #${state.outSeq} · ${formatTime(state.lastExportAt)}` : "尚未导出"}</p>}
       </div></Fold>
-      {exportResult && <div className="sync-result" role="status">{exportResult.status === "nothingToSync" ? exportResult.message : <>
-        已导出更新 #{exportResult.seq}<Fold className="sync-details" title={"查看文件"}><p className="break-all">{exportResult.payload}</p>
-          {exportResult.warnings.map((warning) => <p key={warning}>{warning}</p>)}</Fold></>}</div>}
+      {exportResult?.status === "exported" && <Fold className="sync-details" title={`查看更新 #${exportResult.seq} 文件`}>
+        <Code>{exportResult.payload}</Code>
+      </Fold>}
+      </FeedbackScope>
     </Tabs.Panel>
     <Tabs.Panel className="sync-panel" id="return" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
-      {work.error && <Notice tone="danger" title="读取工作仓库失败">{work.error}</Notice>}
-      {!workReady && !work.loading && !work.error && <Notice tone="warning" title="请先在项目设置中填写已克隆的内网工作仓库。" />}
+      <FeedbackScope value={activeTab === "return"}>
+      {packageError && <Feedback kind="error" text={`无法读取传输目录，请检查连接后刷新\n${packageError}`} />}
+      {work.error && <Feedback kind="error" text={`读取工作仓库失败\n${work.error}`} />}
+      {!workReady && !work.loading && !work.error && <Feedback kind="warn" text="请先在项目设置中填写已克隆的内网工作仓库。" />}
       <InProgressBanners status={work.status} onDone={(result) => { if (result) setOutcome(result); void reloadAll(); }} />
       {!packageError && current && packages.length > 0 && <ReturnPackageInbox key={refreshKey}
         packages={packages} disabled={!!busy || work.loading} getIssue={packageIssue} renderDetails={packageRow} />}
       {!packageError && current && packages.length === 0 && pendingBranches.length === 0 && <Empty>没有待处理的回传。</Empty>}
-      {returnResult?.warnings.map((warning) => <Notice key={warning} tone="warning" title={warning} />)}
-      {returnResult && pendingBranches.some((branch) => returnResult.branches.some((item) => item.local === branch.name)) && !returnResult.outcomes.some((o) => !o.ok) && <p className="sync-result" role="status">整理已完成，可以检查并推送。</p>}
       {pendingBranches.length > 0 && <><h2 className="return-review-heading">待检查分支 <span>{pendingBranches.length}</span></h2><RadioGroup className="sync-branches" aria-label="可检查的分支"
         value={selected[0] ?? ""} onChange={(name) => setSelected([name])} isDisabled={!!busy}>
         {pendingBranches.map((branch) => <div className="sync-branch-row" key={branch.name}>
@@ -256,14 +272,15 @@ export function InternalView({ profile }: { profile: Profile }) {
       </div>)}</RadioGroup></>}
       {selectedBranch && <Fold className="sync-details" title={"提交与分支选项"}><div className="space-y-4">
         <h3>{branchLabel(selectedBranch.name)}</h3>
-        {visibleCommits?.error ? <Notice tone="danger" title="读取提交失败，请刷新">{visibleCommits.error}</Notice>
-          : visibleCommits ? <CommitList commits={visibleCommits.commits} /> : <p role="status">正在读取提交…</p>}
-        <BaseSelect label="基准分支" value={onto} options={candidates} mainline={base} onChange={setOntoPicked} />
+        {visibleCommits?.error ? <Feedback kind="error" text={`读取提交失败，请刷新\n${visibleCommits.error}`} />
+          : visibleCommits ? <CommitList commits={visibleCommits.commits} /> : !busy && <Feedback kind="progress" text="正在读取提交…" />}
+        <BaseSelect label="基准分支" value={onto} options={candidates} mainline={base} onChange={setOntoPicked} isDisabled={needsReviewRecovery} />
+        {needsReviewRecovery && <p className="text-sm text-muted">请先恢复审查工作树，再选择其他基准分支。</p>}
         {changingBase && <p className="text-sm text-muted">将提交整理到 origin/{onto}，不会推送。</p>}
         <Check checked={forceLease} onChange={setForceLease}>允许非快进更新（推送前再次确认覆盖）</Check>
-        <ActionButton variant="secondary" isDisabled={!workReady || unfinished} onPress={() => rebaseBranch(selectedBranch, onto)}>整理提交</ActionButton>
+        <ActionButton variant="secondary" isDisabled={!workReady || unfinished} onPress={() => rebaseBranch(selectedBranch, onto)}>{needsReviewRecovery ? "恢复审查工作树" : "整理提交"}</ActionButton>
       </div></Fold>}
-      {outcome && (outcome.ok ? <p className="sync-result" role="status">{outcome.message}</p> : <OutcomeView outcome={outcome} />)}
+      {outcome && !outcome.ok && <OutcomeView outcome={outcome} />}
       <Fold className="sync-details" title={"其他回传与分支管理"}><div className="space-y-4">
         <ActionButton size="sm" variant="secondary" onPress={browse} isDisabled={!workReady || !!stateError || unfinished}>选择其他文件…</ActionButton>
         <DirtyTreesNotice status={work.status} suffix="回传在独立工作树中整理。" />
@@ -271,6 +288,7 @@ export function InternalView({ profile }: { profile: Profile }) {
           onRebase={(branch) => { setSelected([branch.name]); void rebaseBranch(branch); }} />
         <DetachedWorktreesNotice status={work.status} />
       </div></Fold>
+      </FeedbackScope>
     </Tabs.Panel>
   </Tabs>;
 }

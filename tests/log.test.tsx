@@ -1,9 +1,11 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { act, cleanup, fireEvent, render as renderComponent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { LogPanel, useGitLog } from "../src/LogPanel";
-import { RunnerProvider, useRunner } from "../src/runner";
+import { OperationStatus, RunnerProvider, useRunner } from "../src/runner";
 import type { LogEvent } from "../src/api";
 
+const render = (ui: ReactNode) => renderComponent(ui, { wrapper: RunnerProvider });
 let emit: (event: { payload: LogEvent }) => void;
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (_event, callback) => { emit = callback; return () => {}; }),
@@ -92,6 +94,19 @@ it("原生日志高度按钮支持 Enter 和空格键激活", () => {
   fireEvent.keyDown(decrease, { key: " ", code: "Space" });
   fireEvent.keyUp(decrease, { key: " ", code: "Space" });
   expect(panel.style.getPropertyValue("--log-height")).toBe("240px");
+});
+
+it.each([true, false])("复制日志通过全局浮动横幅反馈（成功=%s）", async (ok) => {
+  const writeText = vi.fn().mockImplementation(async () => { if (!ok) throw new Error("denied"); });
+  vi.stubGlobal("navigator", { userAgent: navigator.userAgent, clipboard: { writeText } });
+  render(<><LogPanel lines={[{ kind: "stdout", text: "log output", ts: 1 }]} clear={() => {}} open setOpen={() => {}} /><OperationStatus /></>);
+  fireEvent.click(screen.getByRole("button", { name: "复制日志" }));
+  const message = await screen.findByText(ok ? "日志已复制" : "复制失败，请选择日志文本复制");
+  expect(message.closest(".operation-popups")?.parentElement).toBe(document.body);
+  expect(message.closest(".log-panel")).toBeNull();
+  expect(writeText).toHaveBeenCalledWith(expect.stringContaining("log output"));
+  fireEvent.click(screen.getByRole("button", { name: ok ? "关闭提示" : "关闭错误提示" }));
+  expect(screen.queryByText(ok ? "日志已复制" : "复制失败，请选择日志文本复制")).toBeNull();
 });
 
 it("失败即使没有后端日志也显示错误组，并可以清空", async () => {

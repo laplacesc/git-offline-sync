@@ -1033,6 +1033,15 @@ pub fn import_patches(
     fetch_upstream: bool,
     worktree_path: Option<&Path>,
 ) -> Result<OpOutcome> {
+    if let Some(manifest) = Manifest::read_for(patch_dir)? {
+        if manifest.kind != BundleKind::Patch {
+            return invalid("这不是补丁包（patch），请检查所选目录");
+        }
+        let identity_ref = format!("refs/remotes/origin/{}", manifest.base_branch);
+        if repo::repo_id(g, work, &identity_ref)? != manifest.repo_id {
+            return invalid("补丁包与当前仓库不是同一个项目（根提交不同）");
+        }
+    }
     // 建成独立 worktree 时不碰主工作树，也就不要求它干净；
     // 只有要在主工作树上 switch 时才需要它干净。
     if worktree_path.is_none() {
@@ -1117,8 +1126,14 @@ pub fn rebase_onto(
     if !repo::rev_exists(g, repo, &target) {
         return invalid(format!("找不到 {target}"));
     }
-    let old = repo::get_sync_base(g, repo, branch)
-        .filter(|b| b != onto && repo::rev_exists(g, repo, &format!("origin/{b}")));
+    let old = repo::get_sync_base(g, repo, branch).filter(|b| b != onto);
+    if let Some(base) = &old {
+        if !repo::rev_exists(g, repo, &format!("origin/{base}")) {
+            return invalid(format!(
+                "找不到已记录的旧基准 origin/{base}，无法安全改基准，请先恢复该引用"
+            ));
+        }
+    }
     if wt.is_none() {
         g.run(&work, args!["switch", branch])?;
     }
@@ -1459,7 +1474,7 @@ pub fn sync_dev_repo(g: &Git, dev_dir: &Path, mirror_dir: &Path) -> Result<()> {
             "--prune",
             "origin",
             "+refs/heads/*:refs/remotes/origin/*",
-            "refs/tags/*:refs/tags/*"
+            "+refs/tags/*:refs/tags/*"
         ],
     )?;
     Ok(())

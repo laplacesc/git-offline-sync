@@ -68,7 +68,7 @@ function ipc(command: string, args?: Record<string, unknown>): unknown {
   }
 }
 function renderView(role: "external" | "internal", value = profile) {
-  return render(<RunnerProvider>{role === "external" ? <ExternalView profile={value} /> : <InternalView profile={value} />}</RunnerProvider>);
+  return render(<RunnerProvider>{role === "external" ? <ExternalView profile={value} /> : <InternalView profile={value} />}<OperationStatus /></RunnerProvider>);
 }
 function devRow(path: string) {
   const management = screen.getByRole("button", { name: "开发仓库管理", exact: true }).closest(".disclosure")!;
@@ -273,7 +273,7 @@ describe("提交列表与推送", () => {
     expect(await screen.findByText("previous-commit")).toBeTruthy();
     selectBranch("feature/two");
     expect(screen.queryByText("previous-commit")).toBeNull();
-    expect(screen.getByText("正在读取提交…")).toBeTruthy();
+    expect(screen.getByText("正在读取提交…").closest(".operation-popups")).toBeTruthy();
     fireEvent.click(pushButton("feature/two"));
     expect(execute).not.toHaveBeenCalled();
     await act(async () => next.resolve([commit("next-preview")]));

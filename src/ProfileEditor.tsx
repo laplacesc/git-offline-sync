@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { AlertDialog, Button, Card, Description, Form, Label, Link, Radio, RadioGroup } from "@heroui/react";
 import { parseBranchList, Profile, releasesOf, Role } from "./api";
 import { FormSection, PathInput, SectionLabel, TextInput } from "./ui";
+import { useRunner } from "./runner";
 
 export function blankProfile(role: Role, id: string): Profile {
   return {
@@ -50,6 +51,7 @@ export function ProfileEditor({
   onCancel: () => void;
   onDelete?: () => void;
 }) {
+  const { notify } = useRunner();
   const [p, setP] = useState<Profile>(initial);
   const set = <K extends keyof Profile>(k: K, v: Profile[K]) => setP((x) => ({ ...x, [k]: v }));
   // 至少显示一行，保存时把空行去掉
@@ -64,7 +66,6 @@ export function ProfileEditor({
   const internal = p.role === "internal";
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState("");
   const [discardOpen, setDiscardOpen] = useState(false);
   const dirty = JSON.stringify(p) !== JSON.stringify(initial) || releasesText !== releasesOf(initial).join(", ");
   const summary = useRef<HTMLDivElement>(null);
@@ -76,17 +77,15 @@ export function ProfileEditor({
       return;
     }
     setSaving(true);
-    setSaveError("");
     try {
-      const result = await onSave({
+      await onSave({
         ...p,
         name: p.name.trim(), repoName: p.repoName.trim(), baseBranch: p.baseBranch.trim(),
         transferDir: p.transferDir.trim(), mirrorDir: p.mirrorDir?.trim(), workDir: p.workDir?.trim(),
         releaseBranches: parseBranchList(releasesText),
         devRepos: [...new Set(devRepos.map((d) => d.trim()).filter(Boolean))],
       });
-      if (result === false) setSaveError("保存失败，请检查错误提示后重试。填写内容已保留。");
-    } catch (error) { setSaveError(`保存失败：${String(error)}`); }
+    } catch (error) { notify("error", `保存失败：${String(error)}`); }
     finally { setSaving(false); }
   }
 
@@ -122,7 +121,6 @@ export function ProfileEditor({
             </ul>
           </div>
         )}
-        {saveError && <p role="alert" className="text-sm text-danger">{saveError}</p>}
         <FormSection title="运行环境" description="选择这台电脑在同步流程中的角色。已有配置的角色不能更改。">
         {isNew ? <RadioGroup
           value={p.role}
@@ -277,9 +275,10 @@ export function ProfileEditor({
         <Button
           variant="primary"
           isDisabled={saving}
+          aria-busy={saving}
           type="submit"
         >
-          {saving ? "保存中…" : "保存"}
+          保存
         </Button>
       </Card.Footer>
     </Card>

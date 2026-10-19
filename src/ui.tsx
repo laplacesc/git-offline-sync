@@ -2,10 +2,9 @@
  * 应用级组合组件：全部基于 HeroUI v3，只在这里做一次“设计系统化”的组合，
  * 页面代码直接使用这些组件，避免到处写一次性样式。
  */
-import { createContext, ReactNode, useContext, useId, useRef, useState } from "react";
+import { createContext, ReactNode, useContext, useId, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  Alert,
   Button,
   Card,
   Checkbox,
@@ -22,13 +21,13 @@ import {
   Surface,
   TextField,
   FieldError,
-  Spinner,
   Tabs,
 } from "@heroui/react";
 import type { ButtonProps } from "@heroui/react";
 import { BundleKind, CommitInfo, KIND_LABEL, OpOutcome, shortSha } from "./api";
 import { useRunner } from "./runner";
 import { Icon } from "./icons";
+export { Notice, type Tone } from "./Notice";
 
 // ---------------------------------------------------------------------------
 // 按钮：全局串行执行，有操作进行中时自动禁用
@@ -41,27 +40,8 @@ export function ActionButton({ isDisabled, ...props }: ButtonProps) {
 
 /** 卡片右上角的刷新按钮：重新读取仓库状态与传输目录 */
 export function RefreshButton({ onPress }: { onPress: () => unknown }) {
-  const [pending, setPending] = useState(false);
-  const running = useRef(false);
-  const { notify } = useRunner();
-  async function refresh() {
-    if (running.current) return;
-    running.current = true;
-    setPending(true);
-    try {
-      await onPress();
-    } catch (error) {
-      notify("error", `刷新失败：${String(error)}`);
-    } finally {
-      running.current = false;
-      setPending(false);
-    }
-  }
-  return (
-    <ActionButton size="sm" variant="ghost" onPress={refresh} isDisabled={pending} aria-busy={pending}>
-      {pending && <Spinner size="sm" />}{pending ? "刷新中…" : "刷新"}
-    </ActionButton>
-  );
+  const { run } = useRunner();
+  return <ActionButton size="sm" variant="ghost" onPress={() => run("刷新", async () => onPress())}>刷新</ActionButton>;
 }
 
 /** 业务折叠区只组合原生插槽，展开、键盘和焦点由 Disclosure 管理。 */
@@ -255,6 +235,7 @@ export function BaseSelect({
   mainline,
   className,
   hideLabel,
+  isDisabled,
 }: {
   label: string;
   value: string;
@@ -265,6 +246,7 @@ export function BaseSelect({
   className?: string;
   /** 只保留给读屏器的标签（行内使用时） */
   hideLabel?: boolean;
+  isDisabled?: boolean;
 }) {
   // 记录的基准不在配置档列表里时（如发布分支已从配置中移除），也要能显示
   const all = options.includes(value) || !value ? options : [...options, value];
@@ -275,6 +257,7 @@ export function BaseSelect({
   return (
     <Select
       className={className ?? "w-56"}
+      isDisabled={isDisabled}
       value={value}
       onChange={(k) => k != null && onChange(String(k))}
     >
@@ -385,36 +368,12 @@ export function KindChip({ kind }: { kind: BundleKind | null }) {
   );
 }
 
-export type Tone = "success" | "warning" | "danger" | "accent" | "default";
-
-export function Notice({ tone, title, children }: { tone: Tone; title?: ReactNode; children?: ReactNode }) {
-  return (
-    <Alert status={tone} className="flash">
-      <Alert.Indicator />
-      <Alert.Content>
-        {title && <Alert.Title>{title}</Alert.Title>}
-        {children && <Alert.Description className="break-words">{children}</Alert.Description>}
-      </Alert.Content>
-    </Alert>
-  );
-}
-
 export function OutcomeView({ outcome }: { outcome: OpOutcome }) {
-  if (outcome.ok) return <Notice tone="success" title={outcome.message} />;
-  return (
-    <Notice tone={outcome.conflict ? "warning" : "danger"} title={outcome.message}>
-      {outcome.files.length > 0 && (
-        <span className="mt-1 flex flex-wrap items-center gap-1.5">
-          冲突文件：
-          {outcome.files.map((f) => (
-            <Chip key={f} size="sm" variant="secondary" className="font-mono">
-              {f}
-            </Chip>
-          ))}
-        </span>
-      )}
-    </Notice>
-  );
+  if (outcome.ok || outcome.files.length === 0) return null;
+  return <div className="mt-1 flex flex-wrap items-center gap-1.5">
+    <span>{outcome.conflict ? "冲突文件：" : "相关文件："}</span>
+    {outcome.files.map((file) => <Chip key={file} size="sm" variant="secondary" className="font-mono">{file}</Chip>)}
+  </div>;
 }
 
 export function Empty({ children }: { children: ReactNode }) {

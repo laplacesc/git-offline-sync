@@ -57,7 +57,7 @@ export function LogPanel({
   const bodyRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
   const [height, setHeight] = useState(240);
-  const [copyState, setCopyState] = useState("");
+  const { notify } = useRunner();
   const groups = new Map<number | undefined, { operation?: OperationRecord; lines: RecordedLog[] }>();
   for (const operation of operations) groups.set(operation.id, { operation, lines: [] });
   for (const line of lines) {
@@ -99,12 +99,11 @@ export function LogPanel({
         {open && lines.length > 0 && <Button size="sm" variant="ghost" onPress={async () => {
           try {
             await navigator.clipboard.writeText(lines.map((line) => `${time(line.ts)} ${line.kind === "cmd" ? "$ " : ""}${line.text}`).join("\n"));
-            setCopyState("已复制");
-          } catch { setCopyState("复制失败，请选择日志文本复制"); }
+            notify("ok", "日志已复制");
+          } catch { notify("error", "复制失败，请选择日志文本复制"); }
         }}>复制日志</Button>}
-        {open && copyState && <span role="status" className="log-count">{copyState}</span>}
         {open && (lines.length > 0 || operations.length > 0) && (
-          <Button size="sm" variant="ghost" className="text-muted hover:text-foreground" onPress={() => { clear(); setCopyState(""); }}>
+          <Button size="sm" variant="ghost" className="text-muted hover:text-foreground" onPress={clear}>
             清空
           </Button>
         )}

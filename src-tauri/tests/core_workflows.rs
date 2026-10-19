@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use git_offline_sync_lib::core::git::{Git, LogEvent, LogKind, OperationControl};
-use git_offline_sync_lib::core::manifest::{manifest_path_for, Manifest};
+use git_offline_sync_lib::core::manifest::{manifest_path_for, BundleKind, Manifest};
 use git_offline_sync_lib::core::{repo, review, sync};
 
 static ENV: Mutex<()> = Mutex::new(());
@@ -114,10 +114,319 @@ impl Fixture {
             .unwrap(),
         )
     }
+    fn patches(&self, g: &Git) -> PathBuf {
+        sync::create_branch(g, &self.dev, "feature/patch", "main", None).unwrap();
+        commit(&self.dev, "patch-file", "returned patch\n");
+        payload(
+            sync::export_patches(
+                g,
+                &self.dev,
+                &self.ext,
+                "feature/patch",
+                &self.usb,
+                "test",
+                "main",
+                &[],
+            )
+            .unwrap(),
+        )
+    }
     fn advance(&self, g: &Git) -> PathBuf {
         commit(&self.seed, "upstream", "advanced\n");
         git(&self.seed, &["push", "origin", "main"]);
         payload(sync::export_out(g, &self.mirror, &self.usb, "test", "main", true, false).unwrap())
+    }
+}
+
+#[test]
+fn rebase_rejects_a_missing_recorded_base_before_switching_or_journaling() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    for linked in [false, true] {
+        let f = Fixture::new(&g);
+        git(&f.seed, &["switch", "-c", "release"]);
+        commit(&f.seed, "release-only", "must not move to main\n");
+        git(&f.seed, &["push", "origin", "release"]);
+        git(&f.work, &["fetch", "origin"]);
+        let wt = f.root.path().join("topic-tree");
+        sync::create_branch(
+            &g,
+            &f.work,
+            "topic",
+            "release",
+            linked.then_some(wt.as_path()),
+        )
+        .unwrap();
+        let target = if linked { &wt } else { &f.work };
+        commit(target, "topic-only", "topic\n");
+        let tip = git(target, &["rev-parse", "HEAD"]);
+        if !linked {
+            git(&f.work, &["switch", "main"]);
+        }
+        let main = git(&f.work, &["rev-parse", "HEAD"]);
+        let config = fs::read(f.work.join(".git/config")).unwrap();
+        git(&f.seed, &["push", "origin", "--delete", "release"]);
+        for fetch in [true, false] {
+            let error = sync::rebase_onto(&g, &f.work, "topic", "main", fetch).unwrap_err();
+            assert!(error.to_string().contains("origin/release"), "{error}");
+            assert!(!repo::rev_exists(&g, &f.work, "origin/release"));
+            assert_eq!(git(&f.work, &["rev-parse", "topic"]), tip);
+            assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), main);
+            assert_eq!(git(&f.work, &["branch", "--show-current"]), "main");
+            assert_eq!(
+                repo::get_sync_base(&g, &f.work, "topic").as_deref(),
+                Some("release")
+            );
+            assert_eq!(fs::read(f.work.join(".git/config")).unwrap(), config);
+            for work in [&f.work, target] {
+                let gd = repo::git_dir(&g, work).unwrap();
+                assert!(!gd.join("offline-sync-rebase.json").exists());
+                assert!(repo::in_progress(&gd).is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn rebase_keeps_normal_behavior_for_unrecorded_or_unchanged_bases() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let f = Fixture::new(&g);
+    commit(&f.seed, "upstream", "upstream\n");
+    git(&f.seed, &["push", "origin", "main"]);
+    for recorded in [false, true] {
+        let branch = if recorded { "recorded" } else { "unrecorded" };
+        git(&f.work, &["switch", "-c", branch, "main"]);
+        commit(&f.work, branch, "local\n");
+        if recorded {
+            repo::set_sync_base(&g, &f.work, branch, "main").unwrap();
+        }
+        assert!(
+            sync::rebase_onto(&g, &f.work, branch, "main", true)
+                .unwrap()
+                .ok
+        );
+        assert_eq!(
+            git(&f.work, &["rev-parse", "HEAD^"]),
+            git(&f.seed, &["rev-parse", "main"])
+        );
+        assert_eq!(
+            repo::get_sync_base(&g, &f.work, branch).as_deref(),
+            Some("main")
+        );
+    }
+}
+
+#[test]
+fn moved_tags_sync_from_exported_snapshots_and_retry_without_changing_local_branches() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let f = Fixture::new(&g);
+    sync::create_branch(&g, &f.dev, "feature/local", "main", None).unwrap();
+    commit(&f.dev, "local", "local\n");
+    fs::write(f.dev.join("base"), "uncommitted\n").unwrap();
+    let branches = repo::list_refs(&g, &f.dev, &["refs/heads"]).unwrap();
+    git(&f.seed, &["tag", "-a", "v1", "-m", "initial"]);
+    git(&f.seed, &["push", "origin", "refs/tags/v1"]);
+    let first =
+        payload(sync::export_out(&g, &f.mirror, &f.usb, "test", "main", true, false).unwrap());
+    sync::import_in(&g, &first, &f.ext, false).unwrap();
+    sync::sync_dev_repo(&g, &f.dev, &f.ext).unwrap();
+    let old_tag = git(&f.dev, &["rev-parse", "refs/tags/v1"]);
+    commit(&f.seed, "tag-update", "new tag target\n");
+    git(&f.seed, &["tag", "-f", "-a", "v1", "-m", "moved"]);
+    git(
+        &f.seed,
+        &["push", "--force", "origin", "main", "refs/tags/v1"],
+    );
+    let moved =
+        payload(sync::export_out(&g, &f.mirror, &f.usb, "test", "main", true, false).unwrap());
+    sync::import_in(&g, &moved, &f.ext, false).unwrap();
+    let expected = git(&f.seed, &["rev-parse", "refs/tags/v1"]);
+    assert_ne!(old_tag, expected);
+    let dirs = vec![f.dev.to_string_lossy().into_owned()];
+    assert_eq!(
+        sync::dev_sync_status(&g, &f.ext, &dirs)[0].status,
+        "needsFetch"
+    );
+    for _ in 0..2 {
+        sync::sync_dev_repo(&g, &f.dev, &f.ext).unwrap();
+        assert_eq!(git(&f.dev, &["rev-parse", "refs/tags/v1"]), expected);
+        assert_eq!(
+            git(&f.dev, &["rev-parse", "v1^{commit}"]),
+            git(&f.seed, &["rev-parse", "main"])
+        );
+        assert_eq!(
+            repo::list_refs(&g, &f.dev, &["refs/heads"]).unwrap(),
+            branches
+        );
+        assert_eq!(git(&f.dev, &["branch", "--show-current"]), "feature/local");
+        assert_eq!(
+            fs::read_to_string(f.dev.join("base")).unwrap(),
+            "uncommitted\n"
+        );
+        assert_eq!(
+            sync::dev_sync_status(&g, &f.ext, &dirs)[0].status,
+            "upToDate"
+        );
+    }
+}
+
+#[test]
+fn patch_import_accepts_manifest_and_manual_patches_using_manifest_mainline_identity() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let f = Fixture::new(&g);
+    let patches = f.patches(&g);
+    // A selected publication branch may have a different root. Identity belongs
+    // to the manifest mainline, not the branch receiving the patches.
+    git(&f.seed, &["switch", "--orphan", "release"]);
+    commit(&f.seed, "release-file", "separate release history\n");
+    git(&f.seed, &["push", "origin", "release"]);
+    git(&f.work, &["fetch", "origin"]);
+    for manual in [false, true] {
+        if manual {
+            fs::remove_file(manifest_path_for(&patches)).unwrap();
+        }
+        let branch = if manual {
+            "manual-patch"
+        } else {
+            "manifest-patch"
+        };
+        let wt = f.root.path().join(branch);
+        let result =
+            sync::import_patches(&g, &f.work, &patches, branch, "release", false, Some(&wt))
+                .unwrap();
+        assert!(result.ok, "{}", result.message);
+        assert_eq!(
+            fs::read_to_string(wt.join("patch-file")).unwrap(),
+            "returned patch\n"
+        );
+        assert_eq!(
+            git(&wt, &["rev-parse", "HEAD^"]),
+            git(&f.work, &["rev-parse", "origin/release"])
+        );
+        assert_eq!(
+            repo::get_sync_base(&g, &f.work, branch).as_deref(),
+            Some("release")
+        );
+        assert_eq!(git(&f.work, &["branch", "--show-current"]), "main");
+    }
+}
+
+#[test]
+fn patch_import_rejects_invalid_packages_before_fetch_or_worktree_changes() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let f = Fixture::new(&g);
+    let patches = f.patches(&g);
+    let manifest = Manifest::read_for(&patches).unwrap().unwrap();
+    let mpath = manifest_path_for(&patches);
+    let marker = patches.with_file_name(format!(
+        "{}.pending",
+        patches.file_name().unwrap().to_str().unwrap()
+    ));
+    let main = git(&f.work, &["rev-parse", "origin/main"]);
+    // Create a real unrelated root in the receiving repository.
+    git(&f.work, &["switch", "--orphan", "other-project"]);
+    commit(&f.work, "other", "other project\n");
+    let other = git(&f.work, &["rev-parse", "HEAD"]);
+    git(&f.work, &["switch", "main"]);
+    // A fetch would now move origin/main, so unchanged refs prove early rejection.
+    commit(&f.seed, "later", "later upstream\n");
+    git(&f.seed, &["push", "origin", "main"]);
+    for mode in [
+        "foreign-project",
+        "wrong-kind",
+        "pending",
+        "pending-without-manifest",
+        "corrupt",
+        "old-format",
+        "future-format",
+        "missing-mainline",
+    ] {
+        manifest.write_for(&patches).unwrap();
+        let mut changed = manifest.clone();
+        match mode {
+            "foreign-project" => {
+                git(&f.work, &["update-ref", "refs/remotes/origin/main", &other]);
+            }
+            "wrong-kind" => {
+                changed.kind = BundleKind::Back;
+                changed.write_for(&patches).unwrap();
+            }
+            "pending" | "pending-without-manifest" => {
+                fs::write(&marker, "unfinished export").unwrap();
+                if mode == "pending-without-manifest" {
+                    fs::remove_file(&mpath).unwrap();
+                }
+            }
+            "corrupt" => {
+                fs::write(&mpath, "{broken json").unwrap();
+            }
+            "old-format" | "future-format" => {
+                changed.format = if mode == "old-format" { 0 } else { 2 };
+                fs::write(&mpath, serde_json::to_vec(&changed).unwrap()).unwrap();
+            }
+            "missing-mainline" => {
+                git(&f.work, &["update-ref", "-d", "refs/remotes/origin/main"]);
+            }
+            _ => unreachable!(),
+        }
+        let refs = repo::list_refs(&g, &f.work, &["refs"]).unwrap();
+        let config = fs::read(f.work.join(".git/config")).unwrap();
+        let worktrees = git(&f.work, &["worktree", "list", "--porcelain"]);
+        for linked in [false, true] {
+            let wt = f.root.path().join("must-not-create").join(mode);
+            let result = sync::import_patches(
+                &g,
+                &f.work,
+                &patches,
+                "rejected",
+                "main",
+                true,
+                linked.then_some(wt.as_path()),
+            );
+            assert!(result.is_err(), "{mode}, linked={linked}: {result:?}");
+            assert!(!wt.parent().unwrap().exists(), "{mode}");
+            assert_eq!(
+                repo::list_refs(&g, &f.work, &["refs"]).unwrap(),
+                refs,
+                "{mode}"
+            );
+            assert_eq!(
+                fs::read(f.work.join(".git/config")).unwrap(),
+                config,
+                "{mode}"
+            );
+            assert_eq!(
+                git(&f.work, &["worktree", "list", "--porcelain"]),
+                worktrees,
+                "{mode}"
+            );
+            assert_eq!(
+                git(&f.work, &["branch", "--show-current"]),
+                "main",
+                "{mode}"
+            );
+            assert!(
+                repo::in_progress(&repo::git_dir(&g, &f.work).unwrap()).is_none(),
+                "{mode}"
+            );
+            assert!(
+                git(&f.work, &["status", "--porcelain"]).is_empty(),
+                "{mode}"
+            );
+        }
+        if marker.exists() {
+            fs::remove_file(&marker).unwrap();
+        }
+        git(&f.work, &["update-ref", "refs/remotes/origin/main", &main]);
     }
 }
 

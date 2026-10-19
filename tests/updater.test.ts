@@ -50,6 +50,15 @@ describe("updater", () => {
     expect(relaunch).toHaveBeenCalled();
   });
 
+  it("完整中文更新说明保留段落和列表，下载后仍可查看", async () => {
+    const notes = "# v2.1.0\n\n更新说明。\n\n## 修复\n\n- 修复同步。\n- 保留 `Markdown`。\n\nhttps://example.com/releases/v2.1.0";
+    check.mockResolvedValue({ ...fakeUpdate(), body: `\n${notes}\n` });
+    await checkForUpdates({ manual: true });
+    expect(getUpdateState().releaseNotes).toBe(notes);
+    await downloadUpdate();
+    expect(getUpdateState()).toMatchObject({ status: "downloaded", releaseNotes: notes });
+  });
+
   it("自动检查失败保持安静，手动检查失败抛错", async () => {
     check.mockRejectedValue(new Error("network"));
     const s = await checkForUpdates();

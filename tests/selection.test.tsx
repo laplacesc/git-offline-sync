@@ -8,7 +8,9 @@ import { ExternalView } from "../src/ExternalView";
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onFocusChanged: async () => () => {} }),
 }));
-vi.mock("../src/runner", () => ({
+vi.mock("../src/runner", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/runner")>(),
+  Feedback: () => null,
   useRunner: () => ({ busy: null, notify: vi.fn(), run: async (_: string, fn: () => unknown) => fn() }),
 }));
 

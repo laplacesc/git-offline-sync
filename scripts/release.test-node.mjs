@@ -7,11 +7,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { checkVersions } from './check-version.mjs';
-import { assetNames, githubClient, prepareAssets, publishAssets, stageAssets } from './release.mjs';
+import { assetNames, githubClient, prepareAssets as prepareReleaseAssets, publishAssets, readReleaseNotes, stageAssets } from './release.mjs';
 
 const version = '2.0.3';
 const tag = `v${version}`;
 const repository = 'example/git-offline-sync';
+const notes = '# v2.0.3\n\n## 修复\n\n- 显示完整更新说明。\n- 保留 `Markdown` 与中文。';
+function prepareAssets(directory, v, repo, releaseTag = `v${v}`, body = notes) {
+  return prepareReleaseAssets(directory, v, repo, releaseTag, body);
+}
 const packet = Buffer.alloc(74);
 packet.write('ED');
 const signature = Buffer.from(`untrusted comment: fixture\n${packet.toString('base64')}\ntrusted comment: fixture\n${Buffer.alloc(64).toString('base64')}\n`).toString('base64');
@@ -123,11 +127,34 @@ test('preflight creates all three updater targets with matching URL/signature', 
   assert.equal(assets.length, 8);
   const manifest = JSON.parse(readFileSync(join(dir, 'latest.json'), 'utf8'));
   assert.equal(manifest.version, version);
+  assert.equal(manifest.notes, notes);
   assert.deepEqual(Object.keys(manifest.platforms), ['windows-x86_64', 'darwin-aarch64', 'darwin-x86_64']);
   assert.equal(manifest.platforms['windows-x86_64'].signature, signature);
   assert.match(manifest.platforms['windows-x86_64'].url, /\/v2\.0\.3\/.*-no-webview2\.exe$/);
   assert.deepEqual(manifest.platforms['darwin-aarch64'], manifest.platforms['darwin-x86_64']);
   assert.equal(prepareAssets(dir, version, repository).length, 8);
+});
+
+test('release notes come from the matching version file and are required', (t) => {
+  const root = temporary(t);
+  const path = join(root, `docs/releases/${tag}.md`);
+  assert.throws(() => readReleaseNotes(version, root), /release notes/i);
+  write(path, `\n${notes}\n`);
+  assert.equal(readReleaseNotes(version, root), notes);
+  for (const content of ['', ' \n ', `GitOfflineSync ${version}`, `# ${tag}`]) {
+    write(path, content);
+    assert.throws(() => readReleaseNotes(version, root), /release notes/i);
+    assert.throws(() => prepareAssets(fixture(t), version, repository, tag, content), /release notes/i);
+  }
+});
+
+test('current version embeds its checked-in notes in the updater manifest', (t) => {
+  const currentVersion = checkVersions();
+  const dir = fixture(t, currentVersion);
+  prepareReleaseAssets(dir, currentVersion, repository);
+  const manifest = JSON.parse(readFileSync(join(dir, 'latest.json'), 'utf8'));
+  assert.equal(manifest.notes, readReleaseNotes(currentVersion));
+  assert.notEqual(manifest.notes, `GitOfflineSync ${currentVersion}`);
 });
 
 test('preflight rejects missing, empty, unexpected and invalidly signed assets', (t) => {
@@ -143,7 +170,7 @@ test('preflight rejects missing, empty, unexpected and invalidly signed assets',
 });
 
 test('preflight rejects stale JSON, altered URLs/signatures and tag mismatch', (t) => {
-  for (const fault of ['version', 'url', 'signature', 'date', 'json']) {
+  for (const fault of ['version', 'url', 'signature', 'date', 'json', 'notes']) {
     const dir = fixture(t);
     prepareAssets(dir, version, repository);
     const path = join(dir, 'latest.json');
@@ -152,6 +179,7 @@ test('preflight rejects stale JSON, altered URLs/signatures and tag mismatch', (
     if (fault === 'url') manifest.platforms['windows-x86_64'].url = 'https://example.com/wrong.exe';
     if (fault === 'signature') manifest.platforms['darwin-aarch64'].signature = 'other';
     if (fault === 'date') manifest.pub_date = 'bad date';
+    if (fault === 'notes') manifest.notes = `GitOfflineSync ${version}`;
     write(path, fault === 'json' ? '{' : JSON.stringify(manifest));
     assert.throws(() => prepareAssets(dir, version, repository));
   }
@@ -189,9 +217,11 @@ test('publication is the last operation, after every downloaded checksum is veri
   const create = client.events.find(({ method }) => method === 'POST');
   assert.equal(create.body.draft, true);
   assert.equal(create.body.make_latest, 'false');
+  assert.equal(create.body.body, notes);
+  assert.equal(create.body.generate_release_notes, undefined);
   assert.equal(client.events.filter(({ method }) => method === 'UPLOAD').length, assets.length);
   assert.equal(client.events.filter(({ method }) => method === 'DIGEST').length, assets.length);
-  assert.deepEqual(client.events.at(-1), { method: 'PATCH', path: '/releases/7', body: { draft: false, prerelease: false, make_latest: 'legacy' } });
+  assert.deepEqual(client.events.at(-1), { method: 'PATCH', path: '/releases/7', body: { draft: false, prerelease: false, make_latest: 'legacy', body: notes } });
 });
 
 test('existing public releases are never mutated or reset to draft', async (t) => {
@@ -221,6 +251,7 @@ test('draft retries do not recreate the release, prereleases cannot become lates
   assert.equal(client.events.filter(({ method }) => method === 'DELETE').length, 1);
   assert.equal(client.events.at(-1).body.make_latest, 'false');
   assert.equal(client.events.at(-1).body.prerelease, true);
+  assert.equal(client.events.at(-1).body.body, notes);
 });
 
 test('only HTTP 404 is absence; permission/network/server errors must not create a release', async () => {
