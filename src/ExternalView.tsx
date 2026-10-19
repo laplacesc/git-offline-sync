@@ -268,7 +268,7 @@ export function ExternalView({ profile }: { profile: Profile }) {
           {!chosen && mirrorReady && pendingDevs ? "完成同步" : "同步更新"}
         </ActionButton>
       </div>
-      <Fold className="sync-details" title={"包详情与其他更新包"}>
+      <Fold className="sync-details" title={"更新包详情与选择"}>
         {chosen && <p><Code>{chosen.payloadPath}</Code> · {formatTime(chosen.manifest?.createdAt)}</p>}
         {chosen?.manifest?.refs.map((ref) => <p key={ref.name}><Code>{ref.name}</Code> · {shortSha(ref.sha)}</p>)}
         <Select className="sync-select-field" fullWidth value={chosen?.payloadPath ?? "no-package"} isDisabled={!ready || !!busy}

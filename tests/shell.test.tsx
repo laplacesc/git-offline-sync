@@ -49,12 +49,15 @@ it("Windows 顶栏可拖动，打开设置后仍可操作窗口按钮", async ()
   expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
 });
 
-it("macOS 保留原生控制区，不显示 Windows 窗口按钮", async () => {
+it("macOS 合并顶栏可拖动，保留原生窗口按钮和项目菜单", async () => {
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
   render(<App />);
   await screen.findByRole("button", { name: "打开设置" });
-  expect(document.querySelector(".titlebar-drag")).toBeTruthy();
+  expect(document.querySelector(".titlebar-drag")).toBeNull();
+  expect(screen.getByRole("banner").getAttribute("data-tauri-drag-region")).toBe("deep");
   expect(screen.queryByRole("group", { name: "窗口控制" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "选择项目：订单服务" }));
+  expect(await screen.findByRole("menuitem", { name: /基础平台/ })).toBeTruthy();
 });
 
 it("项目菜单列出全部项目，当前项目可辨认", async () => {

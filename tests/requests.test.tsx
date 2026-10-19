@@ -193,7 +193,7 @@ describe.each(["external", "internal"] as const)("%s 组合刷新", (role) => {
     vi.spyOn(api, stateApi).mockReturnValueOnce(oldState.promise).mockResolvedValueOnce(stateValue);
     renderView(role);
     if (role === "internal") fireEvent.click(screen.getByRole("tab", { name: /导入回传/ }));
-    else fireEvent.click(screen.getByRole("button", { name: "包详情与其他更新包", exact: true }));
+    else fireEvent.click(screen.getByRole("button", { name: "更新包详情与选择", exact: true }));
     fireEvent.click(screen.getAllByRole("button", { name: "刷新" })[0]);
     await act(async () => latest.resolve([pkg("new.bundle", role === "internal" ? "back" : "full")]));
     expect(await screen.findAllByText("new.bundle")).not.toHaveLength(0);
@@ -213,7 +213,7 @@ describe.each(["external", "internal"] as const)("%s 组合刷新", (role) => {
     vi.spyOn(api, role === "external" ? "listPackages" : "listReturnPackages").mockReturnValueOnce(old.promise).mockResolvedValue([pkg("new-dir.bundle", role === "internal" ? "back" : "full")]);
     const { rerender } = renderView(role);
     if (role === "internal") fireEvent.click(screen.getByRole("tab", { name: /导入回传/ }));
-    else fireEvent.click(screen.getByRole("button", { name: "包详情与其他更新包", exact: true }));
+    else fireEvent.click(screen.getByRole("button", { name: "更新包详情与选择", exact: true }));
     const updated = { ...profile, transferDir: "/new-usb" };
     rerender(<RunnerProvider>{role === "external" ? <ExternalView profile={updated} /> : <InternalView profile={updated} />}</RunnerProvider>);
     expect(await screen.findAllByText("new-dir.bundle")).not.toHaveLength(0);
@@ -391,7 +391,7 @@ it("导入前阻止缺号、身份不符和缺失文件，只有可用的本项�
   vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({ ...status(path), refs: [] }));
   vi.spyOn(api, "listPackages").mockResolvedValue([makePackage(3), makePackage(5), makePackage(4, "other", true, "full"), makePackage(6, "matching", false), makePackage(7, "matching", true, "full")]);
   renderView("external");
-  fireEvent.click(screen.getByRole("button", { name: "包详情与其他更新包", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "更新包详情与选择", exact: true }));
   await screen.findByText("本次更新 #3 · 增量");
   fireEvent.click(screen.getByRole("button", { name: /选择更新包/ }));
   await screen.findByRole("listbox");

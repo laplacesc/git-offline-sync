@@ -112,7 +112,7 @@ describe("精简外网同步", () => {
     await loaded();
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["同步更新", "回传提交"]);
     expect(screen.getByText("本次更新 #3 · 增量")).toBeTruthy();
-    expand("包详情与其他更新包");
+    expand("更新包详情与选择");
     expect(screen.queryByRole("option", { name: /#2/ })).toBeNull();
     expect(screen.queryByRole("option", { name: /other/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "同步更新", exact: true }));
@@ -177,7 +177,7 @@ describe("精简外网同步", () => {
     vi.mocked(api.listPackages).mockResolvedValue([pkg(4), pkg(5, "full"), pkg(6, "full", "matching", false)]);
     await loaded();
     expect(screen.getByText("缺少更新 #3，请补齐或选择较新的全量包。")).toBeTruthy();
-    expand("包详情与其他更新包");
+    expand("更新包详情与选择");
     fireEvent.click(screen.getByRole("button", { name: /选择更新包/ }));
     expect((await screen.findByRole("option", { name: /#4/ })).getAttribute("aria-disabled")).toBe("true");
     expect(screen.getByRole("option", { name: /#6/ }).getAttribute("aria-disabled")).toBe("true");
@@ -204,7 +204,7 @@ describe("精简外网同步", () => {
       const { refs: _refs, ...withoutRefs } = status(path);
       return withoutRefs;
     });
-    await loaded(); expand("包详情与其他更新包");
+    await loaded(); expand("更新包详情与选择");
     if (!screen.queryByRole("listbox")) fireEvent.click(screen.getByRole("button", { name: /选择更新包/ }));
     fireEvent.click(await screen.findByRole("option", { name: /#5/ }));
     expect(screen.getByText("无法读取完整引用影响，请刷新后再使用全量包跳号。")).toBeTruthy();
@@ -215,7 +215,7 @@ describe("精简外网同步", () => {
   it("全量确认期间配置改变，不能执行旧目标", async () => {
     vi.mocked(api.listPackages).mockResolvedValue([pkg(5, "full")]);
     const { rerender } = await loaded();
-    expand("包详情与其他更新包");
+    expand("更新包详情与选择");
     if (!screen.queryByRole("listbox")) fireEvent.click(screen.getByRole("button", { name: /选择更新包/ }));
     fireEvent.click(await screen.findByRole("option", { name: /#5/ }));
     fireEvent.click(screen.getByRole("button", { name: "同步更新", exact: true }));

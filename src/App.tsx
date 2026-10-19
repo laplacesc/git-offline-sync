@@ -124,10 +124,9 @@ function Shell() {
       <BackgroundScene />
       <Link href="#main-content" className="skip-link">跳到主要内容</Link>
       <main id="main-content" tabIndex={-1} className="compact-window">
-        {platform === "mac" && <div data-tauri-drag-region className="titlebar-drag" />}
-        <header className="compact-toolbar" data-tauri-drag-region={platform === "windows" ? "deep" : true}>
+        <header className="compact-toolbar" data-tauri-drag-region={platform === "other" ? true : "deep"}>
           <div className="compact-brand"><span className="brand-mark"><AppGlyph className="size-[22px]" /></span><span>Git 离线同步</span></div>
-          <div className="compact-toolbar-actions" data-tauri-drag-region={platform === "windows" ? "deep" : true}>
+          <div className="compact-toolbar-actions" data-tauri-drag-region={platform === "other" ? true : "deep"}>
             <Dropdown>
               <Button ref={projectButtonRef} className="compact-project" size="sm" variant="ghost" isDisabled={locked || !config}
                 aria-label={`选择项目：${current?.name ?? "未配置"}`}>

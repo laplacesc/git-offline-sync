@@ -243,7 +243,6 @@
 .app-shell { height: 100%; }
 .app-sidebar { position: fixed; inset: 0 auto 0 0; border-radius: 0; border-width: 0 1px 0 0; box-shadow: none; z-index: 30; width: var(--sidebar-width); display: flex; min-height: 0; flex-direction: column; background: var(--sidebar); padding-inline: 12px; }
 .app-sidebar[hidden] { display: none; }
-.titlebar-drag { height: var(--toolbar-height); flex-shrink: 0; user-select: none; }
 .app-brand { display: flex; align-items: center; gap: 9px; min-height: 54px; padding: 4px 10px 12px; font-size: 14px; }
 .app-shell[data-platform="other"] .app-brand { padding-top: 16px; min-height: 66px; }
 .brand-mark { display: grid; place-items: center; width: 28px; height: 28px; }
@@ -577,9 +576,6 @@
   -webkit-backdrop-filter: var(--panel-filter); backdrop-filter: var(--panel-filter);
 }
 :root:not([data-theme="dark"]) .compact-window { background-color: var(--bg-subtle); }
-.compact-window > .titlebar-drag {
-  height: 36px;
-}
 .compact-toolbar {
   display: flex; align-items: center; gap: 12px; min-width: 0; min-height: 76px;
   flex-shrink: 0; padding: 14px 28px; border-bottom: 1px solid var(--border); user-select: none;
@@ -796,6 +792,10 @@
   .sync-branch-copy { flex-basis: 160px; }
   .sync-details dl { grid-template-columns: 72px minmax(0, 1fr); }
   .sync-panel :is(h1, h2) { font-size: 18px; }
+}
+/* macOS keeps its native traffic lights to the left of the app header. */
+.app-shell[data-platform="mac"] .compact-toolbar {
+  min-height: 52px; padding: 8px 20px 8px 96px;
 }
 /* Windows uses one app header, with caption controls pinned to its top-right. */
 .app-shell[data-platform="windows"] .compact-toolbar {
