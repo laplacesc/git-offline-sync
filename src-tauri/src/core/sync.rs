@@ -1365,7 +1365,7 @@ pub enum DeleteBranchOutcome {
 
 // Lock every registered worktree HEAD through Git's ref backend (including reftable).
 // Recheck both symbolic HEADs and detached operations after prepare acquires those locks.
-fn deletion_heads(g: &Git, work: &Path, branch: &str) -> Result<Vec<PathBuf>> {
+pub(super) fn deletion_heads(g: &Git, work: &Path, branch: &str) -> Result<Vec<PathBuf>> {
     let mut heads = Vec::new();
     for tree in repo::list_worktrees(g, work)?
         .into_iter()
@@ -1395,7 +1395,7 @@ fn deletion_heads(g: &Git, work: &Path, branch: &str) -> Result<Vec<PathBuf>> {
     Ok(heads)
 }
 
-fn with_locked_heads(
+pub(super) fn with_locked_heads(
     g: &Git,
     heads: &[PathBuf],
     action: &(dyn Fn() -> Result<()> + Sync),

@@ -2,7 +2,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { api, type Profile } from "../src/api";
-import { StepCard, Workflow, WorkflowNav } from "../src/ui";
+import { useState } from "react";
+import { Tabs } from "@heroui/react";
+import { WorkspaceNavigation } from "../src/ui";
 import { useRunner } from "../src/runner";
 
 const operation = vi.hoisted(() => ({ run: vi.fn<() => Promise<void>>() }));
@@ -48,29 +50,28 @@ it("Windows 顶栏可拖动，打开设置后仍可操作窗口按钮", async ()
   expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
 });
 
-it("macOS 合并顶栏可拖动，保留原生窗口按钮和项目菜单", async () => {
+it("macOS 合并顶栏可拖动，保留原生窗口按钮和配置列表", async () => {
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
   render(<App />);
   await screen.findByRole("button", { name: "打开设置" });
   expect(document.querySelector(".titlebar-drag")).toBeNull();
   expect(screen.getByRole("banner").getAttribute("data-tauri-drag-region")).toBe("deep");
   expect(screen.queryByRole("group", { name: "窗口控制" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "选择项目：订单服务" }));
-  expect(await screen.findByRole("menuitem", { name: /基础平台/ })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "切换配置：基础平台" })).toBeTruthy();
 });
 
-it("项目菜单列出全部项目，当前项目可辨认", async () => {
+it("配置列表直接显示全部配置，当前配置可辨认", async () => {
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "选择项目：订单服务" }));
-  expect(await screen.findByRole("menuitem", { name: /订单服务/ })).toBeTruthy();
-  expect(screen.getByRole("menuitem", { name: /基础平台/ })).toBeTruthy();
-  expect(within(screen.getByRole("menuitem", { name: /订单服务/ })).getByText("当前")).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "切换配置：订单服务" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "切换配置：基础平台" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "切换配置：订单服务" }).getAttribute("aria-current")).toBe("page");
+  fireEvent.click(screen.getByRole("button", { name: "新建配置" }));
   expect(screen.getByRole("menuitem", { name: "新建内网端配置" })).toBeTruthy();
   expect(screen.getByRole("menuitem", { name: "新建外网端配置" })).toBeTruthy();
   expect(api.saveConfig).not.toHaveBeenCalled();
 });
 
-it("右上角外观菜单提供浅色、深色和跟随系统，并保存选择", async () => {
+it("侧栏外观菜单提供浅色、深色和跟随系统，并保存选择", async () => {
   localStorage.clear();
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "外观：跟随系统" }));
@@ -86,10 +87,14 @@ it("右上角外观菜单提供浅色、深色和跟随系统，并保存选择"
   localStorage.clear();
 });
 
-it("默认不展示侧栏、搜索和日志，记录按需打开并能用 Escape 收起", async () => {
+it("项目列表可收起，记录按需打开并能用 Escape 收起", async () => {
   render(<App />);
   const records = await screen.findByRole("button", { name: "查看记录" });
-  expect(screen.queryByRole("complementary")).toBeNull();
+  expect(screen.getByRole("navigation", { name: "工作区导航" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "收起配置列表" }));
+  expect(screen.queryByRole("navigation", { name: "工作区导航" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "展开配置列表" }));
+  expect(screen.getByRole("navigation", { name: "工作区导航" })).toBeTruthy();
   expect(screen.queryByRole("textbox", { name: "搜索同步配置" })).toBeNull();
   expect(screen.queryByRole("region", { name: "命令日志" })).toBeNull();
   fireEvent.click(records);
@@ -101,24 +106,59 @@ it("默认不展示侧栏、搜索和日志，记录按需打开并能用 Escape
   expect(document.activeElement).toBe(records);
 });
 
-it("从项目菜单切换项目会持久化选择并更新顶栏", async () => {
+it("侧栏只显示配置列表，没有重复的任务页签和常驻记录栏", async () => {
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "选择项目：订单服务" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: /基础平台/ }));
+  await screen.findByText("外网工作区：订单服务");
+  expect(screen.getAllByRole("button", { name: "切换配置：订单服务" })).toHaveLength(1);
+  expect(screen.getByRole("list", { name: "配置文件" }).children).toHaveLength(2);
+  expect(screen.queryByRole("tab", { name: "同步与回传" })).toBeNull();
+  expect(document.querySelector(".compact-footer")).toBeNull();
+});
+
+it("原生最小窗口 900px 保留项目和任务导航", async () => {
+  vi.stubGlobal("matchMedia", (query: string) => {
+    const maxWidth = query.match(/max-width:\s*(\d+)px/);
+    return {
+      matches: !!maxWidth && 900 <= Number(maxWidth[1]), media: query,
+      addEventListener() {}, removeEventListener() {},
+    };
+  });
+  render(<App />);
+  await screen.findByText("外网工作区：订单服务");
+  expect(screen.getByRole("navigation", { name: "工作区导航" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "收起配置列表" })).toBeTruthy();
+});
+
+it("窄窗口默认收起配置列表，选择项目后回到工作区", async () => {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query === "(max-width: 800px)", media: query, addEventListener() {}, removeEventListener() {},
+  }));
+  render(<App />);
+  await screen.findByText("外网工作区：订单服务");
+  expect(screen.queryByRole("navigation", { name: "工作区导航" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "展开配置列表" }));
+  const navigation = screen.getByRole("navigation", { name: "工作区导航" });
+  fireEvent.click(await screen.findByRole("button", { name: "切换配置：基础平台" }));
+  expect(await screen.findByText("内网工作区：基础平台")).toBeTruthy();
+  expect(screen.queryByRole("navigation", { name: "工作区导航" })).toBeNull();
+});
+
+it("点击配置会持久化选择并更新当前状态", async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "切换配置：基础平台" }));
   expect(await screen.findByText("内网工作区：基础平台")).toBeTruthy();
   expect(api.saveConfig).toHaveBeenCalledWith({ profiles, lastProfileId: "platform" });
-  expect(screen.getByRole("button", { name: "选择项目：基础平台" })).toBeTruthy();
-  expect(screen.getByText("内网端")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "切换配置：基础平台" })).toBeTruthy();
+  expect(screen.getByText(/^内网端 ·/)).toBeTruthy();
 });
 
 it("配置在模态中编辑，取消后返回原工作区并可打开设置", async () => {
   render(<App />);
   const input = await screen.findByRole("textbox", { name: "工作区输入" });
   fireEvent.change(input, { target: { value: "未完成的选择" } });
-  const projectButton = screen.getByRole("button", { name: "选择项目：订单服务" });
+  const projectButton = screen.getByRole("button", { name: "编辑当前配置" });
   const settingsButton = screen.getByRole("button", { name: "打开设置" });
   fireEvent.click(projectButton);
-  fireEvent.click(await screen.findByRole("menuitem", { name: "编辑当前项目" }));
   const dialog = await screen.findByRole("dialog", { name: "编辑同步配置" });
   expect((projectButton as HTMLButtonElement).disabled).toBe(true);
   expect((settingsButton as HTMLButtonElement).disabled).toBe(true);
@@ -140,22 +180,34 @@ it("首次使用可以选择内外网角色创建配置", async () => {
   expect(screen.getByRole("textbox", { name: "GitLab 仓库地址" })).toBeTruthy();
 });
 
-it("流程页签支持键盘切换，隐藏面板保留输入，导航关联正确", () => {
-  render(<Workflow><WorkflowNav steps={["导入内网包", "开发仓库"]} />
-    <StepCard step={1} label="Import" title="导入内网包"><input aria-label="包路径" defaultValue="/usb" /></StepCard>
-    <StepCard step={2} label="Sync" title="开发仓库">仓库内容</StepCard></Workflow>);
-  const tabs = screen.getAllByRole("tab");
+function PortaledWorkspace() {
+  const [target, setTarget] = useState<HTMLDivElement | null>(null);
+  return <><nav aria-label="任务导航"><div ref={setTarget} /></nav>
+    <Tabs orientation="vertical" defaultSelectedKey="import">
+      <WorkspaceNavigation target={target}><Tabs.List aria-label="同步步骤">
+        <Tabs.Tab id="import">导入内网包</Tabs.Tab><Tabs.Tab id="dev">开发仓库</Tabs.Tab>
+      </Tabs.List></WorkspaceNavigation>
+      <Tabs.Panel id="import" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
+        <input aria-label="包路径" defaultValue="/usb" />
+      </Tabs.Panel>
+      <Tabs.Panel id="dev">仓库内容</Tabs.Panel>
+    </Tabs>
+  </>;
+}
+
+it("侧栏页签支持纵向键盘切换，隐藏面板保留输入且导航关联正确", () => {
+  render(<PortaledWorkspace />);
+  const navigation = screen.getByRole("navigation", { name: "任务导航" });
+  const tabs = within(navigation).getAllByRole("tab");
   fireEvent.change(screen.getByRole("textbox", { name: "包路径" }), { target: { value: "/changed" } });
   act(() => tabs[0].focus());
-  fireEvent.keyDown(tabs[0], { key: "ArrowRight" });
+  fireEvent.keyDown(tabs[0], { key: "ArrowDown" });
   expect(document.activeElement).toBe(tabs[1]);
   expect(tabs[1].getAttribute("aria-selected")).toBe("true");
   expect(screen.getByRole("tabpanel").id).toBe(tabs[1].getAttribute("aria-controls"));
   expect(screen.queryByRole("textbox", { name: "包路径" })).toBeNull();
   fireEvent.keyDown(tabs[1], { key: "Home" });
   expect((screen.getByRole("textbox", { name: "包路径" }) as HTMLInputElement).value).toBe("/changed");
-  fireEvent.click(tabs[1]);
-  expect(screen.getByRole("tabpanel").textContent).toContain("仓库内容");
 });
 
 it("设置不提供主题切换，保存 Git 路径后重新检测环境", async () => {
@@ -216,13 +268,11 @@ it("设置保存失败时保留输入供重试", async () => {
 it("项目切换保存失败时保留原项目，重新选择可以重试", async () => {
   vi.mocked(api.saveConfig).mockRejectedValueOnce(new Error("配置不可写"));
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "选择项目：订单服务" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: /基础平台/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "切换配置：基础平台" }));
   expect(await screen.findByText("保存配置失败：Error: 配置不可写")).toBeTruthy();
   expect(screen.getByText("外网工作区：订单服务")).toBeTruthy();
   expect(screen.queryByText("内网工作区：基础平台")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "选择项目：订单服务" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: /基础平台/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "切换配置：基础平台" }));
   expect(await screen.findByText("内网工作区：基础平台")).toBeTruthy();
   expect(api.saveConfig).toHaveBeenCalledTimes(2);
 });
@@ -230,8 +280,7 @@ it("项目切换保存失败时保留原项目，重新选择可以重试", asyn
 it("配置保存失败时保留模态和填写内容，重试成功后返回工作区", async () => {
   vi.mocked(api.saveConfig).mockRejectedValueOnce(new Error("配置不可写"));
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "选择项目：订单服务" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "编辑当前项目" }));
+  fireEvent.click(await screen.findByRole("button", { name: "编辑当前配置" }));
   const dialog = await screen.findByRole("dialog", { name: "编辑同步配置" });
   const name = within(dialog).getByRole("textbox", { name: "名称" }) as HTMLInputElement;
   fireEvent.change(name, { target: { value: "订单新版" } });
@@ -250,10 +299,9 @@ it("配置保存失败时保留模态和填写内容，重试成功后返回工�
 
 it("配置模态 Escape 复用未保存修改确认，放弃后恢复项目入口焦点", async () => {
   render(<App />);
-  const project = await screen.findByRole("button", { name: "选择项目：订单服务" });
+  const project = await screen.findByRole("button", { name: "编辑当前配置" });
   project.focus();
   fireEvent.click(project);
-  fireEvent.click(await screen.findByRole("menuitem", { name: "编辑当前项目" }));
   const dialog = await screen.findByRole("dialog", { name: "编辑同步配置" });
   const name = within(dialog).getByRole("textbox", { name: "名称" });
   fireEvent.change(name, { target: { value: "未保存名称" } });
@@ -272,8 +320,7 @@ it("配置模态 Escape 复用未保存修改确认，放弃后恢复项目入�
 
 it("项目删除仍需确认，取消保留配置，确认后返回剩余项目", async () => {
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "选择项目：订单服务" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "编辑当前项目" }));
+  fireEvent.click(await screen.findByRole("button", { name: "编辑当前配置" }));
   const editor = await screen.findByRole("dialog", { name: "编辑同步配置" });
   fireEvent.click(within(editor).getByRole("button", { name: "删除配置" }));
   const confirm = await screen.findByRole("alertdialog", { name: "删除配置“订单服务”" });
@@ -292,14 +339,14 @@ it("操作中禁用项目和设置，失败由状态栏提示且不自动展开�
   operation.run.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "执行同步" }));
-  const project = screen.getByRole("button", { name: "选择项目：订单服务" }) as HTMLButtonElement;
+  const project = screen.getByRole("button", { name: "切换配置：订单服务" }) as HTMLButtonElement;
   const settings = screen.getByRole("button", { name: "打开设置" }) as HTMLButtonElement;
   expect(project.disabled).toBe(true);
   expect(settings.disabled).toBe(true);
   expect(screen.getByText("正在同步更新，请稍候…")).toBeTruthy();
   await act(async () => { fail(new Error("仓库不可读")); });
   expect(await screen.findByText("同步更新失败：Error: 仓库不可读")).toBeTruthy();
-  expect(screen.getByText("同步更新 · 失败")).toBeTruthy();
+  expect(document.querySelector(".compact-footer")).toBeNull();
   expect(screen.queryByRole("region", { name: "命令日志" })).toBeNull();
   expect(project.disabled).toBe(false);
   expect(settings.disabled).toBe(false);
@@ -318,9 +365,9 @@ it("配置读取失败可以重试，并保留 Git 不可用提示", async () =>
   expect((await screen.findByText(/找不到可用的 git/)).closest(".operation-popups")).toBeTruthy();
 });
 
-it("项目菜单可直接新建外网配置，取消后回到原项目", async () => {
+it("配置列表可新建外网配置，取消后回到原配置", async () => {
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "选择项目：订单服务" }));
+  fireEvent.click(await screen.findByRole("button", { name: "新建配置" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "新建外网端配置" }));
   const dialog = await screen.findByRole("dialog", { name: "新建同步配置" });
   expect((within(dialog).getByRole("radio", { name: /外网端/ }) as HTMLInputElement).checked).toBe(true);

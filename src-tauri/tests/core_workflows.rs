@@ -139,6 +139,69 @@ impl Fixture {
 }
 
 #[test]
+fn return_with_missing_prerequisites_explains_fetch_and_preserves_refs() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let f = Fixture::new(&g);
+    let update = f.advance(&g);
+    sync::import_in(&g, &update, &f.ext, false).unwrap();
+    sync::sync_dev_repo(&g, &f.dev, &f.ext).unwrap();
+    let bundle = f.back(&g);
+    let before = git(&f.work, &["show-ref"]);
+    let head = git(&f.work, &["rev-parse", "HEAD"]);
+    let error = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap_err();
+    assert!(error.to_string().contains("git fetch origin"), "{error}");
+    assert_eq!(git(&f.work, &["show-ref"]), before);
+    assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), head);
+    assert!(!repo::rev_exists(&g, &f.work, "feature/return"));
+
+    git(&f.work, &["fetch", "origin"]);
+    let result = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
+    assert_eq!(result.branches[0].local, "feature/return");
+    assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        git(&f.work, &["rev-parse", "feature/return"]),
+        git(&f.dev, &["rev-parse", "feature/return"])
+    );
+}
+
+// Reconstruct the pre-direct receipt shape to keep legacy recovery/mapping covered.
+fn receive_legacy(g: &Git, f: &Fixture, bundle: &Path) -> review::ImportReturnResult {
+    let accepted = review::import_return(g, &f.work, bundle, "main", &[]).unwrap();
+    let receipts = repo::list_refs(g, &f.work, &["refs/offline-sync/return-receipts"]).unwrap();
+    let reference = &receipts[0].0;
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(&git(&f.work, &["cat-file", "blob", reference])).unwrap();
+    receipt.as_object_mut().unwrap().remove("direct");
+    let key = receipt["key"].as_str().unwrap().to_owned();
+    for item in receipt["items"].as_array_mut().unwrap() {
+        let local = format!("review/{key}/{}", item["itemId"].as_str().unwrap());
+        git(
+            &f.work,
+            &["branch", "-m", item["local"].as_str().unwrap(), &local],
+        );
+        item["local"] = local.into();
+    }
+    let blob = g
+        .query_stdin(
+            &f.work,
+            git_offline_sync_lib::args!["hash-object", "-w", "--stdin"],
+            &receipt.to_string(),
+        )
+        .unwrap();
+    git(&f.work, &["update-ref", reference, blob.trim()]);
+    let legacy = review::import_return(g, &f.work, bundle, "main", &[]).unwrap();
+    assert_eq!(legacy.branches.len(), accepted.branches.len());
+    assert!(legacy.outcomes.is_empty());
+    assert_eq!(
+        review::review_sources(g, &f.work).unwrap()[&legacy.branches[0].local],
+        legacy.branches[0].source
+    );
+    legacy
+}
+
+#[test]
 fn rebase_rejects_a_missing_recorded_base_before_switching_or_journaling() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let log = |_: LogEvent| {};
@@ -460,44 +523,34 @@ fn return_package_query_recognizes_copied_packages_and_reports_corrupt_receipts(
         .iter()
         .all(|p| !p.received));
 
-    // Reception succeeds but upstream fetch fails before any worktree is built.
+    // Reception does not require a reachable origin.
     let unavailable = f.root.path().join("unavailable.git");
     git(
         &f.work,
         &["remote", "set-url", "origin", unavailable.to_str().unwrap()],
     );
-    assert!(review::import_return(&g, &f.work, &bundle, "main", &[]).is_err());
+    assert!(review::import_return(&g, &f.work, &bundle, "main", &[])
+        .unwrap()
+        .outcomes
+        .is_empty());
     let pending = repo::status(&g, &f.work, "main", &[]).unwrap();
     let pending_branch = pending
         .branches
         .iter()
-        .find(|b| b.name.starts_with("review/"))
+        .find(|b| b.name == "feature/return")
         .unwrap();
     assert!(pending_branch.worktree.is_none());
-    assert_eq!(
-        pending
-            .review_sources
-            .get(&pending_branch.name)
-            .map(String::as_str),
-        Some("feature/return")
-    );
-    assert_eq!(
-        serde_json::to_value(&pending).unwrap()["reviewSources"][&pending_branch.name],
-        "feature/return"
-    );
+    assert!(pending.review_sources.is_empty());
     let pending_packages = review::list_return_packages(&g, &f.work, &f.usb).unwrap();
     let received = pending_packages.iter().find(|p| p.received).unwrap();
-    assert!(pending_branch.name.starts_with(&format!(
-        "review/{}/",
-        received.receipt_key.as_ref().unwrap()
-    )));
+    assert!(received.receipt_key.is_some());
     git(
         &f.work,
         &["remote", "set-url", "origin", f.remote.to_str().unwrap()],
     );
     let accepted = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
     assert_eq!(accepted.branches[0].local, pending_branch.name);
-    assert!(accepted.outcomes[0].ok);
+    assert!(accepted.outcomes.is_empty());
     let copied_dir = f.root.path().join("other-medium");
     fs::create_dir(&copied_dir).unwrap();
     let copied = copied_dir.join("renamed.bundle");
@@ -513,13 +566,7 @@ fn return_package_query_recognizes_copied_packages_and_reports_corrupt_receipts(
     assert!(packages[0].received);
     assert_eq!(packages[0].receipt_key, received.receipt_key);
     let restored = repo::status(&restarted, &f.work, "main", &[]).unwrap();
-    assert_eq!(
-        restored
-            .review_sources
-            .get(&accepted.branches[0].local)
-            .map(String::as_str),
-        Some("feature/return")
-    );
+    assert!(restored.review_sources.is_empty());
     let json = serde_json::to_value(&packages[0]).unwrap();
     assert_eq!(json["receiptKey"], received.receipt_key.as_deref().unwrap());
     assert_eq!(json["payloadPath"], copied.to_string_lossy().as_ref());
@@ -674,7 +721,7 @@ fn combined_sync_cancellation_does_not_start_later_repositories() {
 }
 
 #[test]
-fn receipts_reimport_in_work_without_creating_worktrees_or_changing_original_branches() {
+fn receipts_fast_forward_and_reimport_without_touching_the_worktree() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
@@ -682,26 +729,19 @@ fn receipts_reimport_in_work_without_creating_worktrees_or_changing_original_bra
     let bundle = f.back(&g);
     f.advance(&g);
     git(&f.work, &["branch", "feature/return"]);
-    let original = git(&f.work, &["rev-parse", "feature/return"]);
     let main = git(&f.work, &["rev-parse", "HEAD"]);
     let tree_count = repo::list_worktrees(&g, &f.work).unwrap().len();
     let first = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
     assert_eq!(first.branches.len(), 1);
-    assert!(first.outcomes[0].ok, "{:?}", first.outcomes);
+    assert!(first.outcomes.is_empty());
     let branch = &first.branches[0];
-    assert_ne!(branch.sha, git(&f.dev, &["rev-parse", "feature/return"]));
-    assert!(branch.local.starts_with("review/"));
-    assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), branch.sha);
-    assert_eq!(git(&f.work, &["branch", "--show-current"]), branch.local);
+    assert_eq!(branch.sha, git(&f.dev, &["rev-parse", "feature/return"]));
+    assert_eq!(branch.local, "feature/return");
+    assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), main);
+    assert_eq!(git(&f.work, &["branch", "--show-current"]), "main");
     assert_eq!(git(&f.work, &["rev-parse", "main"]), main);
-    assert_eq!(git(&f.work, &["rev-parse", "feature/return"]), original);
+    assert_eq!(git(&f.work, &["rev-parse", "feature/return"]), branch.sha);
     assert_eq!(repo::list_worktrees(&g, &f.work).unwrap().len(), tree_count);
-    assert_eq!(
-        Path::new(first.outcomes[0].worktree.as_ref().unwrap())
-            .canonicalize()
-            .unwrap(),
-        f.work.canonicalize().unwrap()
-    );
     assert!(!f.work.join(".git/offline-sync/review-worktrees").exists());
     let copied = f.root.path().join("renamed.bundle");
     fs::copy(&bundle, &copied).unwrap();
@@ -720,14 +760,11 @@ fn receipts_reimport_in_work_without_creating_worktrees_or_changing_original_bra
     let second = review::import_return(&g, &f.work, &copied, "main", &[]).unwrap();
     assert_eq!(second.branches[0].local, branch.local);
     assert_eq!(second.branches[0].sha, branch.sha);
-    assert!(second.outcomes[0].ok);
+    assert!(second.outcomes.is_empty());
     assert_eq!(repo::list_worktrees(&g, &f.work).unwrap().len(), tree_count);
-    assert_eq!(
-        repo::list_refs(&g, &f.work, &["refs/heads/review"])
-            .unwrap()
-            .len(),
-        1
-    );
+    assert!(repo::list_refs(&g, &f.work, &["refs/heads/review"])
+        .unwrap()
+        .is_empty());
     assert_eq!(
         repo::list_refs(&g, &f.work, &["refs/offline-sync/return-receipts"])
             .unwrap()
@@ -754,19 +791,14 @@ fn review_import_preserves_trailing_whitespace_in_the_existing_work_path() {
     f.work = renamed;
     for _ in 0..2 {
         let result = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-        assert!(result.outcomes[0].ok, "{:?}", result.outcomes);
-        assert_eq!(
-            Path::new(result.outcomes[0].worktree.as_ref().unwrap())
-                .canonicalize()
-                .unwrap(),
-            f.work.canonicalize().unwrap()
-        );
+        assert!(result.outcomes.is_empty());
+        assert_eq!(result.branches[0].local, "feature/return");
         assert_eq!(repo::list_worktrees(&g, &f.work).unwrap().len(), 1);
     }
 }
 
 #[test]
-fn review_import_refuses_dirty_work_before_switch_and_preserves_changes() {
+fn direct_import_preserves_dirty_work_and_unrelated_operations() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
@@ -805,14 +837,7 @@ fn review_import_refuses_dirty_work_before_switch_and_preserves_changes() {
         let first = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
         let retried = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
         for result in [&first, &retried] {
-            assert!(!result.outcomes[0].ok, "{mode}");
-            assert_eq!(result.outcomes[0].conflict, mode == "merge", "{mode}");
-            assert_eq!(
-                Path::new(result.outcomes[0].worktree.as_ref().unwrap())
-                    .canonicalize()
-                    .unwrap(),
-                f.work.canonicalize().unwrap()
-            );
+            assert!(result.outcomes.is_empty(), "{mode}");
         }
         assert_eq!(first.branches[0].local, retried.branches[0].local);
         assert_eq!(git(&f.work, &["branch", "--show-current"]), "main");
@@ -847,7 +872,7 @@ fn review_import_refuses_dirty_work_before_switch_and_preserves_changes() {
 }
 
 #[test]
-fn review_import_processes_branches_in_order_and_stops_at_existing_conflict() {
+fn direct_multibranch_import_is_atomic_then_allows_manual_rebase() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
@@ -868,53 +893,46 @@ fn review_import_processes_branches_in_order_and_stops_at_existing_conflict() {
     let bundle = payload(
         sync::export_back(&g, &f.dev, &f.ext, &sources, &f.usb, "test", "main", &[]).unwrap(),
     );
+    git(&f.work, &["switch", "-c", "feature/c"]);
+    assert!(review::import_return(&g, &f.work, &bundle, "main", &[]).is_err());
+    assert!(!repo::rev_exists(&g, &f.work, "feature/a"));
+    assert!(!repo::rev_exists(&g, &f.work, "feature/b"));
+    assert!(repo::list_refs(&g, &f.work, &["refs/offline-sync"])
+        .unwrap()
+        .is_empty());
+    git(&f.work, &["switch", "main"]);
     commit(&f.seed, "base", "internal conflict\n");
     git(&f.seed, &["push", "origin", "main"]);
     let first = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
+    assert!(first.outcomes.is_empty());
     assert_eq!(
-        first.branches.iter().map(|b| &b.source).collect::<Vec<_>>(),
+        first.branches.iter().map(|b| &b.local).collect::<Vec<_>>(),
         sources.iter().collect::<Vec<_>>()
     );
-    assert_eq!(first.outcomes.len(), 2);
-    assert!(first.outcomes[0].ok);
-    assert!(first.outcomes[1].conflict);
-    assert_eq!(
-        Path::new(first.outcomes[1].worktree.as_ref().unwrap())
-            .canonicalize()
-            .unwrap(),
-        f.work.canonicalize().unwrap()
-    );
-    let first_ready = first.branches[0].sha.clone();
-    let untouched = git(&f.dev, &["rev-parse", "feature/c"]);
-    assert_eq!(first.branches[2].sha, untouched);
-    let conflict_head = git(&f.work, &["rev-parse", "HEAD"]);
-    let conflict_index = fs::read(f.work.join(".git/index")).unwrap();
-    let retry = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert_eq!(retry.outcomes.len(), 2);
-    assert!(retry.outcomes[0].ok);
-    assert!(retry.outcomes[1].conflict);
-    assert_eq!(retry.branches[0].sha, first_ready);
-    assert_eq!(retry.branches[2].sha, untouched);
-    assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), conflict_head);
-    assert_eq!(fs::read(f.work.join(".git/index")).unwrap(), conflict_index);
-    assert_eq!(repo::list_worktrees(&g, &f.work).unwrap().len(), 1);
-    assert_eq!(
-        repo::list_refs(&g, &f.work, &["refs/offline-sync/review-ready"])
+    assert_eq!(git(&f.work, &["branch", "--show-current"]), "main");
+    assert!(
+        sync::rebase_onto(&g, &f.work, "feature/a", "main", true)
             .unwrap()
-            .len(),
-        1
+            .ok
     );
+    assert!(
+        sync::rebase_onto(&g, &f.work, "feature/b", "main", false)
+            .unwrap()
+            .conflict
+    );
+    let head = git(&f.work, &["rev-parse", "HEAD"]);
+    let index = fs::read(f.work.join(".git/index")).unwrap();
+    let retry = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
+    assert!(retry.outcomes.is_empty());
+    assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), head);
+    assert_eq!(fs::read(f.work.join(".git/index")).unwrap(), index);
     fs::write(f.work.join("base"), "resolved\n").unwrap();
     git(&f.work, &["add", "base"]);
     assert!(sync::continue_op(&g, &f.work).unwrap().ok);
-    let finished = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert_eq!(finished.outcomes.len(), 3);
-    assert!(finished.outcomes.iter().all(|o| o.ok));
-    assert_eq!(finished.branches[0].sha, first_ready);
-    assert_ne!(finished.branches[2].sha, untouched);
-    assert_eq!(
-        git(&f.work, &["branch", "--show-current"]),
-        finished.branches[2].local
+    assert!(
+        sync::rebase_onto(&g, &f.work, "feature/c", "main", false)
+            .unwrap()
+            .ok
     );
     assert_eq!(repo::list_worktrees(&g, &f.work).unwrap().len(), 1);
     assert_eq!(
@@ -923,49 +941,44 @@ fn review_import_processes_branches_in_order_and_stops_at_existing_conflict() {
             .len(),
         1
     );
-    assert_eq!(
-        repo::list_refs(&g, &f.work, &["refs/offline-sync/review-ready"])
-            .unwrap()
-            .len(),
-        3
-    );
 }
 
 #[test]
-fn review_import_refuses_a_branch_in_an_existing_linked_worktree() {
+fn direct_import_protects_linked_worktrees_and_detached_rebases() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
     let f = Fixture::new(&g);
     let bundle = f.back(&g);
-    fs::write(f.work.join("base"), "local edit\n").unwrap();
     let received = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert!(!received.outcomes[0].ok);
-    git(&f.work, &["restore", "base"]);
-    let linked = f.root.path().join("existing-review");
+    let local = &received.branches[0].local;
+    let linked = f.root.path().join("existing-worktree");
     git(
         &f.work,
-        &[
-            "worktree",
-            "add",
-            linked.to_str().unwrap(),
-            &received.branches[0].local,
-        ],
+        &["worktree", "add", linked.to_str().unwrap(), local],
     );
-    let trees = git(&f.work, &["worktree", "list", "--porcelain"]);
-    let retried = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert!(!retried.outcomes[0].ok);
-    assert!(retried.outcomes[0].message.contains("占用"));
-    assert_eq!(
-        Path::new(retried.outcomes[0].worktree.as_ref().unwrap())
-            .canonicalize()
-            .unwrap(),
-        linked.canonicalize().unwrap()
+    commit(&f.dev, "next", "next\n");
+    let next = payload(
+        sync::export_back(
+            &g,
+            &f.dev,
+            &f.ext,
+            std::slice::from_ref(local),
+            &f.usb,
+            "test",
+            "main",
+            &[],
+        )
+        .unwrap(),
     );
-    assert_eq!(git(&f.work, &["worktree", "list", "--porcelain"]), trees);
-    assert_eq!(git(&f.work, &["branch", "--show-current"]), "main");
-
-    // An occupied branch remains protected while rebase detaches its HEAD.
+    let head = git(&linked, &["rev-parse", "HEAD"]);
+    assert!(review::import_return(&g, &f.work, &next, "main", &[]).is_err());
+    assert_eq!(git(&linked, &["rev-parse", "HEAD"]), head);
+    // Repeating an accepted receipt is read-only, including occupied branches.
+    assert!(review::import_return(&g, &f.work, &bundle, "main", &[])
+        .unwrap()
+        .outcomes
+        .is_empty());
     commit(&f.seed, "feature", "internal conflict\n");
     git(&f.seed, &["push", "origin", "main"]);
     git(&f.work, &["fetch", "origin"]);
@@ -976,15 +989,7 @@ fn review_import_refuses_a_branch_in_an_existing_linked_worktree() {
         .unwrap();
     assert!(!rebase.status.success());
     let linked_head = git(&linked, &["rev-parse", "HEAD"]);
-    let retried = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert!(!retried.outcomes[0].ok);
-    assert!(retried.outcomes[0].message.contains("占用"));
-    assert_eq!(
-        Path::new(retried.outcomes[0].worktree.as_ref().unwrap())
-            .canonicalize()
-            .unwrap(),
-        linked.canonicalize().unwrap()
-    );
+    assert!(review::import_return(&g, &f.work, &next, "main", &[]).is_err());
     assert_eq!(git(&linked, &["rev-parse", "HEAD"]), linked_head);
     assert!(repo::in_progress(&repo::git_dir(&g, &linked).unwrap()).is_some());
     assert_eq!(repo::list_worktrees(&g, &f.work).unwrap().len(), 2);
@@ -1116,14 +1121,14 @@ fn ordinary_push_does_not_recreate_a_target_deleted_after_preflight() {
 }
 
 #[test]
-fn reimport_preserves_a_review_rebased_to_release() {
+fn reimport_preserves_a_local_branch_rebased_to_release() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
     let f = Fixture::new(&g);
     let bundle = f.back(&g);
     let first = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert!(first.outcomes[0].ok);
+    assert!(first.outcomes.is_empty());
     let local = &first.branches[0].local;
     git(&f.seed, &["switch", "-c", "release"]);
     commit(&f.seed, "release-only", "release only\n");
@@ -1138,7 +1143,7 @@ fn reimport_preserves_a_review_rebased_to_release() {
     commit(&f.seed, "later-release", "later release\n");
     git(&f.seed, &["push", "origin", "release"]);
     let retried = review::import_return(&g, &f.work, &bundle, "main", &["release".into()]).unwrap();
-    assert!(retried.outcomes[0].ok, "{:?}", retried.outcomes);
+    assert!(retried.outcomes.is_empty());
     assert_eq!(git(&f.work, &["rev-parse", local]), ready_head);
     assert_eq!(
         repo::get_sync_base(&g, &f.work, local).as_deref(),
@@ -1325,15 +1330,19 @@ fn review_conflict_retry_uses_existing_work_and_existing_continue_abort() {
     commit(&f.seed, "base", "internal change\n");
     git(&f.seed, &["push", "origin", "main"]);
     let original = git(&f.work, &["rev-parse", "HEAD"]);
-    let first = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert!(first.outcomes[0].conflict);
-    let wt = PathBuf::from(first.outcomes[0].worktree.as_ref().unwrap());
+    let first = receive_legacy(&g, &f, &bundle);
+    assert!(
+        sync::rebase_onto(&g, &f.work, &first.branches[0].local, "main", true)
+            .unwrap()
+            .conflict
+    );
+    let wt = f.work.clone();
     assert_eq!(wt.canonicalize().unwrap(), f.work.canonicalize().unwrap());
     assert_eq!(repo::list_worktrees(&g, &f.work).unwrap().len(), 1);
     let retry = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
     assert_eq!(first.branches[0].local, retry.branches[0].local);
-    assert_eq!(first.outcomes[0].worktree, retry.outcomes[0].worktree);
-    assert!(retry.outcomes[0].conflict);
+    assert!(retry.outcomes.is_empty());
+    assert!(repo::in_progress(&repo::git_dir(&g, &wt).unwrap()).is_some());
     sync::abort(&g, &wt).unwrap();
     assert!(
         repo::list_refs(&g, &f.work, &["refs/offline-sync/review-ready"])
@@ -1341,12 +1350,19 @@ fn review_conflict_retry_uses_existing_work_and_existing_continue_abort() {
             .is_empty()
     );
     let resumed = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert!(resumed.outcomes[0].conflict);
+    assert!(resumed.outcomes.is_empty());
+    assert!(
+        sync::rebase_onto(&g, &f.work, &first.branches[0].local, "main", false)
+            .unwrap()
+            .conflict
+    );
     fs::write(wt.join("base"), "resolved\n").unwrap();
     git(&wt, &["add", "base"]);
     assert!(sync::continue_op(&g, &wt).unwrap().ok);
     let finished = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert!(finished.outcomes[0].ok, "{:?}", finished.outcomes);
+    assert!(finished.outcomes.is_empty());
+    let plan = review::prepare_push(&g, &f.work, &finished.branches[0].local, false).unwrap();
+    assert_eq!(plan.target_ref, "refs/heads/feature/conflict");
     assert_eq!(git(&f.work, &["rev-parse", "main"]), original);
     assert_eq!(
         git(&f.work, &["branch", "--show-current"]),
@@ -1400,9 +1416,10 @@ fn review_ready_survives_continue_recovery_and_marker_failure() {
             }
         };
         let importing = Git::new(None, &logger);
-        let first = review::import_return(&importing, &f.work, &bundle, "main", &[]).unwrap();
+        let first = receive_legacy(&g, &f, &bundle);
         let local = &first.branches[0].local;
-        let wt = Path::new(first.outcomes[0].worktree.as_ref().unwrap());
+        let rebased = sync::rebase_onto(&importing, &f.work, local, "main", true);
+        let wt = &f.work;
         let ready = format!(
             "refs/offline-sync/review-ready/{}",
             local.strip_prefix("review/").unwrap()
@@ -1412,13 +1429,13 @@ fn review_ready_survives_continue_recovery_and_marker_failure() {
             .join("offline-sync-rebase.json");
         let marker_lock = f.work.join(".git").join(format!("{ready}.lock"));
         if mode == "initial-write-failure" {
-            assert!(!first.outcomes[0].ok);
+            assert!(rebased.is_err());
             assert!(
                 journal.exists(),
                 "completed Git operation must remain retryable"
             );
         } else {
-            assert!(first.outcomes[0].conflict, "{mode}");
+            assert!(rebased.unwrap().conflict, "{mode}");
             assert!(repo::list_refs(&g, &f.work, &[&ready]).unwrap().is_empty());
             fs::write(wt.join("feature"), "resolved\n").unwrap();
             git(wt, &["add", "feature"]);
@@ -1447,8 +1464,7 @@ fn review_ready_survives_continue_recovery_and_marker_failure() {
         commit(&f.seed, "feature", "upstream changed again\n");
         git(&f.seed, &["push", "origin", "main"]);
         if mode == "marker-write-failure" {
-            let failed_retry = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-            assert!(!failed_retry.outcomes[0].ok);
+            assert!(sync::continue_op(&g, &f.work).is_err());
             assert_eq!(git(wt, &["rev-parse", "HEAD"]), completed);
             assert!(journal.exists());
             fs::remove_file(marker_lock).unwrap();
@@ -1456,8 +1472,9 @@ fn review_ready_survives_continue_recovery_and_marker_failure() {
             fs::remove_file(marker_lock).unwrap();
         }
         let restarted = Git::new(None, &log);
+        assert!(sync::continue_op(&restarted, &f.work).unwrap().ok);
         let retried = review::import_return(&restarted, &f.work, &bundle, "main", &[]).unwrap();
-        assert!(retried.outcomes[0].ok, "{mode}: {:?}", retried.outcomes);
+        assert!(retried.outcomes.is_empty());
         assert_eq!(git(wt, &["rev-parse", "HEAD"]), completed, "{mode}");
         assert_eq!(git(&f.work, &["rev-parse", &ready]), completed, "{mode}");
         assert!(!journal.exists(), "{mode}");
@@ -1465,7 +1482,7 @@ fn review_ready_survives_continue_recovery_and_marker_failure() {
 }
 
 #[test]
-fn receipt_transaction_failure_creates_neither_review_nor_inbox_refs() {
+fn receipt_transaction_failure_creates_neither_local_nor_inbox_refs() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
@@ -1475,15 +1492,302 @@ fn receipt_transaction_failure_creates_neither_review_nor_inbox_refs() {
     fs::create_dir_all(blocked.parent().unwrap()).unwrap();
     fs::write(&blocked, "blocked namespace").unwrap();
     assert!(review::import_return(&g, &f.work, &bundle, "main", &[]).is_err());
-    assert!(repo::list_refs(&g, &f.work, &["refs/heads/review"])
-        .unwrap()
-        .is_empty());
+    assert!(!repo::rev_exists(&g, &f.work, "feature/return"));
     assert!(repo::list_refs(&g, &f.work, &["refs/offline-sync/inbox"])
         .unwrap()
         .is_empty());
     fs::remove_file(blocked).unwrap();
     let recovered = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert!(recovered.outcomes[0].ok);
+    assert!(recovered.outcomes.is_empty());
+}
+
+#[test]
+fn direct_import_divergence_uses_local_fallback_and_never_overwrites_it() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    for manual in [false, true] {
+        let f = Fixture::new(&g);
+        let bundle = f.back(&g);
+        if manual {
+            fs::remove_file(manifest_path_for(&bundle)).unwrap();
+        }
+        git(&f.work, &["switch", "-c", "feature/return"]);
+        commit(&f.work, "internal", "keep local work\n");
+        let original = git(&f.work, &["rev-parse", "HEAD"]);
+        git(&f.work, &["switch", "main"]);
+        let first = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
+        let branch = &first.branches[0];
+        assert_eq!(branch.source, "feature/return");
+        assert!(branch.local.starts_with("feature/return-import-"));
+        assert!(first
+            .warnings
+            .iter()
+            .any(|warning| warning.contains(&branch.local)));
+        if !manual {
+            assert_eq!(branch.local, "feature/return-import-0001");
+        }
+        assert_eq!(git(&f.work, &["rev-parse", "feature/return"]), original);
+        assert_eq!(branch.sha, git(&f.dev, &["rev-parse", "feature/return"]));
+        assert_eq!(
+            repo::get_sync_base(&g, &f.work, &branch.local).as_deref(),
+            Some("main")
+        );
+        let plan = review::prepare_push(&g, &f.work, &branch.local, false).unwrap();
+        assert_eq!(plan.target_ref, format!("refs/heads/{}", branch.local));
+        assert!(review::execute_push(&g, &plan.plan_id).unwrap().ok);
+        assert!(!repo::rev_exists(&g, &f.remote, "feature/return"));
+        let copy = f.root.path().join("copy.bundle");
+        fs::copy(&bundle, &copy).unwrap();
+        if let Some(mut m) = Manifest::read_for(&bundle).unwrap() {
+            m.payload = "copy.bundle".into();
+            m.write_for(&copy).unwrap();
+        }
+        let retry = review::import_return(&g, &f.work, &copy, "main", &[]).unwrap();
+        assert_eq!(retry.branches[0].local, branch.local);
+
+        // Removing only the fixture receipt exercises an already occupied fallback.
+        let receipt = repo::list_refs(&g, &f.work, &["refs/offline-sync/return-receipts"]).unwrap()
+            [0]
+        .0
+        .clone();
+        git(&f.work, &["update-ref", "-d", &receipt]);
+        for (reference, _) in repo::list_refs(&g, &f.work, &["refs/offline-sync/inbox"]).unwrap() {
+            git(&f.work, &["update-ref", "-d", &reference]);
+        }
+        git(
+            &f.work,
+            &[
+                "update-ref",
+                &format!("refs/heads/{}", branch.local),
+                &original,
+            ],
+        );
+        assert!(review::import_return(&g, &f.work, &bundle, "main", &[]).is_err());
+        assert_eq!(git(&f.work, &["rev-parse", &branch.local]), original);
+        assert!(repo::list_refs(
+            &g,
+            &f.work,
+            &[
+                "refs/offline-sync/return-receipts",
+                "refs/offline-sync/inbox"
+            ]
+        )
+        .unwrap()
+        .is_empty());
+        // The exact same fallback contents can be safely adopted.
+        git(
+            &f.work,
+            &[
+                "update-ref",
+                &format!("refs/heads/{}", branch.local),
+                &branch.sha,
+            ],
+        );
+        assert_eq!(
+            review::import_return(&g, &f.work, &bundle, "main", &[])
+                .unwrap()
+                .branches[0]
+                .local,
+            branch.local
+        );
+    }
+}
+
+#[test]
+fn multiple_packages_share_a_local_branch_without_duplicate_source_mapping() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let f = Fixture::new(&g);
+    let bundle = f.back(&g);
+    let first = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
+    let local = &first.branches[0].local;
+    let plan = review::prepare_push(&g, &f.work, local, false).unwrap();
+    assert!(review::execute_push(&g, &plan.plan_id).unwrap().ok);
+    commit(&f.dev, "next", "new returned commit\n");
+    let next = payload(
+        sync::export_back(
+            &g,
+            &f.dev,
+            &f.ext,
+            std::slice::from_ref(local),
+            &f.usb,
+            "test",
+            "main",
+            &[],
+        )
+        .unwrap(),
+    );
+    let second = review::import_return(&g, &f.work, &next, "main", &[]).unwrap();
+    assert_eq!(second.branches[0].local, *local);
+    assert_ne!(second.branches[0].sha, first.branches[0].sha);
+    let status = repo::status(&g, &f.work, "main", &[]).unwrap();
+    assert!(status.review_sources.is_empty());
+    assert!(status.pushed_branches.is_empty());
+    let repeat_old = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
+    assert_eq!(repeat_old.branches[0].sha, second.branches[0].sha);
+    // A new receipt with an identical tip is also accepted without alias branches.
+    let identical = f.root.path().join("identical.bundle");
+    fs::copy(&next, &identical).unwrap();
+    let mut manifest = Manifest::read_for(&next).unwrap().unwrap();
+    manifest.seq += 1;
+    manifest.payload = "identical.bundle".into();
+    manifest.write_for(&identical).unwrap();
+    assert_eq!(
+        review::import_return(&g, &f.work, &identical, "main", &[])
+            .unwrap()
+            .branches[0]
+            .local,
+        *local
+    );
+    assert_eq!(
+        repo::list_refs(&g, &f.work, &["refs/offline-sync/return-receipts"])
+            .unwrap()
+            .len(),
+        3
+    );
+    let plan = review::prepare_push(&g, &f.work, local, false).unwrap();
+    assert_eq!(plan.target_ref, format!("refs/heads/{local}"));
+    assert!(review::execute_push(&g, &plan.plan_id).unwrap().ok);
+    assert_eq!(
+        repo::status(&g, &f.work, "main", &[])
+            .unwrap()
+            .pushed_branches,
+        vec![local.clone()]
+    );
+}
+
+#[test]
+fn colliding_import_targets_fail_without_partial_reception() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let f = Fixture::new(&g);
+    f.back(&g);
+    git(&f.dev, &["branch", "feature/return-import-0002"]);
+    let bundle = payload(
+        sync::export_back(
+            &g,
+            &f.dev,
+            &f.ext,
+            &["feature/return".into(), "feature/return-import-0002".into()],
+            &f.usb,
+            "test",
+            "main",
+            &[],
+        )
+        .unwrap(),
+    );
+    git(&f.work, &["switch", "-c", "feature/return"]);
+    commit(&f.work, "internal", "keep\n");
+    git(&f.work, &["switch", "main"]);
+    let refs = repo::list_refs(&g, &f.work, &["refs/heads"]).unwrap();
+    let error = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap_err();
+    assert!(error.to_string().contains("同一导入目标"), "{error}");
+    assert_eq!(repo::list_refs(&g, &f.work, &["refs/heads"]).unwrap(), refs);
+    assert!(repo::list_refs(&g, &f.work, &["refs/offline-sync"])
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn direct_import_guards_against_concurrent_checkout_before_and_after_prepare() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let quiet = |_: LogEvent| {};
+    let setup = Git::new(None, &quiet);
+    for after_prepare in [false, true] {
+        for linked in [false, true] {
+            let f = Fixture::new(&setup);
+            let bundle = f.back(&setup);
+            git(&f.work, &["branch", "feature/return"]);
+            let target = if linked {
+                let linked = f.root.path().join("linked");
+                git(
+                    &f.work,
+                    &[
+                        "worktree",
+                        "add",
+                        "--detach",
+                        linked.to_str().unwrap(),
+                        "main",
+                    ],
+                );
+                linked
+            } else {
+                f.work.clone()
+            };
+            let attempted = Arc::new(AtomicBool::new(false));
+            let did_attempt = attempted.clone();
+            let log = move |event: LogEvent| {
+                let trigger = if after_prepare {
+                    event.kind == LogKind::Stdout && event.text == "prepare: ok"
+                } else {
+                    event.kind == LogKind::Cmd
+                        && event.text.contains("update-ref --no-deref --stdin")
+                };
+                if trigger && !did_attempt.swap(true, Ordering::SeqCst) {
+                    let switch = Command::new("git")
+                        .current_dir(&target)
+                        .args(["switch", "feature/return"])
+                        .output()
+                        .unwrap();
+                    assert_eq!(switch.status.success(), !after_prepare);
+                }
+            };
+            let importing = Git::new(None, &log);
+            let result = review::import_return(&importing, &f.work, &bundle, "main", &[]);
+            assert!(attempted.load(Ordering::SeqCst));
+            assert_eq!(result.is_ok(), after_prepare, "{result:?}");
+            if !after_prepare {
+                assert_eq!(
+                    git(&f.work, &["rev-parse", "feature/return"]),
+                    git(&f.work, &["rev-parse", "main"])
+                );
+                assert!(repo::list_refs(&setup, &f.work, &["refs/offline-sync"])
+                    .unwrap()
+                    .is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn direct_import_cas_rejects_a_concurrent_branch_update() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let quiet = |_: LogEvent| {};
+    let setup = Git::new(None, &quiet);
+    let f = Fixture::new(&setup);
+    let bundle = f.back(&setup);
+    git(&f.work, &["branch", "feature/return"]);
+    git(&f.work, &["switch", "-c", "internal"]);
+    commit(&f.work, "internal", "concurrent commit\n");
+    let concurrent = git(&f.work, &["rev-parse", "HEAD"]);
+    git(&f.work, &["switch", "main"]);
+    let work = f.work.clone();
+    let advanced = concurrent.clone();
+    let attempted = Arc::new(AtomicBool::new(false));
+    let did_attempt = attempted.clone();
+    let log = move |event: LogEvent| {
+        if event.kind == LogKind::Cmd
+            && event.text.contains("update-ref --no-deref --stdin")
+            && !did_attempt.swap(true, Ordering::SeqCst)
+        {
+            git(
+                &work,
+                &["update-ref", "refs/heads/feature/return", &advanced],
+            );
+        }
+    };
+    let importing = Git::new(None, &log);
+    assert!(review::import_return(&importing, &f.work, &bundle, "main", &[]).is_err());
+    assert!(attempted.load(Ordering::SeqCst));
+    assert_eq!(git(&f.work, &["rev-parse", "feature/return"]), concurrent);
+    assert!(repo::list_refs(&setup, &f.work, &["refs/offline-sync"])
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

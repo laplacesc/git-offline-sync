@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { Alert, AlertDialog, Button, Card, Description, Form, Label, Link, Radio, RadioGroup } from "@heroui/react";
 import { parseBranchList, Profile, releasesOf, Role } from "./api";
-import { FormSection, PathInput, SectionLabel, TextInput } from "./ui";
+import { FormSection, PathInput, TextInput } from "./ui";
 import { useRunner } from "./runner";
 
 export function blankProfile(role: Role, id: string): Profile {
@@ -105,7 +105,6 @@ export function ProfileEditor({
         </AlertDialog.Container>
       </AlertDialog.Backdrop>
       <Card.Header className="form-page-header">
-        <SectionLabel>{isNew ? "连接内网与外网" : "同步配置"}</SectionLabel>
         <Card.Title render={(props) => <h1 {...props} />} className="text-xl leading-tight font-semibold">
           {isNew ? "新建同步配置" : initial.name}
         </Card.Title>

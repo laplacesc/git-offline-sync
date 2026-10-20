@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Radio, RadioGroup, Tabs } from "@heroui/react";
+import { Tabs } from "@heroui/react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, baseCandidates, defaultBaseFor, releasesOf, type BranchInfo, type CommitInfo, type ExportOutcome, type InternalState, type OpOutcome, type Profile, type ReturnImportResult, type ReturnPackageInfo } from "./api";
+import { api, baseCandidates, defaultBaseFor, releasesOf, type ExportOutcome, type InternalState, type OpOutcome, type Profile, type ReturnImportResult, type ReturnPackageInfo } from "./api";
 import { Feedback, FeedbackScope, useRunner } from "./runner";
-import { BranchTable, DetachedWorktreesNotice, DirtyTreesNotice, InProgressBanners, useRefreshOnFocus, useRepoStatus, useRequestGeneration } from "./repoBits";
-import { ActionButton, BaseSelect, Check, Code, Fold, CommitList, Empty, Notice, OutcomeView, RefreshButton, TextInput } from "./ui";
+import { InProgressBanners, useRefreshOnFocus, useRepoStatus, useRequestGeneration } from "./repoBits";
+import { ActionButton, BaseSelect, Check, Code, Fold, Empty, OutcomeView, RefreshButton, TextInput, WorkspaceNavigation } from "./ui";
 import { Icon } from "./icons";
 import { ReturnPackageInbox } from "./ReturnPackageInbox";
 import { DateTime } from "./DateTime";
+import { BranchManager } from "./BranchManager";
 
-export function InternalView({ profile }: { profile: Profile }) {
+export function InternalView({ profile, navigationTarget, branchTarget, onNavigate }: {
+  profile: Profile; navigationTarget?: HTMLElement | null; branchTarget?: HTMLElement | null; onNavigate?: () => void;
+}) {
   const { run, notify, confirm, busy } = useRunner();
   const base = profile.baseBranch;
   const releases = releasesOf(profile);
@@ -32,11 +35,8 @@ export function InternalView({ profile }: { profile: Profile }) {
   const stateError = current?.stateError ?? null;
   const packageError = current?.packageError ?? null;
   const packages = (current?.packages ?? []).filter((p) => !p.manifest || p.manifest.kind === "back" || p.manifest.kind === "patch");
-  const pending = packages.filter((p) => !p.received);
   const mirrorReady = !!mirror.status?.isRepo;
   const workReady = !!work.status?.isRepo && !work.status.isBare;
-  const branches = (work.status?.branches ?? []).filter((b) => !candidates.includes(b.name));
-  const pendingBranches = branches.filter((b) => !work.status?.pushedBranches?.includes(b.name));
 
   const reloadAll = useCallback(async () => {
     const isCurrent = beginRefresh();
@@ -57,40 +57,20 @@ export function InternalView({ profile }: { profile: Profile }) {
   useEffect(() => { void reloadAll(); }, [reloadAll]);
   useRefreshOnFocus(reloadAll);
 
-  const [activeTab, setActiveTab] = useState("export");
+  const [branchOpen, setBranchOpen] = useState(false);
   const [forceFull, setForceFull] = useState(false);
   const [fetchFirst, setFetchFirst] = useState(true);
   const [exportResult, setExportResult] = useState<ExportOutcome | null>(null);
   const [returnResult, setReturnResult] = useState<ReturnImportResult | null>(null);
   const [outcome, setOutcome] = useState<OpOutcome | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
-  const selectedBranch = branches.find((b) => b.name === selected[0]);
-  const [ontoPicked, setOntoPicked] = useState<string | null>(null);
-  const onto = ontoPicked ?? selectedBranch?.base ?? base;
-  const changingBase = !!selectedBranch && onto !== selectedBranch.base;
-  const [forceLease, setForceLease] = useState(false);
-  useEffect(() => { setOntoPicked(null); setForceLease(false); }, [selected[0]]);
+  useEffect(() => { setReturnResult(null); setOutcome(null); setSelected([]); }, [refreshKey]);
   useEffect(() => {
     if (work.loading || !work.status) return;
     setSelected((previous) => previous.filter((name) => work.status!.branches.some((b) => b.name === name)));
   }, [work.status, work.loading]);
 
-  const branchLabel = (name: string) => work.status?.reviewSources?.[name]
-    ?? returnResult?.branches.find((b) => b.local === name)?.source ?? name;
   const unfinished = !!work.status?.inProgress || !!work.status?.inProgressTrees.length;
-  const commitKey = JSON.stringify([workDir, selectedBranch?.name, selectedBranch?.base]);
-  const beginCommits = useRequestGeneration(commitKey);
-  const [commitResult, setCommitResult] = useState<{ key: string; commits: CommitInfo[]; error: string | null } | null>(null);
-  useEffect(() => {
-    const isCurrent = beginCommits();
-    setCommitResult(null);
-    if (!selectedBranch || work.loading) return;
-    api.listCommits(workDir, `origin/${selectedBranch.base}`, `refs/heads/${selectedBranch.name}`).then(
-      (commits) => { if (isCurrent()) setCommitResult({ key: commitKey, commits, error: null }); },
-      (error) => { if (isCurrent()) setCommitResult({ key: commitKey, commits: [], error: String(error) }); },
-    );
-  }, [beginCommits, commitKey, selectedBranch?.name, selectedBranch?.base, selectedBranch?.sha, workDir, work.loading]);
-  const visibleCommits = commitResult?.key === commitKey ? commitResult : null;
 
   async function initialize() {
     const result = await run("建立镜像", () => api.initMirror(profile.remoteUrl?.trim() ?? "", mirrorDir));
@@ -111,16 +91,19 @@ export function InternalView({ profile }: { profile: Profile }) {
   }
   async function receive(bundle: string, legacy = false) {
     if (legacy && !await confirm({ title: "导入没有清单的回传包", confirmLabel: "继续导入",
-      body: <p>此文件没有项目清单。请确认它属于当前工作仓库。导入和整理会在当前工作仓库切换到专用审查分支，请先提交或贮藏未提交的修改，保持工作区干净。</p> })) return;
-    const result = await run("导入并整理回传", () => api.importReturn(workDir, bundle, base, releases));
+      body: <p>此文件没有项目清单。请确认它属于当前工作仓库。回传分支会优先按外网原名导入本地；目标分支若已被检出，请先切换到其他分支。</p> })) return;
+    const context = actionContext.current;
+    const result = await run("导入回传", () => api.importReturn(workDir, bundle, base, releases));
+    if (actionContext.current !== context) return;
     await reloadAll();
+    if (actionContext.current !== context) return;
     if (result) {
       setReturnResult(result);
       const issue = result.outcomes.find((o) => !o.ok);
       setOutcome(issue ?? null);
       let kind: "ok" | "warn" | "error" = result.warnings.length ? "warn" : "ok";
       if (issue) kind = issue.conflict ? "warn" : "error";
-      notify(kind, [issue?.message ?? "整理已完成，可以检查并推送。", ...result.warnings].join("\n"));
+      notify(kind, [issue?.message ?? "回传已导入，可在分支管理中检查、整理和推送。", ...result.warnings].join("\n"));
       if (result.branches[0]) setSelected([result.branches[0].local]);
     }
   }
@@ -142,42 +125,6 @@ export function InternalView({ profile }: { profile: Profile }) {
     await reloadAll();
     if (result) { setOutcome(result); setSelected([options.branch.trim()]); }
   }
-  async function rebaseBranch(branch: BranchInfo, target = branch.base) {
-    const result = await run("整理提交", () => api.rebaseOnto(workDir, branch.name, target, true));
-    if (result) setOutcome(result);
-    setOntoPicked(null);
-    await reloadAll();
-  }
-  async function push(branch: BranchInfo) {
-    const context = actionContext.current;
-    const allowForce = selected[0] === branch.name && forceLease;
-    const plan = await run("检查推送提交", () => api.preparePush(workDir, branch.name, allowForce));
-    if (!plan || actionContext.current !== context) return;
-    if (plan.nonFastForward && !allowForce) return notify("warn", "目标分支需要非快进更新，请在分支选项中核对并启用覆盖确认");
-    const approved = await confirm({
-      title: `推送 ${plan.targetRef.replace(/^refs\/heads\//, "")}`,
-      confirmLabel: plan.nonFastForward ? "确认覆盖并推送" : "确认推送",
-      tone: plan.nonFastForward ? "danger" : "accent",
-      body: <div className="space-y-3">
-        <p className="text-sm break-all">{plan.remoteUrl} · {plan.targetRef.replace(/^refs\/heads\//, "")}</p>
-        {plan.nonFastForward && <Notice tone="warning" title="此操作会替换远程分支的提交历史，其他人的工作可能受影响。" />}
-        <p className="text-sm text-muted">共 {plan.commits.length} 个待检查提交</p>
-        <CommitList commits={plan.commits} empty="没有相对基准的新提交" />
-        <Fold className="sync-details" title={"技术详情"}><dl className="break-all text-xs space-y-2">
-          <dt>源提交</dt><dd><Code>{plan.sourceOid}</Code></dd><dt>远程旧提交</dt><dd><Code>{plan.remoteOid ?? "新分支"}</Code></dd>
-          <dt>基准</dt><dd><Code>{plan.baseOid}</Code></dd>
-        </dl></Fold>
-      </div>,
-    });
-    if (!approved) return;
-    if (actionContext.current !== context) return notify("warn", "工作区已变化，请重新检查后推送");
-    const result = await run("推送", () => api.executePush(plan.planId));
-    if (result) {
-      setOutcome({ ...result, message: result.message.replace(/refs\/heads\//g, "") });
-      if (result.ok) { setReturnResult(null); setSelected([]); }
-    }
-    await reloadAll();
-  }
   function packageIssue(pkg: ReturnPackageInfo) {
     return !pkg.payloadExists ? "包文件缺失，请重新复制。"
       : pkg.error ? `包内容无法读取，请检查后重新复制：${pkg.error}`
@@ -188,97 +135,81 @@ export function InternalView({ profile }: { profile: Profile }) {
     const patch = manifest?.kind === "patch";
     const options = patchValues(pkg);
     const reason = packageIssue(pkg);
-    return <div className="sync-package" key={pkg.payloadPath}>
-      <div className="sync-action">
-        <span className="sync-action-icon" aria-hidden="true"><Icon name="branch" /></span>
-        <div className="min-w-0 flex-1"><h2>{manifest ? `${patch ? "补丁" : "回传"} #${manifest.seq}` : "回传包"}</h2>
-          <p className="text-sm text-muted break-all">{manifest?.refs.map((r) => r.name.replace(/^refs\/heads\//, "")).join("、") || pkg.payloadPath}</p>
-          {reason && <p className="text-sm text-danger">{reason}</p>}
-        </div>
-        <ActionButton variant={pkg.received ? "secondary" : "primary"} isDisabled={!workReady || work.loading || !current || !!stateError || !!reason || unfinished}
-          onPress={() => patch ? receivePatch(pkg) : receive(pkg.payloadPath, !manifest)}>{pkg.received ? "继续整理" : "导入回传"}</ActionButton>
+    return <div className="return-package-details" key={pkg.payloadPath}>
+      {reason && <p className="return-package-error">{reason}</p>}
+      <div className="return-package-actions">
+        <Fold className="return-package-options" title={patch ? "补丁选项" : "包详情"}>
+          <p className="text-xs break-all text-muted">{pkg.payloadPath}</p>
+          {manifest && <>
+            <div className="text-xs text-muted">{patch ? "Patch" : "Bundle"} #{manifest.seq} · {manifest.refs.length} 个分支 · <DateTime value={manifest.createdAt} label="包创建时间" /></div>
+            <ul className="return-package-refs">{manifest.refs.map((ref) => <li key={ref.name}><Code>{ref.name.replace(/^refs\/heads\//, "")}</Code></li>)}</ul>
+          </>}
+          {patch && <div className="space-y-3 mt-3">
+            <TextInput label="应用到的新分支" value={options.branch} onChange={(branch) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, branch } }))} mono />
+            <BaseSelect label="基准分支" value={options.base} options={candidates} mainline={base} onChange={(base) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, base } }))} />
+            <p className="text-xs text-muted">补丁会在当前工作仓库切换到所填分支并应用，请保持工作区干净。</p>
+          </div>}
+        </Fold>
+        <ActionButton variant="primary" isDisabled={!workReady || work.loading || !current || !!stateError || !!reason || unfinished}
+          onPress={() => patch ? receivePatch(pkg) : receive(pkg.payloadPath, !manifest)}>导入回传</ActionButton>
       </div>
-      <Fold className="sync-details" title={patch ? "补丁选项" : "内容"}>
-        <p className="text-xs break-all text-muted">{pkg.payloadPath}</p>
-        {manifest && <div className="text-xs text-muted"><DateTime value={manifest.createdAt} label="包创建时间" /> · {manifest.refs.length} 个分支</div>}
-        {patch && <div className="space-y-3 mt-3">
-          <TextInput label="应用到的新分支" value={options.branch} onChange={(branch) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, branch } }))} mono />
-          <BaseSelect label="基准分支" value={options.base} options={candidates} mainline={base} onChange={(base) => setPatchOptions((p) => ({ ...p, [pkg.payloadPath]: { ...options, base } }))} />
-          <p className="text-xs text-muted">补丁会在当前工作仓库切换到所填分支并应用，请保持工作区干净。</p>
-        </div>}
-      </Fold>
     </div>;
   }
 
-  return <Tabs className="sync-workspace" variant="secondary" selectedKey={activeTab} onSelectionChange={(key) => setActiveTab(String(key))}>
+  return <><Tabs className="sync-workspace" variant="secondary" orientation={navigationTarget ? "vertical" : "horizontal"}
+    selectedKey="sync" onSelectionChange={() => onNavigate?.()}>
     {!current && <Feedback kind="progress" text="正在读取仓库与回传包…" />}
-    <Tabs.ListContainer><Tabs.List className="sync-tabs" aria-label="同步操作">
-      <Tabs.Tab id="export">导出更新<Tabs.Indicator /></Tabs.Tab>
-      <Tabs.Tab id="return">导入回传{pending.length > 0 && <span className="counter">{pending.length}</span>}<Tabs.Indicator /></Tabs.Tab>
-    </Tabs.List></Tabs.ListContainer>
-    <div className="sync-location"><Icon name="folder" /><span className="min-w-0 flex-1 truncate" title={profile.transferDir}>{profile.transferDir}</span><RefreshButton onPress={reloadAll} /></div>
+    <WorkspaceNavigation target={navigationTarget}><Tabs.ListContainer><Tabs.List className="sync-tabs" aria-label="同步操作">
+      <Tabs.Tab id="sync"><Icon name="copy" />同步与回传<Tabs.Indicator /></Tabs.Tab>
+    </Tabs.List></Tabs.ListContainer></WorkspaceNavigation>
+    <div className="sync-location"><Icon name="folder" /><span className="sync-location-label">传输目录</span><span className="min-w-0 flex-1 truncate" title={profile.transferDir}>{profile.transferDir}</span><RefreshButton onPress={reloadAll} /></div>
     {stateError && <Feedback kind="error" text={`无法读取同步记录，请检查后重试\n${stateError}`} />}
-    <Tabs.Panel className="sync-panel" id="export" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
-      <FeedbackScope value={activeTab === "export"}>
+    <Tabs.Panel className="sync-panel" id="sync" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
+      <FeedbackScope value={!branchOpen}>
+      <header className="internal-page-heading"><div><h1>同步与回传</h1></div></header>
+      <section className="sync-workflow-section" aria-label="导出更新">
       {mirror.error && <Feedback kind="error" text={`读取镜像失败\n${mirror.error}`} />}
       <div className="sync-action">
-        <span className="sync-action-icon" aria-hidden="true"><Icon name="branch" /></span>
-        <div className="min-w-0 flex-1"><h1>{mirrorReady ? "导出最新代码" : "建立内网镜像"}</h1>
+        <div className="min-w-0 flex-1"><h2>{mirrorReady ? "导出最新代码" : "建立内网镜像"}</h2>
           <p className="text-sm text-muted">{mirrorReady ? `${base}${releases.length ? `、${releases.join("、")}` : ""} 等 ${mirror.status?.branches.length ?? 0} 个分支` : "首次使用时从 GitLab 准备代码"}</p>
         </div>
         {mirrorReady ? <ActionButton variant="primary" onPress={exportUpdate} isDisabled={!current || !!stateError || !!mirror.error || mirror.loading}>导出更新</ActionButton>
           : <ActionButton variant="primary" onPress={initialize} isDisabled={!profile.remoteUrl?.trim() || !mirrorDir || mirror.loading || !!mirror.error || !!stateError}>建立镜像</ActionButton>}
       </div>
-      <Fold className="sync-details" title={"选项"}><div className="space-y-3">
+      <section className="workspace-section" aria-label="导出设置">
         <Check checked={fetchFirst} onChange={setFetchFirst}>先拉取 GitLab 最新代码</Check>
-        <Check checked={forceFull} onChange={setForceFull}>强制全量</Check>
-        <p className="text-xs text-muted break-all">镜像：{mirrorDir || "请在项目设置中填写"}</p>
-        {state && <div className="text-xs text-muted">{state.outSeq ? <>最近已导出 #{state.outSeq} · <DateTime value={state.lastExportAt} label="最近导出时间" /></> : "尚未导出"}</div>}
-      </div></Fold>
+        {state && <div className="export-history">{state.outSeq ? <>最近已导出 #{state.outSeq} · <DateTime value={state.lastExportAt} label="最近导出时间" /></> : "尚未导出"}</div>}
+        <Fold className="sync-details" title="高级选项"><div className="space-y-3">
+          <Check checked={forceFull} onChange={setForceFull}>强制全量</Check>
+          <p className="text-xs text-muted break-all">镜像：{mirrorDir || "请在项目设置中填写"}</p>
+        </div></Fold>
+      </section>
       {exportResult?.status === "exported" && <Fold className="sync-details" title={`查看更新 #${exportResult.seq} 文件`}>
         <Code>{exportResult.payload}</Code>
       </Fold>}
-      </FeedbackScope>
-    </Tabs.Panel>
-    <Tabs.Panel className="sync-panel" id="return" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
-      <FeedbackScope value={activeTab === "return"}>
+      </section>
+      <section className="sync-workflow-section internal-return" aria-label="导入回传">
       {packageError && <Feedback kind="error" text={`无法读取传输目录，请检查连接后刷新\n${packageError}`} />}
       {work.error && <Feedback kind="error" text={`读取工作仓库失败\n${work.error}`} />}
       {!workReady && !work.loading && !work.error && <Feedback kind="warn" text="请先在项目设置中填写已克隆的内网工作仓库。" />}
-      <p className="text-sm text-muted">导入和整理在已配置的工作仓库中处理，会切换分支；请先提交或贮藏未提交的修改，保持工作区干净。</p>
+      <header className="internal-page-heading">
+        <div><h2>导入回传</h2></div>
+        <ActionButton size="sm" variant="ghost" onPress={browse} isDisabled={!workReady || !!stateError || unfinished}><Icon name="folder" />选择其他文件…</ActionButton>
+      </header>
       <InProgressBanners status={work.status} onDone={(result) => { if (result) setOutcome(result); void reloadAll(); }} />
       {!packageError && current && packages.length > 0 && <ReturnPackageInbox key={refreshKey}
-        packages={packages} disabled={!!busy || work.loading} getIssue={packageIssue} renderDetails={packageRow} />}
-      {!packageError && current && packages.length === 0 && pendingBranches.length === 0 && <Empty>没有待处理的回传。</Empty>}
-      {pendingBranches.length > 0 && <><h2 className="return-review-heading">待检查分支 <span>{pendingBranches.length}</span></h2><RadioGroup className="sync-branches" aria-label="可检查的分支"
-        value={selected[0] ?? ""} onChange={(name) => setSelected([name])} isDisabled={!!busy}>
-        {pendingBranches.map((branch) => <div className="sync-branch-row" key={branch.name}>
-        <Radio className="sync-branch-choice" value={branch.name} aria-label={`选择 ${branchLabel(branch.name)}`}>
-          <Radio.Content><Radio.Control><Radio.Indicator /></Radio.Control>
-          <span className="min-w-0"><code className="break-all">{branchLabel(branch.name)}</code><small className="block text-muted">{branch.ahead} 个提交 · {branch.base}{branch.behind > 0 ? " · 需要整理" : ""}</small></span>
-          </Radio.Content></Radio>
-        {branch.behind > 0
-          ? <ActionButton size="sm" variant="secondary" onPress={() => rebaseBranch(branch)} isDisabled={unfinished || work.loading}>继续整理</ActionButton>
-          : <ActionButton size="sm" variant="primary" onPress={() => { setSelected([branch.name]); void push(branch); }} isDisabled={unfinished || work.loading || !workReady || !!stateError || (selected[0] === branch.name && changingBase)}>检查并推送</ActionButton>}
-      </div>)}</RadioGroup></>}
-      {selectedBranch && <Fold className="sync-details" title={"提交与分支选项"}><div className="space-y-4">
-        <h3>{branchLabel(selectedBranch.name)}</h3>
-        {visibleCommits?.error ? <Feedback kind="error" text={`读取提交失败，请刷新\n${visibleCommits.error}`} />
-          : visibleCommits ? <CommitList commits={visibleCommits.commits} /> : !busy && <Feedback kind="progress" text="正在读取提交…" />}
-        <BaseSelect label="基准分支" value={onto} options={candidates} mainline={base} onChange={setOntoPicked} />
-        {changingBase && <p className="text-sm text-muted">将提交整理到 origin/{onto}，不会推送。</p>}
-        <Check checked={forceLease} onChange={setForceLease}>允许非快进更新（推送前再次确认覆盖）</Check>
-        <ActionButton variant="secondary" isDisabled={!workReady || unfinished} onPress={() => rebaseBranch(selectedBranch, onto)}>整理提交</ActionButton>
-      </div></Fold>}
+        packages={packages} disabled={!!busy || work.loading} renderDetails={packageRow} />}
+      {!packageError && current && packages.length === 0 && <Empty>没有回传包。</Empty>}
+      {returnResult && returnResult.branches.length > 0 && <div className="return-import-result" role="status">
+        <div><h2>已导入本地分支</h2><p>{returnResult.branches.map((branch) => <Code key={branch.local}>{branch.local}</Code>)}</p></div>
+        <ActionButton variant="secondary" onPress={() => setBranchOpen(true)}>前往分支管理<Icon name="chevron" /></ActionButton>
+      </div>}
       {outcome && !outcome.ok && <OutcomeView outcome={outcome} />}
-      <Fold className="sync-details" title={"其他回传与分支管理"}><div className="space-y-4">
-        <ActionButton size="sm" variant="secondary" onPress={browse} isDisabled={!workReady || !!stateError || unfinished}>选择其他文件…</ActionButton>
-        <DirtyTreesNotice status={work.status} suffix="导入和整理会在当前工作仓库切换分支，请先保持工作区干净。" />
-        <BranchTable branches={branches} selected={selected} onSelect={setSelected} repoPath={workDir} onDeleted={reloadAll}
-          onRebase={(branch) => { setSelected([branch.name]); void rebaseBranch(branch); }} />
-        <DetachedWorktreesNotice status={work.status} />
-      </div></Fold>
+      </section>
       </FeedbackScope>
     </Tabs.Panel>
-  </Tabs>;
+  </Tabs>
+  <BranchManager key={refreshKey} profile={profile} repoPath={workDir} status={work.status} loading={work.loading} error={work.error}
+    isOpen={branchOpen} onOpenChange={setBranchOpen} onRefresh={reloadAll} target={branchTarget} initialSelection={selected} pushBlocked={!!stateError} />
+  </>;
 }

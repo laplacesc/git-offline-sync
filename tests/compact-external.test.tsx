@@ -55,8 +55,10 @@ async function loaded(value = profile) {
   await waitFor(() => expect(screen.queryByText("正在检查更新…")).toBeNull());
   return result;
 }
-function returnTab() { fireEvent.click(screen.getByRole("tab", { name: "回传提交" })); }
-function selectBranch(name: string) { fireEvent.click(screen.getByRole("checkbox", { name, exact: true })); }
+function branchesTab() { fireEvent.click(screen.getByRole("button", { name: "分支管理", exact: true })); }
+function returnTab() { const close = screen.queryByRole("button", { name: "关闭分支管理" }); if (close) fireEvent.click(close); else fireEvent.click(screen.getByRole("tab", { name: "同步与回传" })); }
+function managedCheckbox(name: string) { return within(screen.getByRole("row", { name, exact: true })).getByRole<HTMLInputElement>("checkbox"); }
+function selectBranch(name: string) { fireEvent.click(managedCheckbox(name)); }
 function expand(text: string) { fireEvent.click(screen.getByRole("button", { name: text, exact: true })); }
 
 beforeEach(() => {
@@ -74,22 +76,33 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("精简外网同步", () => {
-  it("隐藏回传页不发提示，切换页签会清理并恢复各自的状态提示", async () => {
+  it("外网分支管理显示推送图标，但不能发起推送", async () => {
+    const prepare = vi.spyOn(api, "preparePush");
+    await loaded();
+    branchesTab();
+    const dialog = await screen.findByRole("dialog", { name: "分支管理" });
+    const push = within(dialog).getByRole<HTMLButtonElement>("button", { name: "检查并推送 feature/one" });
+    expect(push.disabled).toBe(true);
+    fireEvent.click(push);
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it("合并页同时显示同步和回传提示，切换管理页隐藏同步提示", async () => {
     vi.mocked(api.repoStatus).mockImplementation(async (path) => ({
       ...status(path), isRepo: path === "/mirror", branches: [],
     }));
     vi.mocked(api.listPackages).mockResolvedValue([pkg(4)]);
     await loaded();
-    const missing = "缺少更新 #3，请补齐或选择较新的全量包。";
-    const unprepared = "请先在同步更新页准备开发仓库。";
+    const missing = "缺少更新 #3，请在传输目录补齐更新包或放入较新的全量包。";
+    const unprepared = "请先同步更新并准备开发仓库。";
     expect(screen.getByText(missing)).toBeTruthy();
-    expect(screen.queryByText(unprepared)).toBeNull();
-    returnTab();
-    expect(await screen.findByText(unprepared)).toBeTruthy();
+    expect(screen.getByText(unprepared)).toBeTruthy();
+    branchesTab();
     expect(screen.queryByText(missing)).toBeNull();
-    fireEvent.click(screen.getByRole("tab", { name: "同步更新", exact: true }));
+    expect(screen.getAllByText(unprepared)).toHaveLength(1);
+    returnTab();
     expect(await screen.findByText(missing)).toBeTruthy();
-    expect(screen.queryByText(unprepared)).toBeNull();
+    expect(screen.getAllByText(unprepared)).toHaveLength(1);
   });
   it("同步仓库及后续刷新只显示浮动提示，不重复显示页面加载文字", async () => {
     await loaded();
@@ -97,7 +110,7 @@ describe("精简外网同步", () => {
     const refresh = deferred<Awaited<ReturnType<typeof api.mirrorState>>>();
     vi.mocked(api.syncUpdates).mockReturnValueOnce(sync.promise);
     vi.mocked(api.mirrorState).mockReturnValueOnce(refresh.promise);
-    expand("开发仓库管理");
+
     fireEvent.click(screen.getAllByRole("button", { name: "同步仓库", exact: true })[0]);
     expect(screen.getByText("正在同步更新，请稍候…").closest(".operation-popups")).toBeTruthy();
     expect(document.querySelector(".sync-workspace")?.textContent).not.toMatch(/正在检查更新|正在读取开发分支/);
@@ -111,30 +124,35 @@ describe("精简外网同步", () => {
 
   it("原生页签隐藏非活动面板，来回切换保留分支选择与管理表单", async () => {
     await loaded();
-    expect(screen.queryByRole("checkbox", { name: "feature/one", exact: true })).toBeNull();
+    expect(screen.getByRole("checkbox", { name: /^选择 feature\/one/, exact: true })).toBeTruthy();
     returnTab();
     selectBranch("feature/one");
-    expand("分支管理");
+    branchesTab();
     fireEvent.change(screen.getByRole("textbox", { name: "新分支" }), { target: { value: "feature/draft" } });
-    fireEvent.click(screen.getByRole("tab", { name: "同步更新", exact: true }));
+    returnTab();
     expect(screen.queryByRole("textbox", { name: "新分支" })).toBeNull();
     returnTab();
+    expect(screen.queryByRole("textbox", { name: "新分支" })).toBeNull();
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: /^选择 feature\/one/, exact: true }).checked).toBe(true);
+    branchesTab();
     expect(screen.getByRole<HTMLInputElement>("textbox", { name: "新分支" }).value).toBe("feature/draft");
-    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "feature/one", exact: true }).checked).toBe(true);
+    expect(managedCheckbox("feature/one").checked).toBe(false);
   });
 
-  it("Patch 使用原生单选方向键切换，导出只接收当前分支", async () => {
+  it("Patch 使用表格单选，键盘切换后只导出当前分支", async () => {
     await loaded();
     returnTab();
     selectBranch("feature/one");
-    expand("格式：Bundle");
+
     fireEvent.click(screen.getByRole("radio", { name: "Patch（单分支）" }));
-    const first = screen.getByRole("radio", { name: "feature/one", exact: true });
+    const first = screen.getByRole("row", { name: "feature/one" });
     act(() => first.focus());
     fireEvent.keyDown(first, { key: "ArrowDown" });
-    const second = screen.getByRole<HTMLInputElement>("radio", { name: "feature/two", exact: true });
+    const second = screen.getByRole("row", { name: "feature/two" });
     expect(document.activeElement).toBe(second);
-    expect(second.checked).toBe(true);
+    fireEvent.keyDown(second, { key: " " });
+    expect(managedCheckbox("feature/two").checked).toBe(true);
+    expect(managedCheckbox("feature/one").checked).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "导出回传" }));
     await waitFor(() => expect(api.exportPatches).toHaveBeenCalledWith(expect.objectContaining({ branch: "feature/two" })));
   });
@@ -145,9 +163,11 @@ describe("精简外网同步", () => {
     const syncDev = vi.spyOn(api, "syncDevRepo");
     const clone = vi.spyOn(api, "createDevRepo");
     await loaded();
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["同步更新", "回传提交"]);
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["同步与回传"]);
+    expect(screen.getByRole("region", { name: "同步内网更新" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "回传提交" })).toBeTruthy();
     expect(screen.getByText("本次更新 #3 · 增量")).toBeTruthy();
-    expand("更新包详情与选择");
+
     expect(screen.queryByRole("option", { name: /#2/ })).toBeNull();
     expect(screen.queryByRole("option", { name: /other/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "同步更新", exact: true }));
@@ -190,7 +210,7 @@ describe("精简外网同步", () => {
     const error = await screen.findByText(/无法读取同步记录，请检查后刷新。/);
     expect(error.textContent).toContain("Error: corrupt cursor");
     expect(error.closest(".operation-popups")).toBeTruthy();
-    expect(screen.queryByText("请选择本项目的全量包开始同步。")).toBeNull();
+    expect(screen.queryByText("请将本项目的全量包放入传输目录后同步。")).toBeNull();
     const sync = screen.getByRole<HTMLButtonElement>("button", { name: "同步更新", exact: true });
     expect(sync.disabled).toBe(true); fireEvent.click(sync);
     returnTab(); selectBranch("feature/one");
@@ -209,16 +229,12 @@ describe("精简外网同步", () => {
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({ bundle: "/usb/matching-4.bundle" })));
   });
 
-  it("缺包不能跳过增量；选择较新全量后确认目标及受影响引用", async () => {
+  it("缺包时自动匹配可用全量包，确认目标及受影响引用后同步", async () => {
     vi.mocked(api.listPackages).mockResolvedValue([pkg(4), pkg(5, "full"), pkg(6, "full", "matching", false)]);
     await loaded();
-    expect(screen.getByText("缺少更新 #3，请补齐或选择较新的全量包。")).toBeTruthy();
-    expand("更新包详情与选择");
-    fireEvent.click(screen.getByRole("button", { name: /选择更新包/ }));
-    expect((await screen.findByRole("option", { name: /#4/ })).getAttribute("aria-disabled")).toBe("true");
-    expect(screen.getByRole("option", { name: /#6/ }).getAttribute("aria-disabled")).toBe("true");
-    if (!screen.queryByRole("listbox")) fireEvent.click(screen.getByRole("button", { name: /选择更新包/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /#5/ }));
+    expect(screen.getByText("本次更新 #5 · 全量")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /选择更新包/ })).toBeNull();
+    expect(screen.queryByRole("region", { name: "更新包" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "同步更新", exact: true }));
     let dialog = await screen.findByRole("alertdialog");
     expect(dialog.textContent).toContain("/mirror 从 #2 同步到 #5");
@@ -240,9 +256,7 @@ describe("精简外网同步", () => {
       const { refs: _refs, ...withoutRefs } = status(path);
       return withoutRefs;
     });
-    await loaded(); expand("更新包详情与选择");
-    if (!screen.queryByRole("listbox")) fireEvent.click(screen.getByRole("button", { name: /选择更新包/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /#5/ }));
+    await loaded();
     expect(screen.getByText("无法读取完整引用影响，请刷新后再使用全量包跳号。")).toBeTruthy();
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "同步更新", exact: true }).disabled).toBe(true);
     expect(api.syncUpdates).not.toHaveBeenCalled();
@@ -251,9 +265,7 @@ describe("精简外网同步", () => {
   it("全量确认期间配置改变，不能执行旧目标", async () => {
     vi.mocked(api.listPackages).mockResolvedValue([pkg(5, "full")]);
     const { rerender } = await loaded();
-    expand("更新包详情与选择");
-    if (!screen.queryByRole("listbox")) fireEvent.click(screen.getByRole("button", { name: /选择更新包/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /#5/ }));
+
     fireEvent.click(screen.getByRole("button", { name: "同步更新", exact: true }));
     const dialog = await screen.findByRole("alertdialog");
     rerender(view({ ...profile, mirrorDir: "/other-mirror" }));
@@ -263,7 +275,7 @@ describe("精简外网同步", () => {
   });
 
   it("开发仓库管理中的单库同步不顺带导入当前待同步包", async () => {
-    await loaded(); expand("开发仓库管理");
+    await loaded();
     const row = screen.getByText("/dev-two", { exact: true }).closest(".sync-branch-row")!;
     fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "同步仓库" }));
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({ bundle: null, devDirs: ["/dev-two"] })));
@@ -291,20 +303,77 @@ describe("精简外网同步", () => {
     await waitFor(() => expect(api.exportBack).toHaveBeenCalledWith(expect.objectContaining({ branches: ["feature/one", "feature/two"] })));
     expect(screen.queryByRole("alertdialog")).toBeNull();
     await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "导出回传" }).disabled).toBe(false));
-    expand("格式：Bundle"); fireEvent.click(screen.getByRole("radio", { name: "Patch（单分支）" }));
-    expect(screen.getByRole<HTMLInputElement>("radio", { name: "feature/one", exact: true }).checked).toBe(true);
-    expect(screen.getByRole<HTMLInputElement>("radio", { name: "feature/two", exact: true }).checked).toBe(false);
-    fireEvent.click(screen.getByRole("radio", { name: "feature/two", exact: true }));
-    expect(screen.getByRole<HTMLInputElement>("radio", { name: "feature/one", exact: true }).checked).toBe(false);
+     fireEvent.click(screen.getByRole("radio", { name: "Patch（单分支）" }));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: /^选择 feature\/one/, exact: true }).checked).toBe(true);
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: /^选择 feature\/two/, exact: true }).checked).toBe(false);
+    fireEvent.click(screen.getByRole("checkbox", { name: /^选择 feature\/two/, exact: true }));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: /^选择 feature\/one/, exact: true }).checked).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "导出回传" }));
     await waitFor(() => expect(api.exportPatches).toHaveBeenCalledWith(expect.objectContaining({ branch: "feature/two", repo: "/dev-one" })));
+  });
+
+  it("Patch 回传与管理多选互不影响，切换格式保留管理选择", async () => {
+    await loaded(); returnTab(); selectBranch("feature/one");
+     fireEvent.click(screen.getByRole("radio", { name: "Patch（单分支）" }));
+    branchesTab();
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选" }));
+    expect(managedCheckbox("feature/one").checked).toBe(true);
+    expect(managedCheckbox("feature/two").checked).toBe(true);
+    returnTab();
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: /^选择 feature\/one/, exact: true }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /^选择 feature\/two/, exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "导出回传" }));
+    await waitFor(() => expect(api.exportPatches).toHaveBeenCalledWith(expect.objectContaining({ branch: "feature/two" })));
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "导出回传" }).disabled).toBe(false));
+    branchesTab();
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "全选" }).checked).toBe(true);
+    fireEvent.click(managedCheckbox("feature/one"));
+    returnTab();
+    fireEvent.click(screen.getByRole("radio", { name: "Bundle", exact: true }));
+    branchesTab();
+    expect(managedCheckbox("feature/one").checked).toBe(false);
+    expect(managedCheckbox("feature/two").checked).toBe(true);
+  });
+
+  it("管理页展示工作树修改、进行中操作及操作失败结果", async () => {
+    vi.mocked(api.repoStatus).mockImplementation(async (path) => ({
+      ...status(path),
+      dirtyTrees: [{ path: "/worktrees/one", branch: "feature/one", bare: false, main: false }],
+      inProgressTrees: [{ path: "/worktrees/one", branch: "feature/one", op: "rebase", main: false }],
+    }));
+    const resume = vi.spyOn(api, "continueOp").mockResolvedValue({
+      ok: false, conflict: true, files: ["conflict.ts"], message: "仍需解决冲突", worktree: "/worktrees/one",
+    });
+    await loaded(); branchesTab();
+    expect(await screen.findByText(/有未提交的修改/)).toBeTruthy();
+    const panel = within(screen.getByRole("dialog", { name: "分支管理", exact: true }));
+    expect(panel.getByText(/有未完成的 rebase/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "继续", exact: true }));
+    await waitFor(() => expect(resume).toHaveBeenCalledWith("/worktrees/one"));
+    expect(await panel.findByText("conflict.ts")).toBeTruthy();
+  });
+
+  it("分支管理可以确认删除本地分支并刷新列表", async () => {
+    const remove = vi.spyOn(api, "deleteLocalBranch").mockImplementation(async () => {
+      vi.mocked(api.repoStatus).mockImplementation(async (path) => ({
+        ...status(path), branches: status(path).branches.filter((branch) => branch.name !== "feature/two"),
+      }));
+      return { status: "deleted", message: "已删除分支" };
+    });
+    await loaded(); branchesTab(); fireEvent.click(managedCheckbox("feature/two"));
+    fireEvent.click(screen.getByRole("button", { name: "删除本地分支 feature/two" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "删除本地分支", exact: true }));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith("/dev-one", "feature/two"));
+    await waitFor(() => expect(screen.queryByRole("row", { name: "feature/two" })).toBeNull());
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "全选" }).checked).toBe(false);
   });
 
   it("分支管理保留 worktree 创建、身份设置和独立 Rebase", async () => {
     const create = vi.spyOn(api, "createBranch").mockResolvedValue(null);
     const identity = vi.spyOn(api, "configureRepo").mockResolvedValue(null);
     const rebase = vi.spyOn(api, "rebaseOnto").mockResolvedValue({ ok: true, conflict: false, files: [], message: "已变基", worktree: null });
-    await loaded(); returnTab(); expand("分支管理");
+    await loaded(); branchesTab();
     fireEvent.change(screen.getByRole("textbox", { name: "新分支" }), { target: { value: "feature/new" } });
     fireEvent.click(screen.getByRole("checkbox", { name: "创建为独立 worktree" }));
     fireEvent.change(screen.getByRole("textbox", { name: "worktree 目录" }), { target: { value: "/worktrees/new" } });
@@ -325,7 +394,7 @@ describe("精简外网同步", () => {
     await loaded(); returnTab(); selectBranch("feature/one");
     vi.mocked(api.repoStatus).mockImplementation(async (path) => ({ ...status(path), branches: [] }));
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
-    await waitFor(() => expect(screen.queryByRole("checkbox", { name: "feature/one", exact: true })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: /^选择 feature\/one/, exact: true })).toBeNull());
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "导出回传" }).disabled).toBe(true);
   });
 
@@ -349,14 +418,16 @@ describe("精简外网同步", () => {
     expect(api.devSyncStatus).toHaveBeenCalledTimes(2);
   });
 
-  it("页签支持方向键与 Home / End 并移动焦点", async () => {
+  it("分支管理使用弹窗入口，关闭后焦点返回图标按钮", async () => {
     await loaded();
-    const sync = screen.getByRole("tab", { name: "同步更新" });
-    const back = screen.getByRole("tab", { name: "回传提交" });
-    act(() => sync.focus());
-    fireEvent.keyDown(sync, { key: "ArrowRight" }); expect(document.activeElement).toBe(back);
-    fireEvent.keyDown(back, { key: "Home" }); expect(document.activeElement).toBe(sync);
-    fireEvent.keyDown(sync, { key: "End" }); expect(document.activeElement).toBe(back);
-    fireEvent.keyDown(back, { key: "ArrowLeft" }); expect(document.activeElement).toBe(sync);
+    expect(screen.getAllByRole("tab")).toHaveLength(1);
+    const trigger = screen.getByRole("button", { name: "分支管理", exact: true });
+    act(() => trigger.focus());
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("dialog", { name: "分支管理", exact: true })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "分支管理" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "关闭分支管理" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "分支管理", exact: true })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 });

@@ -7,7 +7,7 @@ import { LogPanel, useGitLog } from "./LogPanel";
 import { blankProfile, ProfileEditor } from "./ProfileEditor";
 import { Icon } from "./icons";
 import { Feedback, OperationStatus, RunnerProvider, useRunner } from "./runner";
-import { AppGlyph, FormSection, PathInput, SectionLabel, TextInput } from "./ui";
+import { AppGlyph, FormSection, PathInput, TextInput } from "./ui";
 import { UpdatePanel } from "./UpdatePanel";
 import { WindowControls } from "./WindowControls";
 import { startAutoCheck } from "./updater";
@@ -30,13 +30,22 @@ function Shell() {
   const [mode, setMode] = useState<Mode>({ kind: "view" });
   const [savingConfig, setSavingConfig] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  const [projectsOpen, setProjectsOpen] = useState(() => !window.matchMedia("(max-width: 800px)").matches);
+  const [navigationTarget, setNavigationTarget] = useState<HTMLDivElement | null>(null);
+  const [branchTarget, setBranchTarget] = useState<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const projectButtonRef = useRef<HTMLButtonElement>(null);
+  const navigationButtonRef = useRef<HTMLButtonElement>(null);
   const logButtonRef = useRef<HTMLButtonElement>(null);
   const log = useGitLog();
 
   useEffect(() => startAutoCheck(), []);
+  useEffect(() => {
+    const narrow = window.matchMedia("(max-width: 800px)");
+    const collapse = () => { if (narrow.matches) setProjectsOpen(false); };
+    narrow.addEventListener("change", collapse);
+    return () => narrow.removeEventListener("change", collapse);
+  }, []);
   useEffect(() => {
     if (contentRef.current) contentRef.current.scrollTop = 0;
   }, [config?.lastProfileId]);
@@ -70,6 +79,11 @@ function Shell() {
 
   const current = config?.profiles.find((p) => p.id === config.lastProfileId) ?? config?.profiles[0];
   const locked = !!busy || savingConfig || mode.kind !== "view";
+  const selectProfile = async (id: string) => {
+    if (!config || locked) return;
+    const saved = id === current?.id || await persist({ ...config, lastProfileId: id });
+    if (saved) closeNavigation();
+  };
   const startNew = (role: Role) => {
     setMode({ kind: "edit", profile: blankProfile(role, newId()), isNew: true });
   };
@@ -108,112 +122,129 @@ function Shell() {
   };
   const closeLog = (open: boolean) => {
     setLogOpen(open);
-    if (!open) logButtonRef.current?.focus();
+    if (!open) (projectsOpen ? logButtonRef : navigationButtonRef).current?.focus();
   };
   let dialogTitle = "设置";
   if (mode.kind === "edit") dialogTitle = mode.isNew ? "新建同步配置" : "编辑同步配置";
-  const latest = [...operations].reverse().find((operation) => operation.endedAt !== undefined);
-  let latestResult = "尚无操作记录";
-  if (latest) {
-    let result = "已完成";
-    if (latest.failed) result = "失败";
-    else if (latest.needsAttention) result = "需要处理，请查看结果";
-    else if (latest.stopRequested) result = "已结束，请检查结果";
-    latestResult = `${latest.label} · ${result}`;
-  }
+  const closeNavigation = () => {
+    if (window.matchMedia("(max-width: 800px)").matches) {
+      setProjectsOpen(false);
+      navigationButtonRef.current?.focus();
+    }
+  };
 
   return (
-    <div className="app-shell compact-shell" data-platform={platform}>
+    <div className="app-shell compact-shell" data-platform={platform} data-projects-open={projectsOpen}>
       <Link href="#main-content" className="skip-link">跳到主要内容</Link>
       <main id="main-content" tabIndex={-1} className="compact-window">
         <header className="compact-toolbar" data-tauri-drag-region={platform === "other" ? true : "deep"}>
+          <Button ref={navigationButtonRef} isIconOnly size="sm" variant="ghost" aria-label={projectsOpen ? "收起配置列表" : "展开配置列表"}
+            aria-expanded={projectsOpen} aria-controls="project-navigation" onPress={() => setProjectsOpen((open) => !open)}>
+            <Icon name="panel" />
+          </Button>
           <div className="compact-brand"><span className="brand-mark"><AppGlyph className="size-[22px]" /></span><span>Git 离线同步</span></div>
-          <div className="compact-toolbar-actions" data-tauri-drag-region={platform === "other" ? true : "deep"}>
-            <Dropdown>
-              <Button ref={projectButtonRef} className="compact-project" size="sm" variant="ghost" isDisabled={locked || !config}
-                aria-label={`选择项目：${current?.name ?? "未配置"}`}>
-                <span className="truncate" title={current?.name}>{current?.name ?? "选择项目"}</span><Icon name="chevron" />
-              </Button>
-              <Dropdown.Popover placement="bottom end" className="project-popover">
-                <Dropdown.Menu aria-label="项目" onAction={(key) => {
-                  if (locked || !config) return;
-                  const action = String(key);
-                  if (action.startsWith("profile:")) {
-                    const id = action.slice("profile:".length);
-                    if (id !== current?.id) void persist({ ...config, lastProfileId: id });
-                  } else {
-                    projectButtonRef.current?.focus();
-                    if (action === "new:internal") startNew("internal");
-                    else if (action === "new:external") startNew("external");
-                    else if (action === "edit" && current) setMode({ kind: "edit", profile: current, isNew: false });
-                  }
-                }}>
-                  {(config?.profiles ?? []).map((profile) => (
-                    <Dropdown.Item key={profile.id} id={`profile:${profile.id}`} textValue={profile.name}>
-                      <Icon name="folder" /><span className="project-menu-name" title={profile.name}>{profile.name}</span>
-                      <span className="shrink-0 text-muted">{profile.role === "internal" ? "内网" : "外网"}</span>
-                      {profile.id === current?.id && <span className="shrink-0 text-muted">当前</span>}
-                    </Dropdown.Item>
-                  ))}
-                  <Dropdown.Item id="new:internal" textValue="新建内网端配置"><Icon name="plus" />新建内网端配置</Dropdown.Item>
-                  <Dropdown.Item id="new:external" textValue="新建外网端配置"><Icon name="plus" />新建外网端配置</Dropdown.Item>
-                  <Dropdown.Item id="edit" textValue="编辑当前项目" isDisabled={!current}><Icon name="settings" />编辑当前项目</Dropdown.Item>
-                </Dropdown.Menu>
-              </Dropdown.Popover>
-            </Dropdown>
-            {current && <span className="role-badge">{current.role === "internal" ? "内网端" : "外网端"}</span>}
-            <Dropdown>
-              <Button isIconOnly size="sm" variant="ghost" aria-label={`外观：${appearanceLabel}`}>
-                <Icon name={preference === "system" ? "monitor" : preference === "light" ? "sun" : "moon"} />
-              </Button>
-              <Dropdown.Popover placement="bottom end">
-                <Dropdown.Menu aria-label="选择外观" selectionMode="single" disallowEmptySelection
-                  selectedKeys={new Set([preference])} onAction={(key) => {
-                    if (key === "light" || key === "dark" || key === "system") setPreference(key);
-                  }}>
-                  <Dropdown.Item id="light" textValue="浅色"><Icon name="sun" />浅色<Dropdown.ItemIndicator /></Dropdown.Item>
-                  <Dropdown.Item id="dark" textValue="深色"><Icon name="moon" />深色<Dropdown.ItemIndicator /></Dropdown.Item>
-                  <Dropdown.Item id="system" textValue="跟随系统"><Icon name="monitor" />跟随系统<Dropdown.ItemIndicator /></Dropdown.Item>
-                </Dropdown.Menu>
-              </Dropdown.Popover>
-            </Dropdown>
-            <Button isIconOnly size="sm" variant="ghost" aria-label="打开设置" isDisabled={locked || !config}
-              onPress={() => setMode({ kind: "settings" })}><Icon name="settings" /></Button>
-          </div>
           {platform === "windows" && <WindowControls />}
         </header>
-        <OperationStatus />
-        <div ref={contentRef} className="compact-scroll">
-          <div className="compact-content">
-            {loadError ? <div className="space-y-4">
-              <Feedback kind="error" text={`无法读取同步配置\n${loadError}`} />
-              <Button onPress={() => setLoadAttempt((n) => n + 1)}>重新读取配置</Button>
-            </div> : !config ? <Feedback kind="progress" text="正在读取配置…" /> : <>
-              {env && "Err" in env.git && <Feedback kind="error" text={`找不到可用的 git\n${env.git.Err}。请安装 Git，或在设置中指定 git 可执行文件路径。`} />}
-              {current ? (current.role === "internal"
-                ? <InternalView key={current.id} profile={current} />
-                : <ExternalView key={current.id} profile={current} />)
-                : <div className="compact-welcome">
-                  <h1>添加同步项目</h1>
-                  <p>选择当前电脑的角色，配置仓库和传输目录。</p>
-                  <div className="flex flex-wrap gap-3">
-                    <Button onPress={() => startNew("internal")} isDisabled={locked}>新建内网端配置</Button>
-                    <Button onPress={() => startNew("external")} isDisabled={locked}>新建外网端配置</Button>
-                  </div>
-                </div>}
-            </>}
+        <div className="desktop-workspace">
+          <nav id="project-navigation" className="project-navigation" aria-label="工作区导航" hidden={!projectsOpen}>
+            <div className="profile-list-heading">
+              <h2>配置文件</h2>
+              <div className="profile-list-actions">
+                <Button isIconOnly size="sm" variant="ghost" aria-label="编辑当前配置" isDisabled={locked || !current}
+                  onPress={() => { if (current) setMode({ kind: "edit", profile: current, isNew: false }); }}>
+                  <span title="编辑当前配置"><Icon name="settings" /></span>
+                </Button>
+                <Dropdown>
+                  <Button isIconOnly size="sm" variant="ghost" aria-label="新建配置" isDisabled={locked || !config}>
+                    <span title="新建配置"><Icon name="plus" /></span>
+                  </Button>
+                  <Dropdown.Popover placement="bottom start">
+                    <Dropdown.Menu aria-label="新建同步配置" onAction={(key) => {
+                      if (!locked && config && (key === "internal" || key === "external")) startNew(key);
+                    }}>
+                      <Dropdown.Item id="internal" textValue="新建内网端配置"><Icon name="plus" />新建内网端配置</Dropdown.Item>
+                      <Dropdown.Item id="external" textValue="新建外网端配置"><Icon name="plus" />新建外网端配置</Dropdown.Item>
+                    </Dropdown.Menu>
+                  </Dropdown.Popover>
+                </Dropdown>
+              </div>
+            </div>
+            <ul className="profile-navigation-list" aria-label="配置文件">
+              {(config?.profiles ?? []).map((profile) => (
+                <li key={profile.id}>
+                  <Button className="profile-navigation-item" variant="ghost" aria-label={`切换配置：${profile.name}`}
+                    aria-current={profile.id === current?.id ? "page" : undefined} isDisabled={locked}
+                    onPress={() => void selectProfile(profile.id)}>
+                    <Icon name="folder" />
+                    <span className="profile-navigation-copy">
+                      <span className="profile-navigation-name" title={profile.name}>{profile.name}</span>
+                      <span className="profile-navigation-scope" title={profile.repoName}>{profile.role === "internal" ? "内网端" : "外网端"} · {profile.repoName}</span>
+                    </span>
+                  </Button>
+                </li>
+              ))}
+              {config && !config.profiles.length && <li className="profile-navigation-empty">暂无配置</li>}
+            </ul>
+            <div ref={setNavigationTarget} hidden />
+            <div className="workbench-footer">
+              <div className="workbench-tools">
+                <div ref={setBranchTarget} className="workbench-branch-entry" />
+                <Button ref={logButtonRef} isIconOnly className="records-button" size="sm" variant="ghost" aria-label={logOpen ? "收起记录" : "查看记录"}
+                  aria-expanded={logOpen} aria-controls={logOpen ? "operation-records" : undefined}
+                  onPress={() => { closeLog(!logOpen); closeNavigation(); }}>
+                  <span title={logOpen ? "收起操作记录" : "操作记录"}><Icon name="terminal" /></span>
+                </Button>
+                <Dropdown>
+                  <Button isIconOnly size="sm" variant="ghost" aria-label={`外观：${appearanceLabel}`}>
+                    <Icon name={preference === "system" ? "monitor" : preference === "light" ? "sun" : "moon"} />
+                  </Button>
+                  <Dropdown.Popover placement="bottom end">
+                    <Dropdown.Menu aria-label="选择外观" selectionMode="single" disallowEmptySelection
+                      selectedKeys={new Set([preference])} onAction={(key) => {
+                        if (key === "light" || key === "dark" || key === "system") setPreference(key);
+                      }}>
+                      <Dropdown.Item id="light" textValue="浅色"><Icon name="sun" />浅色<Dropdown.ItemIndicator /></Dropdown.Item>
+                      <Dropdown.Item id="dark" textValue="深色"><Icon name="moon" />深色<Dropdown.ItemIndicator /></Dropdown.Item>
+                      <Dropdown.Item id="system" textValue="跟随系统"><Icon name="monitor" />跟随系统<Dropdown.ItemIndicator /></Dropdown.Item>
+                    </Dropdown.Menu>
+                  </Dropdown.Popover>
+                </Dropdown>
+                <Button isIconOnly size="sm" variant="ghost" aria-label="打开设置" isDisabled={locked || !config}
+                  onPress={() => setMode({ kind: "settings" })}><Icon name="settings" /></Button>
+              </div>
+            </div>
+          </nav>
+          <div className="desktop-canvas">
+            <OperationStatus />
+            <div ref={contentRef} className="compact-scroll">
+              <div className="compact-content">
+                {loadError ? <div className="space-y-4">
+                  <Feedback kind="error" text={`无法读取同步配置\n${loadError}`} />
+                  <Button onPress={() => setLoadAttempt((n) => n + 1)}>重新读取配置</Button>
+                </div> : !config ? <Feedback kind="progress" text="正在读取配置…" /> : <>
+                  {env && "Err" in env.git && <Feedback kind="error" text={`找不到可用的 git\n${env.git.Err}。请安装 Git，或在设置中指定 git 可执行文件路径。`} />}
+                  {current ? (current.role === "internal"
+                    ? <InternalView key={current.id} profile={current} navigationTarget={navigationTarget} branchTarget={branchTarget} onNavigate={closeNavigation} />
+                    : <ExternalView key={current.id} profile={current} navigationTarget={navigationTarget} branchTarget={branchTarget} onNavigate={closeNavigation} />)
+                    : <div className="compact-welcome">
+                      <h1>添加同步项目</h1>
+                      <p>选择当前电脑的角色，配置仓库和传输目录。</p>
+                      <div className="flex flex-wrap gap-3">
+                        <Button onPress={() => startNew("internal")} isDisabled={locked}>新建内网端配置</Button>
+                        <Button onPress={() => startNew("external")} isDisabled={locked}>新建外网端配置</Button>
+                      </div>
+                    </div>}
+                </>}
+              </div>
+            </div>
+
+            {logOpen && <div id="operation-records" onKeyDown={(event) => {
+              if (event.key === "Escape") { event.preventDefault(); closeLog(false); }
+            }}>
+              <LogPanel lines={log.lines} operations={operations} clear={() => { log.clear(); clearOperations(); }} open setOpen={closeLog} />
+            </div>}
           </div>
         </div>
-        <footer className="compact-footer">
-          <span role="status">{latestResult}</span>
-          <Button ref={logButtonRef} size="sm" variant="ghost" aria-expanded={logOpen} aria-controls={logOpen ? "operation-records" : undefined}
-            onPress={() => closeLog(!logOpen)}>{logOpen ? "收起记录" : "查看记录"}</Button>
-        </footer>
-        {logOpen && <div id="operation-records" onKeyDown={(event) => {
-          if (event.key === "Escape") { event.preventDefault(); closeLog(false); }
-        }}>
-          <LogPanel lines={log.lines} operations={operations} clear={() => { log.clear(); clearOperations(); }} open setOpen={closeLog} />
-        </div>}
       </main>
       <Modal.Backdrop isOpen={mode.kind !== "view"} isDismissable={false} isKeyboardDismissDisabled={savingConfig}
         onOpenChange={(open) => { if (!open) closeDialog(); }}>
@@ -276,7 +307,6 @@ function Settings({
         </AlertDialog.Dialog></AlertDialog.Container>
       </AlertDialog.Backdrop>
       <Card.Header className="form-page-header">
-        <SectionLabel>应用偏好</SectionLabel>
         <Card.Title render={(props) => <h1 {...props} />} className="text-xl font-semibold">设置</Card.Title>
       </Card.Header>
       <Card.Content className="flex flex-col gap-5 px-8 pb-8">

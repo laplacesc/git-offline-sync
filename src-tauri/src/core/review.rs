@@ -1,4 +1,4 @@
-//! Format-1 return receipts, in-place review branches and frozen push plans.
+//! Format-1 return receipts, local branch reception and frozen push plans.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -61,6 +61,8 @@ struct ReviewItem {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Receipt {
+    #[serde(default)]
+    direct: bool,
     key: String,
     items: Vec<ReviewItem>,
     warnings: Vec<String>,
@@ -97,7 +99,7 @@ fn read_receipts(g: &Git, work: &Path) -> Result<Vec<Receipt>> {
 
 pub fn review_sources(g: &Git, work: &Path) -> Result<HashMap<String, String>> {
     let mut sources = HashMap::new();
-    for receipt in read_receipts(g, work)? {
+    for receipt in read_receipts(g, work)?.into_iter().filter(|r| !r.direct) {
         for item in receipt.items {
             if sources.insert(item.local, item.source).is_some() {
                 return invalid("回传接收记录含重复审查分支映射");
@@ -123,6 +125,7 @@ pub fn pushed_branches(g: &Git, work: &Path, branches: &[repo::BranchInfo]) -> R
         }
     }
     pushed.sort();
+    pushed.dedup();
     Ok(pushed)
 }
 
@@ -333,12 +336,17 @@ pub fn list_return_packages(g: &Git, work: &Path, dir: &Path) -> Result<Vec<Retu
 }
 
 fn review_item(g: &Git, work: &Path, branch: &str) -> Result<Option<(String, ReviewItem)>> {
+    let mut direct = false;
     for receipt in read_receipts(g, work)? {
+        if receipt.direct {
+            direct |= receipt.items.iter().any(|i| i.local == branch);
+            continue;
+        }
         if let Some(item) = receipt.items.into_iter().find(|i| i.local == branch) {
             return Ok(Some((receipt.key, item)));
         }
     }
-    if branch.starts_with("review/") {
+    if branch.starts_with("review/") && !direct {
         return invalid("审查分支缺少接收记录，无法确定原始推送目标");
     }
     Ok(None)
@@ -349,7 +357,7 @@ pub(super) fn mark_review_ready(g: &Git, work: &Path, branch: &str, oid: &str) -
     if !branch.starts_with("review/") {
         return Ok(());
     }
-    for receipt in read_receipts(g, work)? {
+    for receipt in read_receipts(g, work)?.into_iter().filter(|r| !r.direct) {
         if let Some(item) = receipt.items.iter().find(|i| i.local == branch) {
             g.run(
                 work,
@@ -377,8 +385,8 @@ pub struct ImportReturnResult {
     pub outcomes: Vec<OpOutcome>,
 }
 
-/// The receipt and all inbox/review refs enter one CAS transaction. They are
-/// authoritative even if later config, branch switching or rebase is interrupted.
+/// Receive all local branches, inbox refs and the receipt in one CAS transaction.
+/// Import never fetches, switches branches or modifies the index/worktree.
 pub fn import_return(
     g: &Git,
     work: &Path,
@@ -415,13 +423,33 @@ pub fn import_return(
     let receipt = if existing {
         read_receipt(g, work, &receipt_ref)?
     } else {
-        let heads = sync::unpack_snapshot(g, work, frozen.path(), manifest.as_ref())?;
+        let heads = sync::unpack_snapshot(g, work, frozen.path(), manifest.as_ref()).map_err(
+            |error| match &error {
+                SyncError::Git { stderr, .. }
+                    if stderr.contains("Repository lacks these prerequisite commits") =>
+                {
+                    SyncError::Invalid(format!(
+                        "工作仓库缺少回传包依赖的主线提交。请在工作仓库中执行 git fetch origin 后重试导入。\n{error}"
+                    ))
+                }
+                _ => error,
+            },
+        )?;
         let mut items = Vec::new();
         let mut warnings = Vec::new();
         if manifest.is_none() {
             warnings.push("兼容手工 bundle：已核对各分支与当前项目具有共同历史".into());
         }
         let mut transaction = String::new();
+        let locals: HashMap<_, _> = repo::list_refs(g, work, &["refs/heads/"])?
+            .into_iter()
+            .collect();
+        let mut targets = HashSet::new();
+        let mut guarded = HashSet::new();
+        let seq = manifest
+            .as_ref()
+            .map(|m| format!("{:04}", m.seq))
+            .unwrap_or_else(|| key[..12].to_owned());
         for (reference, oid) in heads {
             let Some(source) = reference.strip_prefix("refs/heads/") else {
                 continue;
@@ -442,7 +470,40 @@ pub fn import_return(
                 .query_stdin(work, args!["hash-object", "--stdin"], &reference)?
                 .trim()
                 .to_owned();
-            let local = format!("review/{key}/{item_id}");
+            // Match the original import's conservative occupancy rule, even when
+            // divergence would otherwise select a fallback branch.
+            sync::deletion_heads(g, work, source)?;
+            guarded.insert(source.to_owned());
+            let mut local = source.to_owned();
+            if let Some(old) = locals.get(&reference) {
+                let ancestor = g.exec(
+                    Some(work),
+                    &args!["merge-base", "--is-ancestor", old, &oid],
+                    None,
+                    false,
+                )?;
+                match ancestor.code {
+                    0 => {}
+                    1 => {
+                        local = format!("{source}-import-{seq}");
+                        warnings.push(format!("本地 {source} 与回传内容已分叉，已导入为 {local}"));
+                    }
+                    _ => return invalid("无法判断本地分支是否可以快进"),
+                }
+            }
+            if !targets.insert(local.clone()) {
+                return invalid(format!("包内多个分支使用同一导入目标：{local}"));
+            }
+            sync::deletion_heads(g, work, &local)?;
+            guarded.insert(local.clone());
+            let target = format!("refs/heads/{local}");
+            match locals.get(&target) {
+                Some(old) if local != source && old != &oid => {
+                    return invalid(format!("备用导入分支 {local} 已存在且内容不同"));
+                }
+                Some(old) => transaction.push_str(&format!("update {target} {oid} {old}\n")),
+                None => transaction.push_str(&format!("create {target} {oid}\n")),
+            }
             let recorded = manifest
                 .as_ref()
                 .and_then(|m| m.refs.iter().find(|r| r.name == reference))
@@ -475,7 +536,9 @@ pub fn import_return(
                     best.map(|(_, b)| b).unwrap_or_else(|| base_branch.into())
                 }
             };
-            transaction.push_str(&format!("create refs/offline-sync/inbox/{key}/{item_id} {oid}\ncreate refs/heads/{local} {oid}\n"));
+            transaction.push_str(&format!(
+                "create refs/offline-sync/inbox/{key}/{item_id} {oid}\n"
+            ));
             items.push(ReviewItem {
                 source: source.into(),
                 local,
@@ -488,6 +551,7 @@ pub fn import_return(
             return invalid("回传包中没有分支");
         }
         let receipt = Receipt {
+            direct: true,
             key: key.clone(),
             items,
             warnings,
@@ -498,11 +562,26 @@ pub fn import_return(
             &serde_json::to_string(&receipt)?,
         )?;
         transaction.push_str(&format!("create {receipt_ref} {}\n", blob.trim()));
-        g.query_stdin(
-            work,
-            args!["update-ref", "--no-deref", "--stdin"],
-            &transaction,
-        )?;
+        // Hold every existing worktree HEAD through prepare/commit so an
+        // external checkout cannot occupy a target between checking and writing.
+        let first = &receipt.items[0].local;
+        let heads = sync::deletion_heads(g, work, first)?;
+        let common = common.canonicalize()?;
+        if heads.contains(&common) {
+            let oid = repo::rev_parse(g, &common, "HEAD")?;
+            transaction.push_str(&format!("verify HEAD {oid}\n"));
+        }
+        let linked: Vec<_> = heads.iter().filter(|gd| **gd != common).cloned().collect();
+        sync::with_locked_heads(g, &linked, &|| {
+            g.ref_transaction(&common, &transaction, &|| {
+                for branch in &guarded {
+                    if sync::deletion_heads(g, work, branch)? != heads {
+                        return invalid("工作树列表已变化，请重新导入");
+                    }
+                }
+                Ok(())
+            })
+        })?;
         receipt
     };
     if receipt.key != key {
@@ -512,102 +591,6 @@ pub fn import_return(
     for item in &receipt.items {
         if repo::get_sync_base(g, work, &item.local).is_none() {
             repo::set_sync_base(g, work, &item.local, &item.base)?;
-        }
-    }
-    // Reception keeps its CAS lock through metadata repair, but rebase acquires
-    // the worktree lock itself (the same lock for the main working repository).
-    drop(_lock);
-    g.run(
-        work,
-        args![
-            "fetch",
-            "--no-tags",
-            "origin",
-            "+refs/heads/*:refs/remotes/origin/*"
-        ],
-    )?;
-    let mut outcomes = Vec::new();
-    for item in &receipt.items {
-        g.check_cancelled()?;
-        let top_level = g.query(work, args!["rev-parse", "--show-toplevel"])?;
-        let mut wt_string = top_level
-            .strip_suffix('\n')
-            .unwrap_or(&top_level)
-            .to_owned();
-        let outcome = (|| -> Result<OpOutcome> {
-            let gd = repo::git_dir(g, work)?;
-            let lock = OperationLock::acquire(&gd.join("offline-sync-operation"))?;
-            // Recover a completed rebase before consulting its ready marker.
-            // A failed marker write retains the journal for a later retry.
-            sync::recover_rebase(g, work, &gd)?;
-            let reference = format!("refs/heads/{}", item.local);
-            let source = repo::rev_parse(g, work, &reference)?;
-            let ready_ref = format!("refs/offline-sync/review-ready/{key}/{}", item.item_id);
-            let ready = repo::list_refs(g, work, &[&ready_ref])?
-                .into_iter()
-                .find(|(r, _)| r == &ready_ref)
-                .map(|(_, oid)| oid);
-            let active = repo::in_progress_all(g, work);
-            // Rebase detaches HEAD, so branch occupancy also needs operation metadata.
-            for tree in repo::list_worktrees(g, work)? {
-                let owns_branch = tree.branch.as_deref() == Some(item.local.as_str())
-                    || active.iter().any(|op| {
-                        op.path == tree.path && op.branch.as_deref() == Some(item.local.as_str())
-                    });
-                if owns_branch && Path::new(&tree.path).canonicalize()? != work.canonicalize()? {
-                    wt_string = tree.path;
-                    return invalid(format!(
-                        "审查分支已被现有工作区占用：{wt_string}；请先在那里完成或中止操作并切换分支"
-                    ));
-                }
-            }
-            let item_active = active
-                .iter()
-                .any(|op| op.branch.as_deref() == Some(item.local.as_str()));
-            if ready.as_deref() == Some(source.as_str()) && !item_active {
-                return Ok(OpOutcome {
-                    ok: true,
-                    message: "此回传分支已整理完成".into(),
-                    worktree: Some(wt_string.clone()),
-                    ..Default::default()
-                });
-            }
-            if let Some(operation) = repo::in_progress(&gd) {
-                let files = g.query(work, args!["diff", "--name-only", "--diff-filter=U"])?;
-                return Ok(OpOutcome {
-                    ok: false,
-                    conflict: true,
-                    files: files.lines().map(str::to_owned).collect(),
-                    message: format!("工作仓库中有未完成的 {operation}，请解决冲突后继续或中止"),
-                    worktree: Some(wt_string.clone()),
-                });
-            }
-            if gd.join("offline-sync-patch.json").try_exists()? {
-                return invalid("补丁接收记录尚未完成，请先在当前工作仓库继续或中止操作");
-            }
-            sync::ensure_worktree_clean(g, work)?;
-            let base =
-                repo::get_sync_base(g, work, &item.local).unwrap_or_else(|| item.base.clone());
-            // rebase_onto rechecks local changes and unfinished operations under
-            // its own lock before switching to the dedicated review branch.
-            drop(lock);
-            let mut outcome = sync::rebase_onto(g, work, &item.local, &base, false)?;
-            outcome.worktree = Some(wt_string.clone());
-            Ok(outcome)
-        })();
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(SyncError::Cancelled) => return Err(SyncError::Cancelled),
-            Err(error) => OpOutcome {
-                message: redact(&error.to_string()),
-                worktree: Some(wt_string),
-                ..Default::default()
-            },
-        };
-        let stop = !outcome.ok;
-        outcomes.push(outcome);
-        if stop {
-            break;
         }
     }
     let mut branches = Vec::new();
@@ -631,7 +614,7 @@ pub fn import_return(
     Ok(ImportReturnResult {
         branches,
         warnings: receipt.warnings,
-        outcomes,
+        outcomes: Vec::new(),
     })
 }
 
@@ -813,6 +796,21 @@ pub fn prepare_push(
         return invalid("推送分支名无效");
     }
     let item = review_item(g, &work, branch)?;
+    // Direct receipts can share a local branch across packages. One stable
+    // receipt marker suffices: pushed_branches compares it with the current tip.
+    let pushed_ref = if let Some((key, i)) = &item {
+        Some(format!("{PUSHED}{key}/{}", i.item_id))
+    } else {
+        read_receipts(g, &work)?
+            .into_iter()
+            .filter(|r| r.direct)
+            .find_map(|r| {
+                r.items
+                    .iter()
+                    .find(|i| i.local == branch)
+                    .map(|i| format!("{PUSHED}{}/{}", r.key, i.item_id))
+            })
+    };
     let target = item
         .as_ref()
         .map(|(_, i)| i.source.as_str())
@@ -891,7 +889,7 @@ pub fn prepare_push(
                 work,
                 common,
                 source_ref,
-                pushed_ref: item.map(|(key, i)| format!("{PUSHED}{key}/{}", i.item_id)),
+                pushed_ref,
                 remote_url: url,
                 configuration,
                 force: force_with_lease,

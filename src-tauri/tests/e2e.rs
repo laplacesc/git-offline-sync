@@ -1055,12 +1055,24 @@ fn review_push_records_only_verified_current_commits() {
     )
     .2;
     let accepted = review::import_return(&g, &work, &bundle, "main", &[]).unwrap();
-    assert!(accepted.outcomes[0].ok, "{:?}", accepted.outcomes);
+    assert!(accepted.outcomes.is_empty());
     let local = &accepted.branches[0].local;
-    let wt = Path::new(accepted.outcomes[0].worktree.as_ref().unwrap());
+    let wt = &work;
+    sh(&work, &["switch", local]);
+    let receipt_ref = sh(
+        &work,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/offline-sync/return-receipts",
+        ],
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_str(&sh(&work, &["cat-file", "blob", &receipt_ref])).unwrap();
     let marker = format!(
-        "refs/offline-sync/review-pushed/{}",
-        local.strip_prefix("review/").unwrap()
+        "refs/offline-sync/review-pushed/{}/{}",
+        receipt["key"].as_str().unwrap(),
+        receipt["items"][0]["itemId"].as_str().unwrap()
     );
     assert!(repo::status(&g, &work, "main", &[])
         .unwrap()

@@ -51,7 +51,6 @@ describe("分支选择", () => {
       ok: true, conflict: false, files: [], message: "变基完成", worktree: null,
     });
     render(<ExternalView profile={profile} />);
-    fireEvent.click(screen.getByRole("tab", { name: "回传提交" }));
     fireEvent.click(screen.getByRole("button", { name: "分支管理", exact: true }));
     fireEvent.click(await screen.findByRole("button", { name: "Rebase feature/two" }));
     let dialog = await screen.findByRole("alertdialog");
@@ -59,7 +58,7 @@ describe("分支选择", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     expect(rebase).not.toHaveBeenCalled();
-    expect((screen.getByRole("checkbox", { name: "feature/two" }) as HTMLInputElement).checked).toBe(false);
+    expect((within(screen.getByRole("row", { name: "feature/two" })).getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
 
     fireEvent.click(screen.getByRole("row", { name: "feature/two" }));
     fireEvent.click(screen.getByRole("button", { name: "Rebase feature/one" }));
@@ -71,8 +70,8 @@ describe("分支选择", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Rebase 到 origin/release/1.0" }));
     await waitFor(() => expect(rebase).toHaveBeenCalledWith("/dev", "feature/one", "release/1.0", false));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
-    expect((screen.getByRole("checkbox", { name: "feature/two" }) as HTMLInputElement).checked).toBe(true);
-    expect((screen.getByRole("checkbox", { name: "feature/one" }) as HTMLInputElement).checked).toBe(false);
+    expect((within(screen.getByRole("row", { name: "feature/two" })).getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+    expect((within(screen.getByRole("row", { name: "feature/one" })).getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
   });
 
   it("表头支持全选和取消全选", async () => {
@@ -124,37 +123,36 @@ describe("分支选择", () => {
     vi.spyOn(api, "listPackages").mockResolvedValue([]);
     const exported = vi.spyOn(api, "exportBack").mockResolvedValue({ status: "nothingToSync", message: "没有新提交" });
     render(<ExternalView profile={profile} />);
-    fireEvent.click(screen.getByRole("tab", { name: "回传提交" }));
-    fireEvent.click(screen.getByRole("button", { name: "分支管理", exact: true }));
-    fireEvent.click(await screen.findByRole("checkbox", { name: "feature/one" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "feature/two" }));
-    expect(screen.getByText(/已选 2 个/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /^选择 feature\/one/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /^选择 feature\/two/ }));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: /^选择 feature\/two/ }).checked).toBe(true);
 
     available = [branches[1]];
     fireEvent.click(screen.getAllByRole("button", { name: "刷新" })[0]);
-    await waitFor(() => expect(screen.queryByRole("row", { name: /feature\/one/ })).toBeNull());
-    expect((screen.getByRole("checkbox", { name: "feature/two" }) as HTMLInputElement).checked).toBe(true);
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: /^选择 feature\/one/ })).toBeNull());
+    expect((screen.getByRole("checkbox", { name: /^选择 feature\/two/ }) as HTMLInputElement).checked).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "导出回传" }));
     await waitFor(() => expect(exported).toHaveBeenCalledWith(expect.objectContaining({ branches: ["feature/two"] })));
 
     available = [];
     fireEvent.click(screen.getAllByRole("button", { name: "刷新" })[0]);
-    await waitFor(() => expect(screen.queryByRole("row", { name: /feature\/two/ })).toBeNull());
-    expect(screen.queryByRole("checkbox", { name: "feature/two" })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: /^选择 feature\/two/ })).toBeNull());
+    expect(screen.queryByRole("checkbox", { name: /^选择 feature\/two/ })).toBeNull();
     expect(screen.getByText("还没有可回传的开发分支。")).toBeTruthy();
     expect((screen.getByRole("button", { name: "导出回传" }) as HTMLButtonElement).disabled).toBe(true);
 
     // 仓库切换后即使存在同名分支，也不沿用前一个仓库的选择。
     available = branches;
     fireEvent.click(screen.getAllByRole("button", { name: "刷新" })[0]);
-    fireEvent.click(await screen.findByRole("checkbox", { name: "feature/one" }));
-    expect((screen.getByRole("checkbox", { name: "feature/one" }) as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(screen.getByRole("tab", { name: "同步更新" }));
-    fireEvent.click(screen.getByRole("button", { name: "开发仓库管理", exact: true }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /^选择 feature\/one/ }));
+    expect((screen.getByRole("checkbox", { name: /^选择 feature\/one/ }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));
+
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
     await waitFor(() => expect(api.repoStatus).toHaveBeenCalledWith("/dev-two", "main", []));
-    fireEvent.click(screen.getByRole("tab", { name: "回传提交" }));
-    expect((await screen.findByRole("checkbox", { name: "feature/one" }) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));
+    expect((await screen.findByRole("checkbox", { name: /^选择 feature\/one/ }) as HTMLInputElement).checked).toBe(false);
     expect((screen.getByRole("button", { name: "导出回传" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
