@@ -1,10 +1,10 @@
 # 核心逻辑重新设计
 
-状态：分阶段实施中。设计基于 v2.0.9（`5d10949`）；本轮已经接入正式 React/Tauri 应用。
+状态：分阶段实施中。本文描述目标设计，并以 v2.1.10（`075cae8`）为实现基线。
 
-已实现：单窗口双页签及浅色着色器/深色玻璃主题；外网导入与开发仓库获取引用合并执行；实际引用同步状态查询；共享导出恢复只提交所属游标；Bundle 回传的内容身份、原子接收记录、现有工作仓库中的审查和重复接收；固定 OID/远程地址/显式 lease 的推送计划与远程结果核验；已核实推送的当前提交持久标记。详见 [实现与验证记录](./implementation-verification.md)。
+已实现：单窗口工作区布局——左侧可收起的同步配置列表，内外网各保留一个“同步与回传”页签，分支管理为左下角图标入口打开的共享弹窗（内网可推送、外网禁用）；浅色 WebGL 着色器与深色玻璃主题。后端：`OperationRegistry` 单变更槽与定向取消；`sync_updates` 在一个可取消操作内完成镜像导入与开发仓库获取引用；`dev_sync_status` 按实际远程跟踪引用判断状态；共享导出恢复只提交所属游标；Bundle 回传的内容身份接收记录与**本地分支直接接收**（同名可快进更新、分叉导入为 `<原名>-import-<序号>`，本地分支、inbox 引用与接收记录在同一引用事务提交）；补丁接收记录与应用收尾恢复；固定 OID/冻结远程地址/显式 lease 的推送计划（`prepare_push`/`execute_push`）与远程结果核验；已核实推送的当前提交持久标记。详见 [实现与验证记录](./implementation-verification.md)。
 
-下文仍包含后续目标：`format: 2`、refs-only、新流迁移、统一 requestId/operationId、inspectWorkspace，以及 Patch 的统一接收模型尚未实现。当前继续读写 format 1，Patch 在现有内网工作仓库应用并保存独立接收记录，已具备同包去重与应用收尾恢复；不能把本轮完成理解为整个迁移计划已经完成。
+下文仍包含后续目标：`format: 2`、refs-only、新流迁移、统一 requestId/operationId、inspectWorkspace，以及 Patch 与 Bundle 的统一接收模型尚未实现。当前继续读写 format 1：内网 Bundle 导入直接落到本地分支（不再创建专用审查分支，`review/` 前缀旧记录仍兼容）；Patch 在现有内网工作仓库应用并保存独立接收记录，已具备同包去重与应用收尾恢复，但不使用 Bundle 的 inbox 接收事务。不能把已完成部分理解为整个迁移计划已经完成。
 
 ## 1. 目标与边界
 
@@ -21,22 +21,22 @@
 
 多内网写入源、设备间自动发现、数字签名、自动清理历史包不属于本次实现范围。将来增加多个出站源时，需要先定义权威源切换规则。
 
-## 2. 当前实现与设计动因
+## 2. 当前实现与剩余差距
 
-现有实现已经具备值得保留的保障：镜像与开发仓库隔离、引用事务、原子 JSON 写入、进程间文件锁、导出恢复记录、按 worktree 保存的 rebase 恢复记录，以及取消和超时控制。重新设计应在这些机制上补全业务模型。
+v2.1.10 的实现已经具备以下保障：镜像与开发仓库隔离、引用事务、原子 JSON 写入、进程间文件锁（common dir 的 `offline-sync-operation`）、按归属字段提交的导出恢复记录、按 worktree 保存的 rebase/patch 恢复记录、后端操作注册表与定向取消，以及取消和超时控制。原 v2.0.9 问题清单中，推送计划、接收记录、共享游标防倒退、开发仓库实际状态判断等多数条目已经落地。
 
-| 当前情况                                                        | 影响                                         | 设计方向                                |
-| ----------------------------------------------------------- | ------------------------------------------ | ----------------------------------- |
-| `InternalView.tsx`、`ExternalView.tsx` 组合多次查询，并自行判断下一步、包能否导入 | 业务规则散落在页面与核心层，界面状态难以解释                     | 核心层返回工作区快照、操作能力和阻塞原因                |
-| 两个页面把同步状态读取失败转换为 `null`                                     | 损坏状态与尚未初始化在界面上可能表现相同                       | 明确区分未初始化、可用、读取失败、待恢复                |
-| 外网 `staleState` 仅存在 React 内存中                               | 重启或页面重建后，不能继续依赖该标记判断开发仓库是否更新               | 读取实际远程跟踪引用，并记录成功同步的上游快照             |
-| `Manifest` 以 `repoId`、`seq`、引用列表描述包，没有独立内容标识和显式快照依赖         | 序号同时承担展示与流程约束，难以描述同号异包及重试身份                | 分离项目身份、同步流身份、包身份、序号和快照身份            |
-| 推送确认依赖前端的提交列表及上下文；API 只传分支名和强推开关                            | 前端上下文保护无法约束外部 Git 进程在确认后修改分支               | 后端创建绑定具体 OID 的推送计划，执行前复核            |
-| 回传导出的恢复记录保存整份 `MirrorState`，恢复时整体写回；`import_in` 不先检查该记录     | 回传导出失败后先导入新包，再恢复旧导出，会把新的接收游标写回旧值           | 所有共享资源变更先处理恢复记录；按字段归属提交状态，禁止旧快照整体覆盖 |
-| 回传没有持久化包接收记录；patch 导入直接扫描 `.patch` 文件，没有读取 manifest         | rebase 后重导旧包可能新增导入分支；patch 缺少统一身份校验和接收恢复边界 | 引入接收记录与独立审查条目，bundle/patch 共用验证入口   |
-| `RunnerProvider` 与后端分别分配操作编号，日志按收到事件时的 `activeRun` 分组       | 后台读取日志可能归入前台操作，批处理取消边界不统一                  | 后端操作 ID 贯穿调用、日志、取消和恢复               |
+仍然存在的差距及其设计方向：
 
-上述文件可直接定位：[前端 API](../src/api.ts)、[内网流程](../src/InternalView.tsx)、[外网流程](../src/ExternalView.tsx)、[操作运行器](../src/runner.tsx)、[日志](../src/LogPanel.tsx)、[Tauri 命令](../src-tauri/src/commands.rs)。恢复覆盖路径见 [sync.rs](../src-tauri/src/core/sync.rs) 的 `ExportJournal`、`finish_export`、`export_back` 与 `import_in`；patch 路径见同文件 `import_patches`。这里的缺口来自静态代码路径核对，尚未新增复现测试。
+| 当前情况（v2.1.10） | 影响 | 设计方向 |
+| --- | --- | --- |
+| `InternalView.tsx`、`ExternalView.tsx` 仍组合多次查询，并自行判断下一步、包能否导入 | 业务规则散落在页面与核心层，界面状态难以解释 | 核心层返回工作区快照、操作能力和阻塞原因 |
+| 镜像同步状态读取失败在界面上可能表现为空数据 | 损坏状态与尚未初始化表现相同（开发仓库侧已由 `dev_sync_status` 区分） | 明确区分未初始化、可用、读取失败、待恢复 |
+| `Manifest`（format 1）以 `repoId`、`seq`、引用列表描述包；回传接收靠后端计算的载荷 OID 与规范化 manifest 内容键去重 | 协议本身没有独立的包身份与快照依赖字段，同号异包只能在流约束下拒绝，出站包无法描述前置快照 | 分离项目身份、同步流身份、包身份、序号和快照身份 |
+| 日志事件（`LogEvent`）不带操作 ID；前端按收到事件时的 `activeRun` 分组，取消时先查 `active_operation` 再取消 | 后台读取日志可能归入前台操作；取消对象靠查询当前活动操作推断，而非调用句柄 | 后端操作 ID 贯穿调用、日志、取消和恢复 |
+| 状态权威是镜像目录下的 `state.json`；外网镜像导入的接收标记（applied ref）尚未实现 | 引用事务成功而 JSON 写失败时，靠“最后写游标”的幂等重试设计兜底，而不是从引用重建索引 | 引用事务内提交接收标记，JSON 作为可重建索引 |
+| 内网 Bundle 导入直接落到本地分支，导入后与推送前的整理、核实状态没有统一的 ReviewItem 视图 | 待办事项靠分支列表和推送标记拼出；dismissed 之类的用户决定无处保存 | 引入显式审查条目模型（见 5.3/5.4 的目标态） |
+
+上述文件可直接定位：[前端 API](../src/api.ts)、[内网流程](../src/InternalView.tsx)、[外网流程](../src/ExternalView.tsx)、[操作运行器](../src/runner.tsx)、[日志](../src/LogPanel.tsx)、[Tauri 命令](../src-tauri/src/commands.rs)。恢复覆盖路径见 [sync.rs](../src-tauri/src/core/sync.rs) 的 `ExportJournal`、`finish_export`、`export_back` 与 `import_in`；patch 路径见同文件 `import_patches`。
 
 ## 3. 业务模型
 
@@ -143,7 +143,7 @@
 
 ### 5.2 接收快照与更新开发仓库
 
-接收分为两个明确结果：`mirrorApplied` 与 `devFetched`。
+接收分为两个明确结果：`mirrorApplied` 与 `devFetched`。本节前半为目标态（引用事务内的接收标记、可重建索引、暂存仓库）；当前实现的差异见节末。
 
 镜像导入先解包对象，再原子更新公开引用和提交标记。引用事务中同时更新 `refs/offline-sync/applied`，并创建 `refs/offline-sync/receipts/<packageId>`；两者指向同一个保存项目、流、序号、包 ID、快照 ID 和默认分支的 Git blob。前者记录当前游标，后者保留历史接收身份，供重复包和同号异包检查，以及 JSON 索引重建。这些私有 ref 不进入对外包，也不作为开发仓库的 fetch 对象。首期不自动删除接收记录。
 
@@ -153,48 +153,57 @@
 
 开发仓库更新只做受控 fetch，并校验 origin 指向绑定镜像。成功后记录对应上游快照；刷新时比较实际跟踪引用，区分 `upToDate`、`needsFetch`、`drifted`、`unknown`。该判断不依赖页面内存。tag 更新策略需要明确：首期延续现有行为，对本地同名 tag 冲突报告阻塞，不自动覆盖开发者 tag。
 
+当前实现（v2.1.10）：`import_in` 直接作为权威状态机执行——锁镜像 → 先 `recover_export` 处理未完成导出 → 校验 `.pending`/format/方向 → 校验对象格式 → 空镜像必须 Full 包、`repoId` 一致、序号连续（重复拒绝、跳号需显式 `allow_gap`）→ `unpack_snapshot`（bundle verify 后从 bundle fetch 到固定 heads）→ `replace_refs` 在单个引用事务中更新全部引用并 prune 旧 tags → 修正 HEAD → **最后**才写 `state.json`。接收标记与可重建索引尚未实现；顺序保证“引用已提交但游标未写”时重试同一包是幂等的（序号检查按已写入的 `lastInSeq` 判断，重复导入返回已有结果）。新镜像也不经暂存仓库，直接在目标路径 `init --bare` 并打上外网镜像标记；`sync_updates` 在同一可取消操作内组合镜像导入与逐开发仓库的创建/获取，`dev_sync_status` 已按实际引用区分 `notCloned/upToDate/needsFetch/unknown`（读取失败返回 `unknown` 带错误信息，不当作新仓库或已同步）。
+
 ### 5.3 导出与接收回传
 
 外网导出：固定选中分支 OID、显式基准和上游快照，确定 bundle 依赖对象后导出。回传序号继续由外网镜像统一分配。同一镜像下多个开发仓库共享这条回传流；独立外网镜像使用不同 `streamId`。
 
 外网此时只能确认“已导出”。后续收到上游快照也不能仅凭提交 OID 不同就认定回传未接受，因为内网可能做过 rebase。当前范围不增加跨端审查回执；若需要在外网显示“内网已接收/已推送”，必须另行传递绑定 `packageId` 的回执。
 
-内网接收：
+内网接收（当前实现，v2.1.10——本地分支直接接收）：
 
-1. 完成格式、身份、摘要与对象校验。
-2. 将原始分支 OID 保存到 `refs/offline-sync/inbox/<packageId>/<itemId>`，其中 `itemId` 由源 ref 名计算，避免分支路径冲突。
-3. 将全部 inbox 引用与该包的接收标记放入同一个引用事务。接收标记指向该包 manifest 元数据 blob，作为重建接收记录的依据。
-4. 从这些引用构建 ReviewItem，并返回 `received`；不移动已有本地分支。
-5. 用户选择条目后创建审查分支，在现有内网工作仓库中整理，不自动创建 worktree。原分支名只作为建议名称。
+1. 锁工作仓库 common dir 的 `offline-sync-operation`，先把包字节冻结到临时文件（后续身份与解包都用这份字节，不受传输介质变化影响）。
+2. 计算内容身份 `return_key`：载荷文件 `hash-object --no-filters` 的 OID 加规范化 manifest（payload 清空、refs 按 name 排序）序列化后再 `hash-object` 的 OID。文件改名或复制不改变身份。
+3. 已有同 key 接收记录则直接复用并返回原结果，不重复导入。
+4. 逐分支校验共同历史（与 `origin/<基准分支>` 有 merge-base 才接收），`itemId` 由源 ref 名哈希得到；本地同名分支可快进则更新，分叉时导入为 `<原名>-import-<序号>` 并提示实际名称。
+5. 本地分支、`refs/offline-sync/inbox/<key>/<itemId>`（原始接收 OID）与接收记录 blob（含 `direct: true`）在**同一个引用事务**中提交；事务持锁复查所有 worktree HEAD（`with_locked_heads`），目标分支被主工作树、linked worktree 或进行中操作占用时拒绝更新。
+6. 导入不 fetch、不 rebase、不切换分支、不动 index 与工作区；对没有 `branch.<name>.syncBase` 记录的分支按前缀推断补种基准。
 
-接收重复 bundle 返回同一组 ReviewItem；即使审查分支已 rebase，也不再次生成 `-import-N` 分支。若某条审查分支创建失败，包仍然是已接收状态，可以单独重试该条目。原始 inbox 引用在审查结束前保留，用于核对和恢复。
+接收重复 bundle 复用记录；即使本地分支已 rebase 或有新提交，也不会覆盖本地提交或用户修改的基准。多个包可先后更新同一本地分支。旧版 `review/` 前缀的审查记录与目标映射仍兼容读取。
 
-patch 不能保存原始 Git OID 到本地引用并假定对象存在。它使用相同接收记录模型，但先将已校验文件复制到内网本地收件目录并原子发布，再登记接收；U 盘不作为恢复所需文件的唯一位置。应用 patch 前记录目标 worktree、原 HEAD、文件清单和当前阶段。相同包的重试恢复已有 `git am`，不会重新应用一遍；应用成功后保存结果 OID。补丁生成的新提交 OID 与原始提交可能不同，界面要按应用结果展示。
+目标态（未实现）：接收只创建 inbox 引用与 ReviewItem，不移动本地分支；用户选择条目后再创建审查分支。inbox 引用按 `refs/offline-sync/inbox/<packageId>/<itemId>` 保存，接收标记指向 manifest 元数据 blob，供重建接收记录。此模型与 format 2 的统一包身份一起迁移。
+
+patch 的当前实现：导入时先把已校验补丁文件复制到临时目录冻结（`patch_key` 同样按内容计算，重复包复用接收记录）；`git mailsplit` 数出与 `git am` 相同输入单元的邮件数量记入 journal；可选独立 worktree 或在主工作树上建分支后 `git am --3way`。journal 记录目标 worktree、原 HEAD、文件清单与阶段；中断后外部恢复按邮件数量核对新增提交并检查工作区状态，多封邮件只应用一部分时执行 `git am --quit/--skip`，不会被标记为整包已接收。目标态要求先把文件发布到内网本地收件目录再登记接收，使 U 盘不是恢复所需文件的唯一位置——当前恢复依赖 Git 自身的 am 状态与 journal 核对。补丁生成的新提交 OID 与原始提交可能不同，界面按应用结果展示。
 
 ### 5.4 整理与推送
 
-ReviewItem 状态为：`received → prepared → integrating → readyToPush → pushed`。发生冲突进入 `conflicted`；取消或崩溃根据 Git 状态进入 `needsRecovery`。用户可以将未推送条目标记为 `dismissed`，不删除原始内容。
+目标态的 ReviewItem 状态为：`received → prepared → integrating → readyToPush → pushed`。发生冲突进入 `conflicted`；取消或崩溃根据 Git 状态进入 `needsRecovery`。用户可以将未推送条目标记为 `dismissed`，不删除原始内容。
+
+当前实现（v2.1.10）没有显式 ReviewItem：接收后的待办由“本地分支 + 推送标记”表达——`refs/offline-sync/review-pushed/<key>/<itemId>` 记录已核实推送的提交 OID，`pushed_branches` 比较标记与当前 tip 得出待推送列表（分支生成新提交后自动重新成为待处理事项）。冲突继续/中止由 worktree 内的 Git rebase/am 状态加 journal 决定；`dismissed` 一类的用户决定尚无处保存。
 
 每条开发/审查分支记录：
 
-- `baseRef`：主线或发布分支名。
-- `baseOid`：最近一次确认基准时的上游提交。
-- `rangeStartOid`：用户确认的待整理提交范围起点。
-- `sourceSnapshotId`：外网开发对应的上游快照。
-- `provenance`：显式记录、用户确认的推断、旧格式未知。
+- `baseRef`：主线或发布分支名。当前以 git config `branch.<name>.syncBase` 保存，缺失时按前缀推断（`hotfix/` → 第一个发布分支，其余 → 主线）并在界面上标注为推断值。
+- `baseOid`：最近一次确认基准时的上游提交（目标字段，未实现）。
+- `rangeStartOid`：用户确认的待整理提交范围起点（目标字段，未实现；当前 rebase 直接以 `origin/<基准>` 为目标）。
+- `sourceSnapshotId`：外网开发对应的上游快照（目标字段，依赖 format 2）。
+- `provenance`：显式记录、用户确认的推断、旧格式未知（目标字段，未实现）。
 
 分支前缀只提供默认建议。旧分支的基准推断要在 rebase/patch 导出前让用户核对。`rangeStartOid` 必须存在且能解释预期提交范围，不能简单拿当前 `origin/<旧基准>` 替代历史边界。包含合并提交、基准被重写或范围有歧义时，展示提交范围并要求明确处理方式；默认不静默压平或猜测。
 
-沿用当前按实际 worktree 保存的 rebase journal。准备阶段记录旧基准、目标基准及固定 OID；完成后才更新基准信息，中止保留旧记录。恢复同时检查 journal 和 Git rebase/am 状态。
+沿用当前按实际 worktree 保存的 rebase journal。准备阶段记录旧基准、目标基准及固定 OID；完成后才更新基准信息，中止保留旧记录。恢复同时检查 journal 和 Git rebase/am 状态。分支改基准（记录的基准与目标不同）时用 `rebase --onto origin/<新> origin/<旧>`，只搬运分支自己的提交。
 
-推送拆为两个后端能力：
+推送拆为两个后端能力（已实现）：
 
-1. `preparePush` 返回 `planId`、完整源 OID、目标远程与 ref、目标旧 OID、基准 OID、待推送提交与是否需要非快进更新。UI 展示该计划。
-2. `executePush(planId)` 重新核对仓库、远程、源 ref 和源 OID；不匹配返回 `planStale`。推送使用固定源 OID 和明确目标 ref。默认只允许快进；获确认的非快进推送使用 `--force-with-lease=<目标ref>:<已确认旧OID>`，不能依赖可能被后台 fetch 更新的跟踪引用。
+1. `prepare_push(workDir, branch)` 返回 `planId`、完整源 OID、目标远程与 ref、目标旧 OID、基准 OID、待推送提交与是否需要非快进更新。UI 展示该计划，用户核对后确认。
+2. `execute_push(planId)` 重新核对 common dir、远程配置、远程 URL、源 ref 的源 OID 与远程旧 OID；不匹配返回 `planStale`。推送使用固定源 OID 和明确目标 ref。
 
-计划冻结目的地址，拒绝 `mirror` 配置和与计划不一致的 push URL/refspec。计划只在当前进程内有效，重启后重新准备和确认。GitLab 仍可因权限或分支保护拒绝推送。
+所有推送（包括快进）都使用 `--force-with-lease=<目标ref>:<已确认旧OID>`，不依赖可能被后台 fetch 更新的跟踪引用；非快进更新必须额外经用户确认。
 
-推送超时、进程退出或取消后不能立即判为未推送：查询目标远程 ref，等于计划源 OID 才可确认该结果；无法核实时进入 `outcomeUnknown`。远程已变成其他 OID 时展示实际状态，不能自动再次强推。`pushed` 只表示该目标分支的推送已核实，不表示已合入主线。
+计划通过 FrozenRemote 冻结目的地址：一次性临时 remote 别名加 `insteadOf` 防护，使查询与写入使用同一最终地址，拒绝 `mirror` 配置和 pushInsteadOf 造成的二次重写。计划只在当前进程内有效，重启后重新准备和确认。GitLab 仍可因权限或分支保护拒绝推送。
+
+推送超时、进程退出或取消后不能立即判为未推送：用独立的 30 秒受限时上下文查询目标远程 ref，等于计划源 OID 才确认结果并写入推送标记；无法核实时进入“推送结果未知”。远程已变成其他 OID 时展示实际状态，不能自动再次强推。`pushed` 只表示该目标分支的推送已核实，不表示已合入主线。
 
 ## 6. 操作与恢复模型
 
@@ -228,18 +237,21 @@ ReviewItem 状态为：`received → prepared → integrating → readyToPush �
 
 只对有跨命令副作用的流程写恢复记录；只读查询不持久化。审查记录里无法从 Git 恢复的用户决定仍需原子写入与备份，不能把所有 JSON 都视为可丢弃缓存。
 
+当前实现（v2.1.10）的差异：外网已接收快照的权威仍是镜像 `offline-sync/state.json` 中的 `MirrorState`（applied 标记未实现）；内网接收记录保存在私有 Git 引用（`refs/offline-sync/return-receipts`、`patch-receipts`、`inbox`、`review-pushed`）中，除 refs/heads/、refs/tags/ 外均不进入对外包。回传导出的序号由镜像的 `backSeq` 统一分配，`finish_export` 中 Back/Patch 包只按旧值校验提交该字段，旧 journal 携带的整份 `MirrorState` 快照不再恢复（防倒退）。
+
 共享状态按归属拆成接收游标与回传发布游标，恢复记录只携带本操作拥有字段的预期旧值和目标值，不能序列化整份 `MirrorState` 后无条件写回。提交时在锁内重新读取并检查版本：旧值符合则应用，目标值已存在则视为已提交，其他值进入恢复冲突。这样即使未来放宽操作并发，也不能让回传恢复倒退接收游标。
 
 先锁 Git common directory，再按规范化路径排序锁定其他仓库和传输目录；所有调用沿用同一顺序。首期保留应用内一个变更槽，不为并发引入调度器；跨应用实例靠文件锁约束，同步资源存在未完成 journal 时先恢复。
 
 ### 6.3 API 与错误
 
-保留显式业务命令，新增统一操作外壳：
+当前实现（v2.1.10）：后端 `commands.rs` 以 `mutating()` 获取 `OperationRegistry` 的单变更槽（`OperationGuard`）执行变更命令，`blocking()` 只读；`active_operation` 查询当前活动操作 ID，`cancel_operation(id)` 定向取消且不终止只读查询，取消后槽位保持到原操作结束。`sync_updates` 已把批量开发仓库同步实现为单个后端操作，逐仓库记录结果并在启动下一项前检查取消。前端 `api.ts` 以 `readOnce` 共享进行中的相同读请求（不缓存已完成结果），`mutate` 前后清空 pendingReads，防止变更前的迟到读响应满足变更后的刷新；取消时先查 `active_operation` 再 `cancel_operation`。日志事件为 `{kind, text, ts}`，尚无操作 ID。
+
+目标态（未实现），新增统一操作外壳：
 
 - 前端为每次提交生成 `requestId`；后端去重并返回 `operationId`。事件携带 `requestId`、`operationId`、事件序号与步骤，解决调用返回前已产生日志的关联问题。
 - `getOperation(operationId)` 可查询结果，`cancelOperation(operationId)` 定向取消；页面不通过“当前活动操作是谁”猜取消对象。
 - `inspectWorkspace` 返回结构化状态、可执行动作、阻塞原因和数据版本。前端只保留表单、选择、展开状态。
-- 批量同步开发仓库作为一个后端操作，逐仓库记录结果，并在启动下一项前检查取消；已成功项不回滚。
 - 错误返回 `code`、`message`、`details`、`recoveryAction`、`operationId`，不要求前端解析中文字符串。展示字段和日志沿用脱敏规则。
 
 工作区查询不是跨 Git、JSON、U 盘的全局事务。返回 `observedAt`、各资源版本及 `consistent/refreshRequired`；查询期间发现版本变化则重读或标记过期。执行变更仍重新核验，不把一个查询接口包装成强一致承诺。
@@ -248,59 +260,59 @@ ReviewItem 状态为：`received → prepared → integrating → readyToPush �
 
 ## 7. 代码职责拆分
 
-按业务边界逐步拆分现有 `core/sync.rs`，不先建立大量空壳 trait：
+当前实际布局（v2.1.10，`src-tauri/src/`）：
 
-| 模块                              | 负责内容                             |
-| ------------------------------- | -------------------------------- |
-| `core/protocol.rs`              | manifest、身份、摘要、快照、依赖验证；可纯函数测试    |
-| `core/outbound.rs`              | 出站计划、对象基线、导出与发布恢复                |
-| `core/replica.rs`               | 外网镜像导入、引用事务、开发仓库 fetch           |
-| `core/review.rs`                | 回传接收、ReviewItem、patch 接收及应用、推送计划 |
-| `core/branch.rs`                | 分支基准、rebase、worktree 及已有分支删除能力   |
-| `core/operation.rs`             | 操作 ID、取消、结构化事件、恢复入口              |
-| `core/repo.rs`                  | 仓库查询、角色识别、引用及对象信息                |
-| `core/git.rs`、`core/storage.rs` | 保留现有执行器与存储原语，按需要小幅增强             |
-| `commands.rs`                   | 参数转换、状态注入、后台执行、事件传递              |
+| 模块 | 负责内容 |
+| --- | --- |
+| `core/error.rs` | `SyncError` 及用户可读错误 |
+| `core/git.rs` | Git 执行器（超时、取消控制、日志与脱敏）、`OperationRegistry`、`LogEvent` |
+| `core/manifest.rs` | format 1 manifest 读写与校验（`.pending`、方向、基准分支、OID 形态） |
+| `core/repo.rs` | 仓库角色识别、工作树/引用查询、状态结构（`InternalState`/`MirrorState`）、`branch.<name>.syncBase` |
+| `core/review.rs` | 内网回传接收（内容身份、本地分支引用事务、inbox/接收记录）、`prepare_push`/`execute_push` 冻结计划、推送标记、回传包列表 |
+| `core/storage.rs` | JSON 原子写入、文件锁、原子发布原语 |
+| `core/sync.rs` | 出站发布、外网镜像导入、开发仓库创建与获取、回传导出、patch 导出/导入、rebase、分支删除、导出/patch/rebase 恢复 |
+| `commands.rs` | Tauri 命令面：`mutating()`/`blocking()` 包装、参数转换、事件传递 |
 
-模块可以在首次迁移对应业务时建立；暂时保留 `sync.rs` 作为旧 API 的适配入口。避免同时改变文件布局、协议和用户行为，便于回归定位。
+原设计提出的 `protocol/outbound/replica/operation/branch` 拆分未按原样采用：`review.rs` 在实现冻结推送计划与本地分支接收时独立成模块，`manifest.rs` 承担了协议职责；其余业务仍集中在 `sync.rs`（约两千行）。后续拆分仍按业务边界推进、不先建立空壳 trait，可在对应业务（如 format 2 协议、操作外壳）迁移时建立模块。避免同时改变文件布局、协议和用户行为，便于回归定位。
 
 ## 8. 界面流程
 
-界面以“快速完成同步”为目标，采用一个窗口、两个页签。内网提供“导出更新 / 导入回传”，外网提供“同步更新 / 回传提交”。精简交互及原型见 [同步 UI 设计](../design-system/core-workbench/DESIGN.md)。
+当前布局（v2.1.10）为单窗口工作区：顶栏是紧凑工具条，左侧是可收起的配置文件列表（直接切换配置，新建/编辑走弹窗，窄窗口自动收起）；主内容区每个角色只有一个页签——“同步与回传”。分支管理和操作记录是左下角的纯图标入口：分支管理打开共享弹窗（内网核对冻结计划后可推送，外网禁用推送），操作记录展开为日志面板。更新包自动匹配传输目录，不再手动选择。精简交互及原型见 [同步 UI 设计](../design-system/core-workbench/DESIGN.md)。
 
 核心的阶段划分用于保证正确性和恢复，不要求用户逐步点击：
 
 - 外网“同步更新”连续完成镜像导入和开发仓库获取引用，不改写本地工作分支。
-- 内网“导入回传”连续完成接收、在现有工作仓库切换到审查分支和整理；正常完成后直接显示可推送分支。
+- 内网“导入回传”连续完成接收，Bundle 落到本地分支（含分叉时的 `-import-N` 备用名）；结果可跳转到分支管理继续整理和推送，不自动切换当前分支。
 - 导出自动选择包类型，正常路径不增加预览确认。全量选项按需展开。
 - 推送保留一次提交确认。提交 OID、旧值及计划仍由核心固定，技术字段默认收起。
 - 中断后显示已完成结果和“继续”动作；冲突、缺包、结果未知等只在发生时提示。
 - 包身份、校验清单、命令日志和恢复细节按需查看，不常驻页面。
+- 回传提交复用分支表展示，Bundle 多选、Patch 单选；选择在搜索、刷新和工作仓库切换时受保护。
 
 已处理的包不再成为新事项；组合动作中某一步失败，不抹去前面已经完成的效果。
 
 ## 9. 迁移计划
 
-### 阶段 A：恢复边界与操作契约，不改包格式
+### 阶段 A：恢复边界与操作契约，不改包格式（大部分完成）
 
-- 首先修复共享状态恢复：导入前检查待恢复导出，恢复只更新归属字段，增加“回传中断 → 导入新包 → 恢复回传”的回归场景。
-- 统一操作 ID、日志与取消，返回结构化错误。
-- 状态读取错误明确展示；补齐开发仓库实际同步状态判断。
-- 引入绑定 OID 的推送计划和远程结果核验。
-- 保持现有命令适配，验证现有往返与界面回归。
+- 首先修复共享状态恢复：导入前检查待恢复导出，恢复只更新归属字段，增加“回传中断 → 导入新包 → 恢复回传”的回归场景。**已完成**：`finish_export` 只按旧值校验提交所属游标，旧 journal 的整份快照不恢复。
+- 统一操作 ID、日志与取消，返回结构化错误。**部分完成**：`OperationRegistry` 单变更槽、`active_operation`/`cancel_operation` 定向取消已实现；统一 requestId/operationId、`getOperation` 与结构化错误仍未实现（LogEvent 无操作 ID）。
+- 状态读取错误明确展示；补齐开发仓库实际同步状态判断。**已完成**：`dev_sync_status` 区分 notCloned/upToDate/needsFetch/unknown，读取失败显式报错。
+- 引入绑定 OID 的推送计划和远程结果核验。**已完成**：`prepare_push`/`execute_push` 冻结计划、`planStale` 复核、`--force-with-lease` 与推送后独立超时核验。
+- 保持现有命令适配，验证现有往返与界面回归。**已完成**：现有测试与 v2.1.10 发版验证通过。
 
-验收：操作期间的后台查询不串日志；确认后分支被外部修改会阻止旧计划；停止批处理不会启动下一仓库。
+验收：操作期间的后台查询不串日志；确认后分支被外部修改会阻止旧计划；停止批处理不会启动下一仓库。（除统一操作 ID 外的验收项已满足。）
 
-### 阶段 B：回传接收与审查记录，不要求双端同时升级
+### 阶段 B：回传接收与审查记录，不要求双端同时升级（大部分完成，采用本地分支模型）
 
-- 为旧包计算本地接收键：规范化现有 manifest 与载荷摘要；无 manifest 的旧 bundle 单独标记为兼容来源并确认项目身份。
-- 引入 inbox refs、接收标记、ReviewItem 和 patch 本地收件目录。
-- 包文件不同路径重复导入返回原记录；已有分支不再被接收动作更新。
-- 保存基准 OID、提交范围与 worktree 恢复信息。
+- 为旧包计算本地接收键：规范化现有 manifest 与载荷摘要；无 manifest 的旧 bundle 单独标记为兼容来源并确认项目身份。**已完成**：`return_key`/`patch_key` 内容身份，改路径重复导入复用记录。
+- 引入 inbox refs、接收标记、ReviewItem 和 patch 本地收件目录。**部分完成**：inbox refs、接收标记（receipt）已实现；但没有显式 ReviewItem——待办由“本地分支 + 推送标记”表达（见 5.4）；patch 走 `git am` 应用与 PatchJournal 恢复，未建本地收件目录。
+- 包文件不同路径重复导入返回原记录；已有分支不再被接收动作更新。**已完成**：同名分支可快进时更新、分叉导入 `-import-N` 备用名；已有本地提交不被覆盖。
+- 保存基准 OID、提交范围与 worktree 恢复信息。**部分完成**：`branch.<name>.syncBase` 基准（含改基准）与 patch 的 worktree 恢复信息已实现；baseOid/rangeStartOid 等快照字段未实现。
 
-验收：首次导入后 rebase，再导入同包仍返回原条目；多分支接收中断不会留下不可解释的半套引用。
+验收：首次导入后 rebase，再导入同包仍返回原条目；多分支接收中断不会留下不可解释的半套引用。（单引用事务 + 引用事务后写状态已满足；引用事务成功后 JSON 写失败的重建以 receipt 复用兜底，applied-ref 精确重建仍属目标态。）
 
-### 阶段 C：协议与快照升级
+### 阶段 C：协议与快照升级（未开始）
 
 - 两端提供 format 2 读写能力，在项目中显式切换发布格式。
 - 新建项目生成 projectId；已有项目核对旧身份后由内网生成稳定 ID，首次 format 2 全量包携带迁移关联。
@@ -311,7 +323,7 @@ ReviewItem 状态为：`received → prepared → integrating → readyToPush �
 
 验收：新旧兼容边界明确，重建有独立流身份，同号异包拒绝，缺包可用全量恢复。
 
-### 阶段 D：性能与维护性
+### 阶段 D：性能与维护性（未开始）
 
 - 启用 refs-only、基线对象保护及按需读取。
 - 按业务拆分模块，清理不再使用的前端规则。
