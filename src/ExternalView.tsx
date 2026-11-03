@@ -3,7 +3,7 @@ import { Radio, RadioGroup, Tabs } from "@heroui/react";
 import { BranchManager } from "./BranchManager";
 import {
   api, baseCandidates, ExportOutcome, MirrorState,
-  OpOutcome, PackageInfo, Profile, RefEntry, releasesOf, shortSha,
+  OpOutcome, PackageInfo, Profile, releasesOf, shortSha,
 } from "./api";
 import { Feedback, FeedbackScope, useRunner } from "./runner";
 import { Icon } from "./icons";
@@ -46,7 +46,7 @@ export function ExternalView({ profile, navigationTarget, branchTarget, onNaviga
   const ready = !!current && !current.loading && !current.stateError && !!state && !mirror.error;
   const mirrorReady = !!mirror.status?.isRepo && !!mirror.status.isBare;
   // Full replacement can delete tags too; branches alone cannot describe its impact.
-  const mirrorRefs = (mirror.status as (typeof mirror.status & { refs?: RefEntry[] }))?.refs;
+  const mirrorRefs = mirror.status?.refs;
   const devReady = !!repo.status?.isRepo && !repo.status.isBare && !repo.loading;
   const needsFull = !state?.repoId || !mirrorReady;
 

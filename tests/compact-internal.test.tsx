@@ -64,7 +64,6 @@ beforeEach(() => {
       case "repo_status": return status((args as { path: string }).path);
       case "sync_state": return { repoId: "project-id", outSeq: 4, lastHeads: [], lastExportAt: null };
       case "list_return_packages": return [];
-      case "list_commits": return [{ ...frozenPlan().commits[0], sha: "preview-oid", subject: "前端预览提交" }];
       case "prepare_push": return frozenPlan();
       case "execute_push": return success;
       case "export_out": return { status: "nothingToSync", message: "没有新更新" };

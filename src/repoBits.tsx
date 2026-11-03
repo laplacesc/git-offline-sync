@@ -1,7 +1,7 @@
 import { AheadBehind } from "./ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Alert, Button, Checkbox, Chip, Input, Label, Table, TextField } from "@heroui/react";
+import { Alert, Button, Checkbox, Chip, Table } from "@heroui/react";
 import type { Selection } from "@heroui/react";
 import { api, BranchInfo, InProgressOp, OpOutcome, RepoStatus, shortSha } from "./api";
 import { Feedback, useRunner } from "./runner";
@@ -152,8 +152,6 @@ export function BranchTable({
   selected,
   onSelect,
   multi,
-  compact = false,
-  isSelectable,
   isSelectionDisabled = false,
   onRebase,
   showPush = false,
@@ -168,8 +166,6 @@ export function BranchTable({
   selected: string[];
   onSelect: (names: string[]) => void;
   multi?: boolean;
-  compact?: boolean;
-  isSelectable?: (b: BranchInfo) => boolean;
   isSelectionDisabled?: boolean;
   onRebase?: (b: BranchInfo) => void;
   showPush?: boolean;
@@ -222,38 +218,36 @@ export function BranchTable({
   };
   // Table 不会替受控调用方清理已删除的 key；空表也必须同步清空选择。
   useEffect(() => {
-    const available = new Set(branches.filter((b) => !isSelectable || isSelectable(b)).map((b) => b.name));
+    const available = new Set(branches.map((b) => b.name));
     const remaining = selected.filter((name) => available.has(name));
     if (remaining.length !== selected.length) onSelect(remaining);
-  }, [branches, selected, onSelect, isSelectable]);
+  }, [branches, selected, onSelect]);
 
   if (branches.length === 0) return <Empty>{emptyText}</Empty>;
 
   const visible = branches.filter((b) => b.name.toLowerCase().includes(query.trim().toLowerCase()));
   const visibleNames = new Set(visible.map((b) => b.name));
   const hiddenSelected = multi ? selected.filter((name) => !visibleNames.has(name)) : [];
-  const disabledKeys = branches.filter((b) => isSelectionDisabled || isSelectable && !isSelectable(b)).map((b) => b.name);
+  const disabledKeys = isSelectionDisabled ? branches.map((b) => b.name) : [];
   const onSelectionChange = (keys: Selection) => {
     if (isSelectionDisabled) return;
     if (keys === "all") {
-      onSelect([...hiddenSelected, ...visible.filter((b) => !disabledKeys.includes(b.name)).map((b) => b.name)]);
+      onSelect([...hiddenSelected, ...visible.map((b) => b.name)]);
     } else {
       onSelect([...hiddenSelected, ...[...keys].map(String).filter((name) => visibleNames.has(name))]);
     }
   };
 
   return (
-    <div className={`branch-table min-w-0 space-y-3${compact ? " branch-table--compact" : ""}`}>
+    <div className="branch-table min-w-0 space-y-3">
       <div className="branch-table-tools">
-        {compact ? <TextField value={query} onChange={setQuery} className="min-w-0 flex-1">
-          <Label className="sr-only">查找分支</Label><Input placeholder="查找分支…" autoComplete="off" />
-        </TextField> : <TextInput label="查找分支" value={query} onChange={setQuery} placeholder="输入分支名" className="min-w-0 flex-1 sm:max-w-sm" mono />}
+        <TextInput label="查找分支" value={query} onChange={setQuery} placeholder="输入分支名" className="min-w-0 flex-1 sm:max-w-sm" mono />
         <div className="branch-table-actions">
-          <span role="status" className={compact ? "branch-count" : "text-sm text-muted"}>
-            {(!compact || query) && `${visible.length} / `}{branches.length} 个分支{!compact && ` · 已选 ${selected.length} 个`}
+          <span role="status" className="text-sm text-muted">
+            {visible.length} / {branches.length} 个分支 · 已选 {selected.length} 个
           </span>
           {query && <ActionIconButton icon="clear" label="清除搜索" onPress={() => setQuery("")} />}
-          {!compact && selected.length > 0 && <ActionIconButton icon="deselect" label="清空选择" isDisabled={isSelectionDisabled} onPress={() => onSelect([])} />}
+          {selected.length > 0 && <ActionIconButton icon="deselect" label="清空选择" isDisabled={isSelectionDisabled} onPress={() => onSelect([])} />}
         </div>
       </div>
       {query && multi && <p className="text-xs text-muted">全选仅作用于当前搜索结果，其他已选分支会保留。</p>}
@@ -270,9 +264,9 @@ export function BranchTable({
           <Table.Header>
             <Table.Column className="w-10">{multi ? <SelectionBox label="全选" /> : null}</Table.Column>
             <Table.Column isRowHeader>分支</Table.Column>
-            {!compact && <Table.Column className="whitespace-nowrap">提交</Table.Column>}
-            <Table.Column className="whitespace-nowrap">{compact ? "基准 / 差异" : "基准"}</Table.Column>
-            {!compact && <Table.Column className="whitespace-nowrap">相对基准</Table.Column>}
+            <Table.Column className="whitespace-nowrap">提交</Table.Column>
+            <Table.Column className="whitespace-nowrap">基准</Table.Column>
+            <Table.Column className="whitespace-nowrap">相对基准</Table.Column>
             {(onRebase || showPush || repoPath) && <Table.Column className="whitespace-nowrap">操作</Table.Column>}
           </Table.Header>
           <Table.Body>
@@ -286,9 +280,9 @@ export function BranchTable({
                   <SelectionBox label={`选择 ${b.name}`} />
                 </Table.Cell>
                 <Table.Cell className="branch-name-cell">
-                  <div className="branch-identity" role={compact ? "group" : undefined} aria-label={compact ? b.name : undefined}>
+                  <div className="branch-identity">
                     <span className="inline-flex max-w-full items-center gap-1">
-                      <span className="min-w-0 font-mono text-[13px]" title={compact ? b.name : undefined}>{compact ? b.name : breakAfterSlash(b.name)}</span>
+                      <span className="min-w-0 font-mono text-[13px]">{breakAfterSlash(b.name)}</span>
                       <Button size="sm" variant="ghost" isIconOnly className="action-icon-button shrink-0"
                         aria-label={`复制分支名 ${b.name}`}
                         onPress={() => copyBranch(b.name)}>
@@ -305,12 +299,11 @@ export function BranchTable({
                         worktree · {baseName(b.worktree)}
                       </Chip>
                     )}
-                    {compact && <span className="branch-commit-id" title={b.sha}>{shortSha(b.sha)}</span>}
                   </div>
                 </Table.Cell>
-                {!compact && <Table.Cell className="whitespace-nowrap">
+                <Table.Cell className="whitespace-nowrap">
                   <Code>{shortSha(b.sha)}</Code>
-                </Table.Cell>}
+                </Table.Cell>
                 <Table.Cell className="branch-base-cell">
                   <Code>origin/{b.base}</Code>
                   {b.baseInferred && (
@@ -318,11 +311,10 @@ export function BranchTable({
                       推断
                     </span>
                   )}
-                  {compact && <AheadBehind ahead={b.ahead} behind={b.behind} />}
                 </Table.Cell>
-                {!compact && <Table.Cell className="whitespace-nowrap">
+                <Table.Cell className="whitespace-nowrap">
                   <AheadBehind ahead={b.ahead} behind={b.behind} />
-                </Table.Cell>}
+                </Table.Cell>
                 {(onRebase || showPush || repoPath) && (
                   <Table.Cell>
                     <div className="flex items-center gap-2 whitespace-nowrap">

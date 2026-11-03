@@ -144,22 +144,6 @@ impl Manifest {
         }
         Ok(())
     }
-
-    pub fn branches(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.refs.iter().filter_map(|r| {
-            r.name
-                .strip_prefix("refs/heads/")
-                .map(|b| (b, r.sha.as_str()))
-        })
-    }
-
-    pub fn tags(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.refs.iter().filter_map(|r| {
-            r.name
-                .strip_prefix("refs/tags/")
-                .map(|t| (t, r.sha.as_str()))
-        })
-    }
 }
 
 pub(crate) fn valid_oid(value: &str) -> bool {

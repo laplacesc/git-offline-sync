@@ -127,7 +127,7 @@ $('#dialog').addEventListener('close', () => {
 });
 function startOperation(title, steps, result) {
   if (state.busy) return;
-  const operation = { title, steps, result, index: 0, completed: [], cancelled: false };
+  const operation = { steps, index: 0, completed: [], cancelled: false };
   state.busy = operation;
   render();
   function tick() {

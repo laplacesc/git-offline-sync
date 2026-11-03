@@ -10,11 +10,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::core::error::SyncError;
 use crate::core::git::{redact, Git, LogEvent, LogKind, OperationGuard, OperationRegistry};
-use crate::core::repo::{CommitInfo, RepoStatus, Worktree};
-use crate::core::sync::{
-    self, DeleteBranchOutcome, ExportOutcome, ImportBackResult, ImportInResult, OpOutcome,
-    PackageInfo,
-};
+use crate::core::repo::RepoStatus;
+use crate::core::sync::{self, DeleteBranchOutcome, ExportOutcome, OpOutcome, PackageInfo};
 
 pub const LOG_EVENT: &str = "git-log";
 
@@ -170,25 +167,6 @@ pub fn cancel_operation(app: AppHandle, id: u64) -> bool {
     app.state::<AppState>().operations.cancel(id)
 }
 
-/// 仓库选择列表只需要一次 rev-parse，不扫描分支与工作树。
-#[tauri::command]
-pub async fn probe_repo(app: AppHandle, path: String) -> CmdResult<bool> {
-    blocking(app, move |g| {
-        let path = p(path);
-        if !path.exists() {
-            return Ok(false);
-        }
-        Ok(g.exec(
-            Some(&path),
-            &crate::args!["rev-parse", "--is-bare-repository"],
-            None,
-            false,
-        )?
-        .ok())
-    })
-    .await
-}
-
 /// 读取同步状态。两端都存在镜像目录里：`<mirror>/offline-sync/state.json`。
 #[tauri::command]
 pub async fn sync_state(
@@ -226,16 +204,6 @@ pub async fn list_return_packages(
         crate::core::review::list_return_packages(g, &p(work_dir), &p(dir))
     })
     .await
-}
-
-#[tauri::command]
-pub async fn list_commits(
-    app: AppHandle,
-    repo: String,
-    from: String,
-    to: String,
-) -> CmdResult<Vec<CommitInfo>> {
-    blocking(app, move |g| sync::list_commits(g, &p(repo), &from, &to)).await
 }
 
 #[tauri::command]
@@ -308,20 +276,6 @@ pub async fn export_out(
 }
 
 #[tauri::command]
-pub async fn import_back(
-    app: AppHandle,
-    work_dir: String,
-    bundle: String,
-    base_branch: String,
-    release_branches: Vec<String>,
-) -> CmdResult<ImportBackResult> {
-    mutating(app, move |g| {
-        sync::import_back(g, &p(work_dir), &p(bundle), &base_branch, &release_branches)
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn import_patches(
     app: AppHandle,
     work_dir: String,
@@ -340,19 +294,6 @@ pub async fn import_patches(
             fetch_upstream,
             None,
         )
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn push_branch(
-    app: AppHandle,
-    work_dir: String,
-    branch: String,
-    force_with_lease: bool,
-) -> CmdResult<OpOutcome> {
-    mutating(app, move |g| {
-        sync::push_branch(g, &p(work_dir), &branch, force_with_lease)
     })
     .await
 }
@@ -431,46 +372,6 @@ pub async fn dev_sync_status(
 }
 
 // ---------------- 外网端 ----------------
-
-#[tauri::command]
-pub async fn import_in(
-    app: AppHandle,
-    bundle: String,
-    mirror_dir: String,
-    allow_gap: bool,
-) -> CmdResult<ImportInResult> {
-    mutating(app, move |g| {
-        sync::import_in(g, &p(bundle), &p(mirror_dir), allow_gap)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn create_dev_repo(
-    app: AppHandle,
-    mirror_dir: String,
-    dev_dir: String,
-    name: String,
-    email: String,
-) -> CmdResult<()> {
-    mutating(app, move |g| {
-        sync::create_dev_repo(g, &p(mirror_dir), &p(dev_dir), &name, &email)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn sync_dev_repo(app: AppHandle, dev_dir: String, mirror_dir: String) -> CmdResult<()> {
-    mutating(app, move |g| {
-        sync::sync_dev_repo(g, &p(dev_dir), &p(mirror_dir))
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn list_worktrees(app: AppHandle, repo: String) -> CmdResult<Vec<Worktree>> {
-    blocking(app, move |g| crate::core::repo::list_worktrees(g, &p(repo))).await
-}
 
 #[tauri::command]
 pub async fn configure_repo(

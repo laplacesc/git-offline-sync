@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { UpdatePanel, VersionChip } from "../src/UpdatePanel";
+import { UpdatePanel } from "../src/UpdatePanel";
 import { RunnerProvider } from "../src/runner";
 import { __resetUpdater, checkForUpdates, downloadUpdate, getUpdateState } from "../src/updater";
 
@@ -40,10 +40,8 @@ async function prepareDownload() {
 it("重启失败后展示待重启摘要和可用重试按钮，点击只重启", async () => {
   const update = await prepareDownload();
   relaunch.mockRejectedValueOnce(new Error("relaunch failed"));
-  const onOpenUpdates = vi.fn();
   render(<RunnerProvider>
     <UpdatePanel currentVersion="2.0.0" />
-    <VersionChip version="2.0.0" onOpenUpdates={onOpenUpdates} />
   </RunnerProvider>);
 
   fireEvent.click(screen.getByRole("button", { name: "重启并安装" }));
@@ -52,8 +50,6 @@ it("重启失败后展示待重启摘要和可用重试按钮，点击只重启"
   expect(screen.getByText("已安装版本 v2.1.0，待重启")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "重启并安装" })).toBeNull();
   expect(screen.queryByRole("button", { name: "检查更新" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "新版本 v2.1.0 已安装，待重启，点击查看" }));
-  expect(onOpenUpdates).toHaveBeenCalledTimes(1);
   expect(check).toHaveBeenCalledTimes(1);
 
   fireEvent.click(retry);

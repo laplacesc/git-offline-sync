@@ -49,7 +49,6 @@ function openBranches(_role: "external" | "internal") {
 function ipc(command: string, args?: Record<string, unknown>): unknown {
   switch (command) {
     case "repo_status": return status(String(args?.path));
-    case "probe_repo": return true;
     case "sync_state": return { repoId: "matching", outSeq: 1, lastHeads: [], lastExportAt: null, lastInSeq: 1, backSeq: 0, lastImportAt: null };
     case "list_packages":
     case "list_return_packages": return [];
@@ -57,7 +56,6 @@ function ipc(command: string, args?: Record<string, unknown>): unknown {
     case "sync_updates": return { imported: null, repositories: (args?.devDirs as string[]).map((path) => ({ path, status: "fetched" })) };
     case "prepare_push": return plan(String(args?.branch));
     case "execute_push": return { ok: true, conflict: false, files: [], message: "pushed", worktree: null };
-    case "list_commits": return [];
     // Rust unit serializes to JSON null, not JavaScript undefined.
     case "init_mirror":
     case "create_branch":
@@ -92,13 +90,13 @@ describe("仓库查询", () => {
     await first;
     await api.repoStatus("/same", "main", []);
     expect(invoke).toHaveBeenCalledTimes(2);
-    const failed = deferred<boolean>();
+    const failed = deferred<RepoStatus>();
     vi.mocked(invoke).mockReturnValueOnce(failed.promise);
-    const probe = api.probeRepo("/same");
-    expect(api.probeRepo("/same")).toBe(probe);
+    const retry = api.repoStatus("/same", "main", []);
+    expect(api.repoStatus("/same", "main", [])).toBe(retry);
     failed.reject(new Error("unavailable"));
-    await expect(probe).rejects.toThrow("unavailable");
-    await expect(api.probeRepo("/same")).resolves.toBe(true);
+    await expect(retry).rejects.toThrow("unavailable");
+    await expect(api.repoStatus("/same", "main", [])).resolves.toEqual(status("/same"));
     expect(invoke).toHaveBeenCalledTimes(4);
   });
 
@@ -238,7 +236,6 @@ describe("提交列表与推送", () => {
   }
   it("行内推送只检查指定分支，确认内容来自后端冻结计划", async () => {
     const prepared = deferred<PushPlan>();
-    const list = vi.spyOn(api, "listCommits");
     vi.spyOn(api, "preparePush").mockReturnValue(prepared.promise);
     renderView("internal");
     openBranches("internal");
@@ -247,7 +244,7 @@ describe("提交列表与推送", () => {
     fireEvent.click(within(screen.getByRole("row", { name: "feature/two" })).getByRole("button", { name: "检查并推送 feature/two" }));
     expect(api.preparePush).toHaveBeenCalledWith("/work", "feature/two", false);
     expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(list).not.toHaveBeenCalled();
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "list_commits")).toBe(false);
     await act(async () => prepared.resolve(plan("feature/two", [commit("frozen-second-commit")])));
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByText("frozen-second-commit")).toBeTruthy();

@@ -605,7 +605,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
         .filter_map(|w| w.branch.clone().map(|b| (b, w.path.clone())))
         .collect();
     let mut counts: HashMap<String, HashMap<String, (u32, u32)>> = HashMap::new();
-    let mut counts_for = |base: &str| -> HashMap<String, (u32, u32)> {
+    let mut counts_for = |base: &str, branch: &str| -> Option<(u32, u32)> {
         counts
             .entry(base.to_string())
             .or_insert_with(|| {
@@ -616,7 +616,8 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
                     HashMap::new()
                 }
             })
-            .clone()
+            .get(branch)
+            .copied()
     };
     for (name, sha) in refs {
         let short = name.trim_start_matches("refs/heads/").to_string();
@@ -627,7 +628,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
                 let best = if short.starts_with("hotfix/") {
                     releases
                         .iter()
-                        .filter_map(|r| counts_for(r).get(&short).map(|c| (c.0, r)))
+                        .filter_map(|r| counts_for(r, &short).map(|c| (c.0, r)))
                         .min_by_key(|(ahead, _)| *ahead)
                         .map(|(_, r)| r.clone())
                 } else {
@@ -636,7 +637,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
                 (best.unwrap_or_else(|| mainline.to_string()), true)
             }
         };
-        let (ahead, behind) = counts_for(&base).get(&short).copied().unwrap_or((0, 0));
+        let (ahead, behind) = counts_for(&base, &short).unwrap_or((0, 0));
         st.branches.push(BranchInfo {
             current: st.current_branch.as_deref() == Some(short.as_str()),
             worktree: in_worktree.get(&short).cloned(),

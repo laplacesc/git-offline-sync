@@ -23,8 +23,6 @@ export type UpdateStatus = "idle" | "checking" | "up-to-date" | "available" | "d
 
 export interface UpdateState {
   status: UpdateStatus;
-  /** 最近一次检查是否由用户手动触发，决定是否展示错误 */
-  manual: boolean;
   availableVersion?: string;
   releaseNotes?: string;
   /** 下载进度 0-100；服务器没给出总大小时为 undefined */
@@ -32,7 +30,7 @@ export interface UpdateState {
   error?: string;
 }
 
-let state: UpdateState = { status: "idle", manual: false };
+let state: UpdateState = { status: "idle" };
 let pending: Update | null = null;
 let installing = false;
 const listeners = new Set<() => void>();
@@ -86,7 +84,7 @@ function replacePending(next: Update | null) {
 /** 检查更新，返回检查结束后的状态。手动检查失败时抛出错误。 */
 export async function checkForUpdates({ manual = false } = {}): Promise<UpdateState> {
   if (state.status === "checking" || state.status === "downloading" || state.status === "downloaded" || state.status === "installed") return state;
-  setState({ status: "checking", manual, error: undefined });
+  setState({ status: "checking", error: undefined });
   try {
     const update = await check({ timeout: manual ? MANUAL_CHECK_TIMEOUT_MS : AUTO_CHECK_TIMEOUT_MS });
     replacePending(update);
@@ -113,7 +111,7 @@ export async function downloadUpdate(): Promise<void> {
   const update = pending;
   let total = 0;
   let received = 0;
-  setState({ status: "downloading", progressPercent: 0, error: undefined, manual: true });
+  setState({ status: "downloading", progressPercent: 0, error: undefined });
   try {
     await update.download((event) => {
       if (event.event === "Started") {
@@ -171,6 +169,6 @@ export function startAutoCheck(): () => void {
 export function __resetUpdater() {
   replacePending(null);
   installing = false;
-  state = { status: "idle", manual: false };
+  state = { status: "idle" };
   listeners.forEach((l) => l());
 }

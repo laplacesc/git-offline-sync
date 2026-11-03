@@ -8,7 +8,6 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     LazyLock, Mutex,
 };
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -947,7 +946,7 @@ pub fn execute_push(g: &Git, plan_id: &str) -> Result<OpOutcome> {
     let pushed = g.exec(Some(work), &remote.command(command), None, true);
     // Cancellation/timeout may occur after the server accepted the ref. A fresh
     // bounded control context is mandatory to establish the actual result.
-    let verification = g.verification().with_timeout(Duration::from_secs(30));
+    let verification = g.verification();
     let observed = remote_oid(&verification, work, &remote, &plan.target_ref);
     match observed {
         Ok(Some(oid)) if oid == plan.source_oid => {

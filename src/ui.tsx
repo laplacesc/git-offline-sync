@@ -61,13 +61,12 @@ export function RefreshButton({ onPress, iconOnly = false }: { onPress: () => un
 }
 
 /** 业务折叠区只组合原生插槽，展开、键盘和焦点由 Disclosure 管理。 */
-export function Fold({ title, children, className = "", defaultExpanded = false }: {
+export function Fold({ title, children, className = "" }: {
   title: ReactNode;
   children: ReactNode;
   className?: string;
-  defaultExpanded?: boolean;
 }) {
-  return <Disclosure className={`fold ${className}`} defaultExpanded={defaultExpanded}>
+  return <Disclosure className={`fold ${className}`}>
     <Disclosure.Heading>
       <Disclosure.Trigger><Disclosure.Indicator />{title}</Disclosure.Trigger>
     </Disclosure.Heading>
@@ -84,7 +83,6 @@ export function AheadBehind({ ahead, behind }: { ahead: number; behind: number }
   </Meter>;
 }
 
-/** Only show observed sequences and the immediate next expected number. */
 export function TextInput({
   label,
   value,
@@ -126,7 +124,6 @@ export function BaseSelect({
   onChange,
   mainline,
   className,
-  hideLabel,
   isDisabled,
 }: {
   label: string;
@@ -136,8 +133,6 @@ export function BaseSelect({
   /** 主线分支名，用于在选项里标注“主线 / 发布” */
   mainline: string;
   className?: string;
-  /** 只保留给读屏器的标签（行内使用时） */
-  hideLabel?: boolean;
   isDisabled?: boolean;
 }) {
   // 记录的基准不在配置档列表里时（如发布分支已从配置中移除），也要能显示
@@ -153,7 +148,7 @@ export function BaseSelect({
       value={value}
       onChange={(k) => k != null && onChange(String(k))}
     >
-      <Label className={hideLabel ? "sr-only" : undefined}>{label}</Label>
+      <Label>{label}</Label>
       <Select.Trigger className="font-mono text-[13px]">
         <Select.Value />
         <Select.Indicator />
@@ -178,7 +173,6 @@ export function PathInput({
   value,
   onChange,
   directory = true,
-  extensions,
   placeholder,
   description,
   id,
@@ -188,7 +182,6 @@ export function PathInput({
   value: string;
   onChange: (v: string) => void;
   directory?: boolean;
-  extensions?: string[];
   placeholder?: string;
   description?: string;
   id?: string;
@@ -199,7 +192,6 @@ export function PathInput({
       directory,
       multiple: false,
       defaultPath: value || undefined,
-      filters: extensions ? [{ name: extensions.join(", "), extensions }] : undefined,
     });
     if (typeof picked === "string") onChange(picked);
   };

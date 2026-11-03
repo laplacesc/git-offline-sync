@@ -94,15 +94,15 @@ describe("分支选择", () => {
     expect((all as HTMLInputElement).indeterminate).toBe(false);
   });
 
-  it("全选跳过禁用分支，单选模式不显示全选框", async () => {
+  it("禁止选择时全选无效，单选模式不显示全选框", async () => {
     function Table({ multi }: { multi: boolean }) {
       const [selected, setSelected] = useState<string[]>([]);
       return <BranchTable branches={branches} selected={selected} onSelect={setSelected} multi={multi}
-        isSelectable={(b) => b.name !== "feature/two"} />;
+        isSelectionDisabled />;
     }
     const { rerender } = render(<Table multi />);
     fireEvent.click(await screen.findByRole("checkbox", { name: "全选" }));
-    expect(screen.getByRole("row", { name: "feature/one" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("row", { name: "feature/one" }).getAttribute("aria-selected")).not.toBe("true");
     expect(screen.getByRole("row", { name: "feature/two" }).getAttribute("aria-selected")).not.toBe("true");
     rerender(<Table multi={false} />);
     expect(screen.queryByRole("checkbox", { name: "全选" })).toBeNull();

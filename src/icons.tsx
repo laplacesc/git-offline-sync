@@ -14,7 +14,6 @@ const paths = {
   refresh: <><path d="M20 7v5h-5M4 17v-5h5M5.1 8a8 8 0 0 1 13.2-3L20 7M4 17l1.7 2A8 8 0 0 0 18.9 16" /></>,
   play: <path d="m8 4 12 8-12 8V4Z" />,
   stop: <rect x="5" y="5" width="14" height="14" rx="2" />,
-  search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></>,
   folder: <path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z" />,
   settings: <><path d="m9 4 1-2h4l1 2 2 1 2-.1 2 3.4-1 1.7v4l1 1.7-2 3.4-2-.1-2 1-1 2h-4l-1-2-2-1-2 .1-2-3.4 1-1.7v-4L3 8.4 5 5l2 .1Z" /><circle cx="12" cy="12" r="3" /></>,
   branch: <><circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="6" r="2" /><path d="M6 7v10M18 8v1a6 6 0 0 1-6 6H6" /></>,
@@ -23,7 +22,6 @@ const paths = {
   trash: <><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" /></>,
   chevron: <path d="m9 5 7 7-7 7" />,
   monitor: <><rect x="3" y="3" width="18" height="13" rx="2" /><path d="M8 21h8m-4-5v5" /></>,
-  globe: <><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></>,
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof paths;

@@ -183,12 +183,9 @@ export interface ImportedBranch {
   commits: CommitInfo[];
 }
 
-export interface ImportBackResult {
+export interface ReturnImportResult {
   branches: ImportedBranch[];
   warnings: string[];
-}
-
-export interface ReturnImportResult extends ImportBackResult {
   outcomes: OpOutcome[];
 }
 
@@ -269,7 +266,6 @@ async function mutate<T>(command: string, args: Record<string, unknown>): Promis
 export const api = {
   activeOperation: () => invoke<number | null>("active_operation"),
   cancelOperation: (id: number) => invoke<boolean>("cancel_operation", { id }),
-  probeRepo: (path: string) => readOnce<boolean>("probe_repo", { path }),
   loadConfig: async (): Promise<AppConfig> => {
     // 兼容旧配置：不再使用或保存深浅主题偏好。
     const { theme: _legacyTheme, ...config } = await invoke<AppConfig & { theme?: unknown }>("load_config");
@@ -286,8 +282,6 @@ export const api = {
     invoke<MirrorState>("sync_state", { path: mirrorDir, external: true }),
   listPackages: (dir: string) => invoke<PackageInfo[]>("list_packages", { dir }),
   listReturnPackages: (workDir: string, dir: string) => invoke<ReturnPackageInfo[]>("list_return_packages", { workDir, dir }),
-  listCommits: (repo: string, from: string, to: string) =>
-    invoke<CommitInfo[]>("list_commits", { repo, from, to }),
   abortOp: (repo: string) => mutate<OpOutcome>("abort_op", { repo }),
   continueOp: (repo: string) => mutate<OpOutcome>("continue_op", { repo }),
   rebaseOnto: (repo: string, branch: string, baseBranch: string, fetchUpstream: boolean) =>
@@ -305,8 +299,6 @@ export const api = {
     fetchUpstream: boolean;
     forceFull: boolean;
   }) => mutate<ExportOutcome>("export_out", a),
-  importBack: (workDir: string, bundle: string, baseBranch: string, releaseBranches: string[]) =>
-    mutate<ImportBackResult>("import_back", { workDir, bundle, baseBranch, releaseBranches }),
   importPatches: (a: {
     workDir: string;
     patchDir: string;
@@ -319,21 +311,12 @@ export const api = {
   preparePush: (workDir: string, branch: string, forceWithLease: boolean) =>
     mutate<PushPlan>("prepare_push", { workDir, branch, forceWithLease }),
   executePush: (planId: string) => mutate<OpOutcome>("execute_push", { planId }),
-  pushBranch: (workDir: string, branch: string, forceWithLease: boolean) =>
-    mutate<OpOutcome>("push_branch", { workDir, branch, forceWithLease }),
 
   // 外网端
   devSyncStatus: (mirrorDir: string, devDirs: string[]) =>
     readOnce<DevSyncStatus[]>("dev_sync_status", { mirrorDir, devDirs }),
   syncUpdates: (a: { bundle: string | null; mirrorDir: string; devDirs: string[]; name: string; email: string }) =>
     mutate<SyncUpdatesResult>("sync_updates", a),
-  importIn: (bundle: string, mirrorDir: string, allowGap: boolean) =>
-    mutate<ImportInResult>("import_in", { bundle, mirrorDir, allowGap }),
-  createDevRepo: (mirrorDir: string, devDir: string, name: string, email: string) =>
-    mutate<null>("create_dev_repo", { mirrorDir, devDir, name, email }),
-  syncDevRepo: (devDir: string, mirrorDir: string) =>
-    mutate<null>("sync_dev_repo", { devDir, mirrorDir }),
-  listWorktrees: (repo: string) => invoke<Worktree[]>("list_worktrees", { repo }),
   configureRepo: (repo: string, name: string, email: string) =>
     mutate<null>("configure_repo", { repo, name, email }),
   createBranch: (repo: string, name: string, baseBranch: string, worktreePath?: string) =>
@@ -374,13 +357,6 @@ export function formatTime(secs: number | null | undefined): string {
 export function newId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
-
-export const KIND_LABEL: Record<BundleKind, string> = {
-  full: "全量",
-  incr: "增量",
-  back: "回传",
-  patch: "补丁",
-};
 
 // ---------- 主线 / 发布分支 ----------
 

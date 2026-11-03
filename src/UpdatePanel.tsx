@@ -67,33 +67,3 @@ export function UpdatePanel({ currentVersion }: { currentVersion?: string }) {
     </div>
   );
 }
-
-/**
- * 侧栏底部的版本号：平时显示当前版本，点击手动检查；
- * 有可用更新时显示提示点和新版本号，点击打开设置页处理更新。
- */
-export function VersionChip({ version, onOpenUpdates, isDisabled }: { version?: string; onOpenUpdates: () => void; isDisabled?: boolean }) {
-  const { notify, run, busy } = useRunner();
-  const s = useUpdateState();
-  const ready = hasUpdate(s);
-  let label = version ? `v${version}` : "";
-  if (ready) label = `v${s.availableVersion}`;
-  let title = ready ? `新版本 v${s.availableVersion} 可用，点击查看` : "检查更新";
-  if (s.status === "installed") title = `新版本 v${s.availableVersion} 已安装，待重启，点击查看`;
-
-  const onPress = async () => {
-    if (ready) return onOpenUpdates();
-    const next = await run("检查更新", () => checkForUpdates({ manual: true }));
-    if (next?.status === "available") onOpenUpdates();
-    else if (next?.status === "up-to-date") notify("ok", "已是最新版本");
-  };
-
-  if (!label) return null;
-  return (
-    <Button size="sm" variant="ghost" className={"version-chip" + (ready ? " has-update" : "")} aria-label={title}
-      isDisabled={!!busy || s.status === "checking" || (isDisabled && ready)} onPress={onPress}>
-      {ready && <span className="update-dot" aria-hidden="true" />}
-      {label}
-    </Button>
-  );
-}

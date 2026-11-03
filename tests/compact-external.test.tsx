@@ -159,9 +159,6 @@ describe("精简外网同步", () => {
 
   it("默认选择本项目下一包，一条后端命令处理导入及所有开发库", async () => {
     vi.mocked(api.listPackages).mockResolvedValue([pkg(5, "full"), pkg(3, "incr", "other"), pkg(2, "full"), pkg(3)]);
-    const importIn = vi.spyOn(api, "importIn");
-    const syncDev = vi.spyOn(api, "syncDevRepo");
-    const clone = vi.spyOn(api, "createDevRepo");
     await loaded();
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["同步与回传"]);
     expect(screen.getByRole("region", { name: "同步内网更新" })).toBeTruthy();
@@ -174,7 +171,6 @@ describe("精简外网同步", () => {
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith({
       bundle: "/usb/matching-3.bundle", mirrorDir: "/mirror", devDirs: ["/dev-one", "/dev-two"], name: "Developer", email: "dev@example.com",
     }));
-    expect(importIn).not.toHaveBeenCalled(); expect(syncDev).not.toHaveBeenCalled(); expect(clone).not.toHaveBeenCalled();
   });
 
   it("首轮读取真实引用差异，镜像已导入时用 null 完成同步", async () => {

@@ -857,7 +857,7 @@ pub fn export_out(
         created_at: now_secs(),
         payload: file_name,
         base_branch: base_branch.to_string(),
-        refs: ref_entries.clone(),
+        refs: ref_entries,
         tool_version: tool_version(),
     };
     state.repo_id = Some(rid);
@@ -2058,7 +2058,7 @@ pub fn export_back(
         created_at: now_secs(),
         payload: file_name,
         base_branch: base_branch.to_string(),
-        refs: refs.clone(),
+        refs,
         tool_version: tool_version(),
     };
     state.back_seq = seq;
@@ -2145,7 +2145,7 @@ pub fn export_patches(
         created_at: now_secs(),
         payload: dir_name,
         base_branch: base_branch.to_string(),
-        refs: refs.clone(),
+        refs,
         tool_version: tool_version(),
     };
     state.back_seq = seq;
