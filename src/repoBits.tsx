@@ -1,10 +1,14 @@
 import { AheadBehind } from "./ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Alert, Button, Checkbox, Chip, Table } from "@heroui/react";
-import type { Selection } from "@heroui/react";
-import { api, BranchInfo, InProgressOp, OpOutcome, RepoStatus, shortSha } from "./api";
-import { Feedback, useRunner } from "./runner";
+import { CircleAlertIcon, CircleCheckIcon } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
+import { Badge } from "./components/ui/badge";
+import { Button } from "./components/ui/button";
+import { Checkbox } from "./components/ui/checkbox";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
+import { api, BranchInfo, InProgressOp, OpOutcome, RepoStatus, Worktree, shortSha } from "./api";
+import { useRunner } from "./runner";
 import { Icon } from "./icons";
 import { ActionButton, ActionIconButton, Code, Empty, TextInput } from "./ui";
 
@@ -26,8 +30,8 @@ export function useRefreshOnFocus(reload: () => unknown) {
     let disposed = false;
     getCurrentWindow()
       .onFocusChanged(({ payload: focused }) => {
-        if (!focused) return;
         clearTimeout(timer);
+        if (!focused || disposed) return;
         timer = setTimeout(() => {
           if (!busyRef.current) reloadRef.current();
         }, 300);
@@ -101,54 +105,53 @@ export function useRepoStatus(path: string | undefined, baseBranch: string, rele
 export function InProgressBanners({
   status,
   onDone,
-  iconOnly = false,
 }: {
   status: RepoStatus | null;
   onDone: (o?: OpOutcome) => void;
-  iconOnly?: boolean;
 }) {
   return (
     <>
       {(status?.inProgressTrees ?? []).map((t) => (
-        <InProgressBanner key={t.path} tree={t} onDone={onDone} iconOnly={iconOnly} />
+        <InProgressBanner key={t.path} tree={t} onDone={onDone} />
       ))}
     </>
   );
 }
 
-function InProgressBanner({ tree, onDone, iconOnly }: { tree: InProgressOp; onDone: (o?: OpOutcome) => void; iconOnly: boolean }) {
+function InProgressBanner({ tree, onDone }: { tree: InProgressOp; onDone: (o?: OpOutcome) => void }) {
   const { run } = useRunner();
   const { op, path, branch, main } = tree;
   return (
-    <Alert status="warning">
-      <Alert.Indicator />
-      <Alert.Content>
-        <Alert.Title>
+    <Alert className="flex items-start gap-3" data-tone="warning" role="alert">
+      <CircleAlertIcon aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <AlertTitle>
           {main ? "仓库中" : `worktree ${baseName(path)}`} 有未完成的 {op}
           {branch && <span className="ml-1 font-mono text-xs">（{branch}）</span>}
-        </Alert.Title>
-        <Alert.Description>
+        </AlertTitle>
+        <AlertDescription>
           在 <code className="font-mono break-all">{path}</code> 里解决冲突并执行{" "}
           <code className="font-mono">git add</code> 后点“继续”，或点“中止”回到操作前的状态。
-        </Alert.Description>
-      </Alert.Content>
+        </AlertDescription>
+      </div>
       <div className="flex shrink-0 items-center gap-2 self-center">
-        <ActionButton size="sm" variant="secondary" isIconOnly={iconOnly} className={iconOnly ? "action-icon-button" : undefined} aria-label="继续"
-          onPress={async () => onDone(await run(`继续 ${op}`, () => api.continueOp(path)))}>
-          {iconOnly ? <span className="inline-flex h-full w-full items-center justify-center" title={`继续 ${op}`}><Icon name="play" /></span> : "继续"}
+        <ActionButton size="sm" variant="secondary"
+          onClick={async () => onDone(await run(`继续 ${op}`, () => api.continueOp(path)))}>
+          继续
         </ActionButton>
-        <ActionButton size="sm" variant="danger-soft" isIconOnly={iconOnly} className={iconOnly ? "action-icon-button" : undefined} aria-label="中止"
-          onPress={async () => onDone(await run(`中止 ${op}`, () => api.abortOp(path)))}>
-          {iconOnly ? <span className="inline-flex h-full w-full items-center justify-center" title={`中止 ${op}`}><Icon name="stop" /></span> : "中止"}
+        <ActionButton size="sm" variant="destructive"
+          onClick={async () => onDone(await run(`中止 ${op}`, () => api.abortOp(path)))}>
+          中止
         </ActionButton>
       </div>
     </Alert>
   );
 }
 
-/** 分支表：HeroUI Table，单选或多选。 */
+/** 分支表：显式受控的单选或多选，搜索保留隐藏的选择。 */
 export function BranchTable({
   branches,
+  dirtyTrees = [],
   selected,
   onSelect,
   multi,
@@ -163,6 +166,7 @@ export function BranchTable({
   emptyText = "没有本地分支",
 }: {
   branches: BranchInfo[];
+  dirtyTrees?: Worktree[];
   selected: string[];
   onSelect: (names: string[]) => void;
   multi?: boolean;
@@ -177,6 +181,13 @@ export function BranchTable({
   emptyText?: string;
 }) {
   const [query, setQuery] = useState("");
+  const [copiedBranch, setCopiedBranch] = useState<string | null>(null);
+  useEffect(() => {
+    if (!copiedBranch) return;
+    const timer = setTimeout(() => setCopiedBranch(null), 2000);
+    return () => clearTimeout(timer);
+  }, [copiedBranch]);
+  const selectionRange = useRef<{ anchor: string; end: string } | null>(null);
   const { notify, confirm, run } = useRunner();
   const deleteBranch = async (b: BranchInfo) => {
     if (!repoPath || b.current || b.worktree) return;
@@ -186,7 +197,7 @@ export function BranchTable({
       confirmLabel: "删除本地分支",
       body: <div className="space-y-3">
         <p>从 <Code>{repoPath}</Code> 删除 <Code>{b.name}</Code>，远程分支保持不变。</p>
-        <p className="text-sm text-muted">如果分支尚未合并，会再次询问是否强制删除。</p>
+        <p className="text-sm text-muted-foreground">如果分支尚未合并，会再次询问是否强制删除。</p>
       </div>,
     });
     if (!approved) return;
@@ -199,19 +210,18 @@ export function BranchTable({
         confirmLabel: "仍然强制删除",
         body: <div className="space-y-3">
           <p><Code>{b.name}</Code> 尚未合并，删除后可能丢失仅保存在此分支上的提交。</p>
-          <p className="text-sm text-muted">仓库：<Code>{repoPath}</Code>；分支提交：<Code>{shortSha(forceAt)}</Code>。请确认这些提交已备份或不再需要。</p>
+          <p className="text-sm text-muted-foreground">仓库：<Code>{repoPath}</Code>；分支提交：<Code>{shortSha(forceAt)}</Code>。请确认这些提交已备份或不再需要。</p>
         </div>,
       });
       if (!forceApproved) return;
       result = await run("强制删除本地分支", () => api.deleteLocalBranch(repoPath, b.name, forceAt));
     }
-    if (result?.status === "deleted") notify("ok", result.message);
     await onDeleted?.();
   };
   const copyBranch = async (name: string) => {
     try {
       await navigator.clipboard.writeText(name);
-      notify("ok", `已复制分支名：${name}`);
+      setCopiedBranch(name);
     } catch {
       notify("error", "复制失败，请选择分支名手动复制");
     }
@@ -228,136 +238,162 @@ export function BranchTable({
   const visible = branches.filter((b) => b.name.toLowerCase().includes(query.trim().toLowerCase()));
   const visibleNames = new Set(visible.map((b) => b.name));
   const hiddenSelected = multi ? selected.filter((name) => !visibleNames.has(name)) : [];
-  const disabledKeys = isSelectionDisabled ? branches.map((b) => b.name) : [];
-  const onSelectionChange = (keys: Selection) => {
+  const selectedVisible = visible.filter((branch) => selected.includes(branch.name));
+  const allVisibleSelected = selectedVisible.length === visible.length;
+  const toggleBranch = (name: string) => {
     if (isSelectionDisabled) return;
-    if (keys === "all") {
-      onSelect([...hiddenSelected, ...visible.map((b) => b.name)]);
-    } else {
-      onSelect([...hiddenSelected, ...[...keys].map(String).filter((name) => visibleNames.has(name))]);
-    }
+    selectionRange.current = { anchor: name, end: name };
+    if (selected.includes(name)) onSelect(selected.filter((selectedName) => selectedName !== name));
+    else onSelect(multi ? [...selected, name] : [name]);
+  };
+  const extendSelection = (name: string, fallbackAnchor = name) => {
+    if (isSelectionDisabled || !multi) return;
+    const range = selectionRange.current;
+    const anchor = range && visibleNames.has(range.anchor) ? range.anchor : fallbackAnchor;
+    const anchorIndex = visible.findIndex((branch) => branch.name === anchor);
+    const endIndex = visible.findIndex((branch) => branch.name === name);
+    const previousEndIndex = range?.anchor === anchor ? visible.findIndex((branch) => branch.name === range.end) : -1;
+    const previousEnd = previousEndIndex < 0 ? anchorIndex : previousEndIndex;
+    const previousRange = new Set(visible.slice(Math.min(anchorIndex, previousEnd), Math.max(anchorIndex, previousEnd) + 1).map((branch) => branch.name));
+    const nextRange = visible.slice(Math.min(anchorIndex, endIndex), Math.max(anchorIndex, endIndex) + 1).map((branch) => branch.name);
+    selectionRange.current = { anchor, end: name };
+    onSelect([...new Set([...selected.filter((selectedName) => !previousRange.has(selectedName)), ...nextRange])]);
+  };
+  const selectVisible = (checked: boolean) => {
+    if (isSelectionDisabled) return;
+    selectionRange.current = null;
+    onSelect([...hiddenSelected, ...(checked ? visible.map((branch) => branch.name) : [])]);
   };
 
   return (
     <div className="branch-table min-w-0 space-y-3">
       <div className="branch-table-tools">
-        <TextInput label="查找分支" value={query} onChange={setQuery} placeholder="输入分支名" className="min-w-0 flex-1 sm:max-w-sm" mono />
+        <TextInput label="查找分支" value={query} onChange={setQuery} placeholder="输入分支名" className="min-w-0 flex-1 sm:max-w-sm" />
         <div className="branch-table-actions">
-          <span role="status" className="text-sm text-muted">
-            {visible.length} / {branches.length} 个分支 · 已选 {selected.length} 个
+          <span role="status" className="text-sm text-muted-foreground">
+            {visible.length} / {branches.length} 个分支 · <span className="branch-selection-count">已选 {selected.length} 个</span>
           </span>
-          {query && <ActionIconButton icon="clear" label="清除搜索" onPress={() => setQuery("")} />}
-          {selected.length > 0 && <ActionIconButton icon="deselect" label="清空选择" isDisabled={isSelectionDisabled} onPress={() => onSelect([])} />}
+          {query && <ActionIconButton icon="clear" label="清除搜索" onClick={() => setQuery("")} />}
+          {selected.length > 0 && <ActionIconButton icon="deselect" label="清空选择" disabled={isSelectionDisabled} onClick={() => { selectionRange.current = null; onSelect([]); }} />}
         </div>
       </div>
-      {query && multi && <p className="text-xs text-muted">全选仅作用于当前搜索结果，其他已选分支会保留。</p>}
-      {visible.length === 0 ? <Empty>没有匹配的分支，请修改搜索条件。</Empty> : <Table variant="secondary">
-      <Table.ScrollContainer>
-        <Table.Content
-          aria-label="本地分支"
-          selectionMode={multi ? "multiple" : "single"}
-          selectionBehavior="toggle"
-          selectedKeys={new Set(selected.filter((name) => visibleNames.has(name)))}
-          onSelectionChange={onSelectionChange}
-          disabledKeys={disabledKeys}
-        >
-          <Table.Header>
-            <Table.Column className="w-10">{multi ? <SelectionBox label="全选" /> : null}</Table.Column>
-            <Table.Column isRowHeader>分支</Table.Column>
-            <Table.Column className="whitespace-nowrap">提交</Table.Column>
-            <Table.Column className="whitespace-nowrap">基准</Table.Column>
-            <Table.Column className="whitespace-nowrap">相对基准</Table.Column>
-            {(onRebase || showPush || repoPath) && <Table.Column className="whitespace-nowrap">操作</Table.Column>}
-          </Table.Header>
-          <Table.Body>
+      {query && multi && <p className="text-xs text-muted-foreground">全选仅作用于当前搜索结果，其他已选分支会保留。</p>}
+      {visible.length === 0 ? <Empty>没有匹配的分支，请修改搜索条件。</Empty> : <Table role="grid" aria-label="本地分支" aria-multiselectable={!!multi}>
+          <TableHeader>
+            <TableRow><TableHead className="w-10">{multi ? <Checkbox aria-label="全选"
+                checked={allVisibleSelected ? true : selectedVisible.length ? "indeterminate" : false}
+                disabled={isSelectionDisabled} onCheckedChange={(checked) => selectVisible(checked === true)} /> : null}</TableHead>
+            <TableHead>分支</TableHead>
+            <TableHead className="whitespace-nowrap">提交</TableHead>
+            <TableHead className="whitespace-nowrap">基准</TableHead>
+            <TableHead className="whitespace-nowrap">相对基准</TableHead>
+            {(onRebase || showPush || repoPath) && <TableHead className="whitespace-nowrap">操作</TableHead>}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {visible.map((b) => (
-              <Table.Row
+              <TableRow
                 key={b.name}
-                id={b.name}
-                className="transition-colors data-[selected=true]:bg-accent/[0.06] data-[selected=true]:[&_td]:bg-transparent"
+                aria-label={b.name}
+                aria-selected={selected.includes(b.name)}
+                aria-disabled={isSelectionDisabled || undefined}
+                data-state={selected.includes(b.name) ? "selected" : undefined}
+                tabIndex={isSelectionDisabled ? -1 : 0}
+                onClick={(event) => {
+                  if ((event.target as HTMLElement).closest("button, input, a, [role='checkbox']")) return;
+                  if (multi && event.shiftKey) extendSelection(b.name);
+                  else toggleBranch(b.name);
+                }}
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget || isSelectionDisabled) return;
+                  if (event.key === " " || event.key === "Enter") {
+                    event.preventDefault();
+                    toggleBranch(b.name);
+                  } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+                    event.preventDefault();
+                    const rows = Array.from(event.currentTarget.parentElement!.querySelectorAll<HTMLTableRowElement>("tr"));
+                    const index = rows.indexOf(event.currentTarget);
+                    const next = event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1
+                      : Math.max(0, Math.min(rows.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+                    if (multi && event.shiftKey) extendSelection(visible[next].name, b.name);
+                    rows[next]?.focus();
+                  } else if (multi && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+                    event.preventDefault();
+                    selectVisible(true);
+                  }
+                }}
+                className="branch-row"
               >
-                <Table.Cell>
-                  <SelectionBox label={`选择 ${b.name}`} />
-                </Table.Cell>
-                <Table.Cell className="branch-name-cell">
+                <TableCell>
+                  <Checkbox aria-label={`选择 ${b.name}`} checked={selected.includes(b.name)}
+                    disabled={isSelectionDisabled} onCheckedChange={() => toggleBranch(b.name)}
+                    onClick={(event) => {
+                      if (multi && event.shiftKey) { event.preventDefault(); extendSelection(b.name); }
+                    }} />
+                </TableCell>
+                <TableCell className="branch-name-cell">
                   <div className="branch-identity">
-                    <span className="inline-flex max-w-full items-center gap-1">
-                      <span className="min-w-0 font-mono text-[13px]">{breakAfterSlash(b.name)}</span>
-                      <Button size="sm" variant="ghost" isIconOnly className="action-icon-button shrink-0"
+                    <span className="branch-name">
+                      <span className="branch-name-text" title={b.name}>{breakAfterSlash(b.name)}</span>
+                      <Button size="icon-sm" variant="ghost" className="action-icon-button shrink-0"
                         aria-label={`复制分支名 ${b.name}`}
-                        onPress={() => copyBranch(b.name)}>
-                        <span title={`复制分支名 ${b.name}`}><Icon name="copy" /></span>
+                        onClick={() => copyBranch(b.name)}>
+                        <span title={copiedBranch === b.name ? "已复制" : `复制分支名 ${b.name}`}>
+                          {copiedBranch === b.name ? <CircleCheckIcon aria-hidden="true" className="size-4" /> : <Icon name="copy" />}
+                          <span className="sr-only" role="status">{copiedBranch === b.name ? "分支名已复制" : ""}</span>
+                        </span>
                       </Button>
                     </span>
-                    {b.current && (
-                      <Chip size="sm" variant="secondary" className="ml-2">
-                        当前
-                      </Chip>
-                    )}
-                    {b.worktree && (
-                      <Chip size="sm" variant="tertiary" className="ml-2" title={b.worktree}>
-                        worktree · {baseName(b.worktree)}
-                      </Chip>
-                    )}
+                    <div className="branch-metadata">
+                      {b.current && <Badge variant="secondary" className="branch-current">当前</Badge>}
+                      {b.worktree && (
+                        <span className="branch-worktree" title={b.worktree}>
+                          worktree · {baseName(b.worktree)}
+                        </span>
+                      )}
+                      {dirtyTrees.some((tree) => tree.branch === b.name) && (
+                        <Badge variant="outline" className="branch-dirty" title="工作树有未提交的修改，回传只包含已提交的内容。">
+                          <CircleAlertIcon aria-hidden="true" />未提交修改
+                        </Badge>
+                      )}
+                    </div>
                   </div>
-                </Table.Cell>
-                <Table.Cell className="whitespace-nowrap">
+                </TableCell>
+                <TableCell className="whitespace-nowrap">
                   <Code>{shortSha(b.sha)}</Code>
-                </Table.Cell>
-                <Table.Cell className="branch-base-cell">
+                </TableCell>
+                <TableCell className="branch-base-cell">
                   <Code>origin/{b.base}</Code>
                   {b.baseInferred && (
-                    <span className="ml-1.5 text-xs text-muted" title="没有记录，按分支名前缀推断">
+                    <span className="branch-base-inferred" title="没有记录，按分支名前缀推断">
                       推断
                     </span>
                   )}
-                </Table.Cell>
-                <Table.Cell className="whitespace-nowrap">
+                </TableCell>
+                <TableCell className="whitespace-nowrap">
                   <AheadBehind ahead={b.ahead} behind={b.behind} />
-                </Table.Cell>
+                </TableCell>
                 {(onRebase || showPush || repoPath) && (
-                  <Table.Cell>
-                    <div className="flex items-center gap-2 whitespace-nowrap">
+                  <TableCell>
+                    <div className="branch-row-actions">
                       {onRebase && <ActionIconButton icon="rebase" label={`Rebase ${b.name}`}
-                        isDisabled={actionsDisabled} title={`整理提交（Rebase）${b.name}`} onPress={() => onRebase(b)} />}
+                        disabled={actionsDisabled} title={`整理提交（Rebase）${b.name}`} onClick={() => onRebase(b)} />}
                       {showPush && <ActionIconButton icon="push" label={`检查并推送 ${b.name}`}
                         title={!onPush ? "仅内网端可推送" : pushDisabled ? "同步记录读取失败，请刷新后重试" : `检查并推送 ${b.name}`}
-                        isDisabled={!onPush || actionsDisabled || pushDisabled} onPress={() => onPush?.(b)} />}
+                        disabled={!onPush || actionsDisabled || pushDisabled} onClick={() => onPush?.(b)} />}
                       {repoPath && <ActionIconButton icon="trash" className="branch-delete"
                         aria-description={b.current || b.worktree ? "分支正在工作树中使用，暂不能删除" : undefined}
                         title={`删除本地分支 ${b.name}${b.current || b.worktree ? "（正在使用，暂不能删除）" : ""}`}
-                        isDisabled={actionsDisabled || b.current || !!b.worktree} label={`删除本地分支 ${b.name}`} onPress={() => deleteBranch(b)} />}
+                        disabled={actionsDisabled || b.current || !!b.worktree} label={`删除本地分支 ${b.name}`} onClick={() => deleteBranch(b)} />}
                     </div>
-                  </Table.Cell>
+                  </TableCell>
                 )}
-              </Table.Row>
+              </TableRow>
             ))}
-          </Table.Body>
-        </Table.Content>
-      </Table.ScrollContainer>
+          </TableBody>
     </Table>}
     </div>
   );
-}
-
-/**
- * 有未提交修改的工作树提示。
- *
- * 分支常常是在 linked worktree 里开发的，只看主工作树会漏掉那里的改动，
- * 而那些改动同样进不了回传包。
- */
-export function DirtyTreesNotice({ status, suffix }: { status: RepoStatus | null; suffix: string }) {
-  const trees = status?.dirtyTrees ?? [];
-  if (trees.length === 0) return null;
-  const names = trees.map((w) => (w.branch ? `${w.branch}（${baseName(w.path)}）` : baseName(w.path)));
-  return <Feedback kind="warn" text={`${names.join("、")} 有未提交的修改，${suffix}\n${trees.map((w) => w.path).join("\n")}`} />;
-}
-
-/** 未绑定分支的工作树无法出现在分支表里，单独展示，避免遗漏。 */
-export function DetachedWorktreesNotice({ status }: { status: RepoStatus | null }) {
-  const trees = (status?.worktrees ?? []).filter((w) => !w.bare && !w.branch);
-  if (trees.length === 0) return null;
-  return <Feedback kind="warn" text={`以下 worktree 未绑定分支（detached HEAD）\n${trees.map((w) => w.path).join("\n")}\n如需回传或推送，请先在对应目录运行 git switch -c feature/你的分支名，再刷新列表。若正在 rebase，请先完成或中止该操作。`} />;
 }
 
 /** 路径的最后一段，用于在分支表里简短标出 worktree */
@@ -369,17 +405,4 @@ function baseName(p: string) {
 function breakAfterSlash(name: string) {
   const parts = name.split("/");
   return parts.flatMap((part, i) => (i < parts.length - 1 ? [part + "/", <wbr key={i} />] : [part]));
-}
-
-/** 表格行选择框：slot="selection" 由 Table 接管选中状态 */
-function SelectionBox({ label }: { label: string }) {
-  return (
-    <Checkbox slot="selection" aria-label={label}>
-      <Checkbox.Content>
-        <Checkbox.Control>
-          <Checkbox.Indicator />
-        </Checkbox.Control>
-      </Checkbox.Content>
-    </Checkbox>
-  );
 }

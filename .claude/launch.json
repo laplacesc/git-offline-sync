@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "git-offline-sync-ui",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev", "--port", "1434"],
+      "port": 1434
+    },
+    {
+      "name": "git-offline-sync-production",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["preview", "--port", "1435", "--strictPort"],
+      "port": 1435
+    }
+  ]
+}

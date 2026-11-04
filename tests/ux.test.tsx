@@ -16,7 +16,7 @@ it("配置表单提交后显示字段错误，错误链接定位到输入框", a
   const save = vi.fn();
   render(<RunnerProvider><ProfileEditor initial={blankProfile("external", "test")} isNew onSave={save} onCancel={() => {}} /></RunnerProvider>);
   fireEvent.click(screen.getByRole("button", { name: "保存", exact: true }));
-  const summary = await screen.findByRole("alert");
+  const summary = await screen.findByRole("alert", { name: "配置校验错误" });
   await waitFor(() => expect(document.activeElement).toBe(summary));
   fireEvent.click(screen.getByRole("link", { name: "名称", exact: true }));
   expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "名称", exact: true }));
@@ -67,7 +67,7 @@ it("搜索内全选与取消全选保留搜索外的选择，清空选择覆盖�
 it("刷新期间展示进度并拦截重复点击", async () => {
   let finish!: () => void;
   const refresh = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
-  render(<RunnerProvider><RefreshButton onPress={refresh} /><OperationStatus /></RunnerProvider>);
+  render(<RunnerProvider><RefreshButton onClick={refresh} /><OperationStatus /></RunnerProvider>);
   fireEvent.click(screen.getByRole("button", { name: "刷新" }));
   const pending = screen.getByRole("button", { name: "刷新" });
   expect(screen.getByText("正在刷新，请稍候…").closest(".operation-popups")).toBeTruthy();

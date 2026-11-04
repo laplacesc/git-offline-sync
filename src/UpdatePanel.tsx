@@ -1,8 +1,9 @@
-import { Button, ProgressBar } from "@heroui/react";
+import { Button } from "./components/ui/button";
+import { Progress } from "./components/ui/progress";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useRunner } from "./runner";
-import { Fold } from "./ui";
-import { checkForUpdates, downloadUpdate, getUpdateState, hasUpdate, installUpdate, RELEASES_URL, useUpdateState } from "./updater";
+import { Fold, Notice } from "./ui";
+import { checkForUpdates, downloadUpdate, hasUpdate, installUpdate, RELEASES_URL, useUpdateState } from "./updater";
 
 function openReleases() {
   void openUrl(RELEASES_URL).catch(() => undefined);
@@ -11,17 +12,10 @@ function openReleases() {
 /** 设置页中的「版本更新」：检查、下载（带进度）、重启安装。 */
 export function UpdatePanel({ currentVersion }: { currentVersion?: string }) {
   const s = useUpdateState();
-  const { notify, run, busy } = useRunner();
+  const { run, busy } = useRunner();
 
-  const onCheck = async () => {
-    const next = await run("检查更新", () => checkForUpdates({ manual: true }));
-    if (next?.status === "up-to-date") notify("ok", "已是最新版本");
-    else if (next?.status === "available") notify("ok", `发现新版本 v${next.availableVersion}`);
-  };
-  const onDownload = async () => {
-    await run("下载更新", downloadUpdate);
-    if (getUpdateState().status === "downloaded") notify("ok", "新版本已下载，重启后完成更新");
-  };
+  const onCheck = () => run("检查更新", () => checkForUpdates({ manual: true }));
+  const onDownload = () => run("下载更新", downloadUpdate);
   const onInstall = () => run(s.status === "installed" ? "重启应用" : "安装更新", installUpdate);
 
   let summary = currentVersion ? `当前版本 v${currentVersion}` : "当前版本未知";
@@ -33,14 +27,15 @@ export function UpdatePanel({ currentVersion }: { currentVersion?: string }) {
       <div className="update-summary">
         {hasUpdate(s) && <span className="update-dot" aria-hidden="true" />}
         <span>{summary}</span>
-        {hasUpdate(s) && currentVersion && <span className="text-muted">（当前 v{currentVersion}）</span>}
+        {s.status === "up-to-date" && <span>已是最新版本</span>}
+        {s.status === "checking" && <span>正在检查…</span>}
+        {hasUpdate(s) && currentVersion && <span className="text-muted-foreground">（当前 v{currentVersion}）</span>}
       </div>
 
+      {s.error && <Notice tone="danger" title={s.error} />}
+      {s.status === "downloaded" && <p>新版本已下载，重启后完成更新。</p>}
       {s.status === "downloading" && (
-        <ProgressBar aria-label="下载进度" value={s.progressPercent ?? 0} isIndeterminate={s.progressPercent === undefined} size="sm">
-          <ProgressBar.Output />
-          <ProgressBar.Track><ProgressBar.Fill /></ProgressBar.Track>
-        </ProgressBar>
+        <Progress aria-label="下载进度" value={s.progressPercent ?? null} max={100} />
       )}
 
       {s.releaseNotes && hasUpdate(s) && (
@@ -51,18 +46,18 @@ export function UpdatePanel({ currentVersion }: { currentVersion?: string }) {
 
       <div className="flex flex-wrap gap-3">
         {(s.status === "idle" || s.status === "up-to-date" || s.status === "error" || s.status === "checking") && (
-          <Button variant="secondary" onPress={onCheck} isDisabled={!!busy || s.status === "checking"}>检查更新</Button>
+          <Button variant="secondary" onClick={onCheck} disabled={!!busy || s.status === "checking"}>检查更新</Button>
         )}
         {s.status === "available" && (
-          <Button variant="primary" onPress={onDownload} isDisabled={!!busy}>下载更新 v{s.availableVersion}</Button>
+          <Button variant="default" onClick={onDownload} disabled={!!busy}>下载更新 v{s.availableVersion}</Button>
         )}
         {s.status === "downloaded" && (
-          <Button variant="primary" onPress={onInstall} isDisabled={!!busy}>重启并安装</Button>
+          <Button variant="default" onClick={onInstall} disabled={!!busy}>重启并安装</Button>
         )}
         {s.status === "installed" && (
-          <Button variant="primary" onPress={onInstall} isDisabled={!!busy}>{s.error ? "重试重启" : "立即重启"}</Button>
+          <Button variant="default" onClick={onInstall} disabled={!!busy}>{s.error ? "重试重启" : "立即重启"}</Button>
         )}
-        <Button variant="tertiary" onPress={openReleases}>查看发布页</Button>
+        <Button variant="ghost" onClick={openReleases}>查看发布页</Button>
       </div>
     </div>
   );

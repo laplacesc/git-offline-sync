@@ -1,11 +1,16 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { Button } from "@heroui/react";
+import { Button } from "./components/ui/button";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useRunner } from "./runner";
 
-/** Windows caption controls. close() preserves CloseRequested and window-state saving. */
-export function WindowControls() {
+/** Windows caption actions; macOS keeps its native traffic lights. */
+export function WindowControls({ inline = false }: { inline?: boolean }) {
+  if (!navigator.userAgent.includes("Windows")) return null;
+  return <NativeWindowControls inline={inline} />;
+}
+
+function NativeWindowControls({ inline }: { inline: boolean }) {
   const [appWindow] = useState(getCurrentWindow);
   const [maximized, setMaximized] = useState(false);
   const { notify } = useRunner();
@@ -41,25 +46,26 @@ export function WindowControls() {
   };
   const maximizeLabel = maximized ? "还原窗口" : "最大化窗口";
   // Keep caption actions reachable above app dialogs, including their focus scopes.
-  return createPortal(<>
-    <div className="window-modal-drag" data-tauri-drag-region="deep" data-react-aria-top-layer aria-hidden="true" />
+  const controls = <>
+    <div className="window-modal-drag" data-tauri-drag-region="deep" aria-hidden="true" />
     <div className="window-controls" role="group" aria-label="窗口控制"
-      data-tauri-drag-region="false" data-react-aria-top-layer>
-      <Button isIconOnly variant="ghost" className="window-control" aria-label="最小化窗口"
-        onPress={() => perform("最小化窗口", () => appWindow.minimize())}>
+      data-tauri-drag-region="false">
+      <Button size="icon" variant="ghost" className="window-control" aria-label="最小化窗口"
+        onClick={() => perform("最小化窗口", () => appWindow.minimize())}>
         <svg aria-hidden="true" viewBox="0 0 12 12" fill="none" stroke="currentColor"><path d="M1 6.5h10" /></svg>
       </Button>
-      <Button isIconOnly variant="ghost" className="window-control" aria-label={maximizeLabel}
-        onPress={() => perform(maximizeLabel, () => appWindow.toggleMaximize())}>
+      <Button size="icon" variant="ghost" className="window-control" aria-label={maximizeLabel}
+        onClick={() => perform(maximizeLabel, () => appWindow.toggleMaximize())}>
         <svg aria-hidden="true" viewBox="0 0 12 12" fill="none" stroke="currentColor">
           {maximized ? <><path d="M3.5 3.5v-2h7v7h-2" /><rect x="1.5" y="3.5" width="7" height="7" /></>
             : <rect x="1.5" y="1.5" width="9" height="9" />}
         </svg>
       </Button>
-      <Button isIconOnly variant="ghost" className="window-control window-close" aria-label="关闭窗口"
-        onPress={() => perform("关闭窗口", () => appWindow.close())}>
+      <Button size="icon" variant="ghost" className="window-control window-close" aria-label="关闭窗口"
+        onClick={() => perform("关闭窗口", () => appWindow.close())}>
         <svg aria-hidden="true" viewBox="0 0 12 12" fill="none" stroke="currentColor"><path d="m1.5 1.5 9 9m0-9-9 9" /></svg>
       </Button>
     </div>
-  </>, document.body);
+  </>;
+  return inline ? controls : createPortal(controls, document.body);
 }

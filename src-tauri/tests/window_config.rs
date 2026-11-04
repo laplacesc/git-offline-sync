@@ -25,15 +25,34 @@ fn windows_chrome_override_preserves_window_geometry_and_native_actions() {
         (base.min_width, base.min_height)
     );
     assert!(base.decorations);
+    assert_eq!(base.title_bar_style, tauri::TitleBarStyle::Overlay);
+    assert!(base.hidden_title);
+    assert!(base.shadow);
     assert!(!windows.decorations);
+    assert!(base.resizable && base.maximizable && base.minimizable && base.closable);
     assert!(windows.resizable && windows.maximizable && windows.minimizable && windows.closable);
     assert!(windows.shadow);
 }
 
 #[test]
-fn caption_permissions_are_limited_to_the_windows_main_window() {
+fn macos_appearance_permissions_are_limited_to_the_main_window() {
     let capability: Value =
-        serde_json::from_str(include_str!("../capabilities/windows-caption.json")).unwrap();
+        serde_json::from_str(include_str!("../capabilities/macos-appearance.json")).unwrap();
+    assert_eq!(capability["platforms"], serde_json::json!(["macOS"]));
+    assert_eq!(capability["windows"], serde_json::json!(["main"]));
+    assert_eq!(
+        capability["permissions"],
+        serde_json::json!([
+            "core:window:allow-set-theme",
+            "core:window:allow-set-background-color"
+        ])
+    );
+}
+
+#[test]
+fn caption_permissions_are_limited_to_the_desktop_main_window() {
+    let capability: Value =
+        serde_json::from_str(include_str!("../capabilities/desktop-caption.json")).unwrap();
     assert_eq!(capability["platforms"], serde_json::json!(["windows"]));
     assert_eq!(capability["windows"], serde_json::json!(["main"]));
     assert_eq!(

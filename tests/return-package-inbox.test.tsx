@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { Button } from "@heroui/react";
-import { ReturnPackageInbox } from "../src/ReturnPackageInbox";
+import { Button } from "../src/components/ui/button";
+import { PackageInbox } from "../src/PackageInbox";
 import type { ReturnPackageInfo } from "../src/api";
 
 function packages(count: number): ReturnPackageInfo[] {
@@ -15,43 +15,72 @@ function packages(count: number): ReturnPackageInfo[] {
   });
 }
 function view(items: ReturnPackageInfo[], imported = vi.fn()) {
-  return <ReturnPackageInbox packages={items} disabled={false}
-    renderDetails={(pkg) => <><h2>{pkg.payloadPath}</h2><Button onPress={() => imported(pkg.payloadPath)}>导入回传</Button></>} />;
+  return <PackageInbox packages={items} disabled={false}
+    renderDetails={(pkg) => <><h2>{pkg.payloadPath}</h2><Button onClick={() => imported(pkg.payloadPath)}>导入回传</Button></>} />;
 }
 beforeEach(() => vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it("大量包每页显示20项，每行都能直接导入", () => {
+it("默认仅展示最新五个，展开后分页，每行都能直接导入", () => {
   const imported = vi.fn();
   render(view(packages(53), imported));
   const list = screen.getByRole("list", { name: "回传包列表" });
+  expect(within(list).getAllByRole("listitem").map((row) => row.getAttribute("aria-label"))).toEqual([
+    "package-0053.bundle", "package-0052.bundle", "package-0051.bundle", "package-0050.bundle", "package-0049.bundle",
+  ]);
+  expect(screen.queryByRole("navigation", { name: "回传包分页" })).toBeNull();
+  const toggle = screen.getByRole("button", { name: "展开其余 48 个回传包" });
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  expect(toggle.getAttribute("aria-controls")).toBe(list.id);
+  fireEvent.click(within(within(list).getByRole("listitem", { name: "package-0050.bundle" })).getByRole("button", { name: "导入回传" }));
+  expect(imported).toHaveBeenCalledExactlyOnceWith("/usb/package-0050.bundle");
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
   expect(within(list).getAllByRole("listitem")).toHaveLength(20);
   expect(screen.getAllByRole("button", { name: "导入回传" })).toHaveLength(20);
   expect(screen.getByText("1–20 / 53")).toBeTruthy();
-  fireEvent.click(within(within(list).getByRole("listitem", { name: "package-0050.bundle" })).getByRole("button", { name: "导入回传" }));
-  expect(imported).toHaveBeenCalledExactlyOnceWith("/usb/package-0050.bundle");
   fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   expect(screen.getByText("21–40 / 53")).toBeTruthy();
   expect(screen.getByRole("heading", { name: "/usb/package-0033.bundle" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   expect(within(list).getAllByRole("listitem")).toHaveLength(13);
   expect(screen.getByRole<HTMLButtonElement>("button", { name: "下一页" }).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "收起", exact: true }));
+  expect(within(list).getAllByRole("listitem")).toHaveLength(5);
+  expect(screen.getByRole("listitem", { name: "package-0053.bundle" })).toBeTruthy();
+  expect(screen.queryByRole("navigation", { name: "回传包分页" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "展开其余 48 个回传包" }));
+  expect(screen.getByText("1–20 / 53")).toBeTruthy();
 });
 
-it("搜索跨越所有分页，支持分支和文件名且无结果可清除", () => {
+it("搜索跨越所有折叠项和分页，支持分支和文件名且无结果可清除", () => {
   render(view(packages(53)));
-  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   const search = screen.getByRole("textbox", { name: "搜索回传包" });
   fireEvent.change(search, { target: { value: "FEATURE/item-0001" } });
-  expect(screen.queryByRole("navigation", { name: "回传包分页" })).toBeNull();
   expect(screen.getByRole("heading", { name: "/usb/package-0001.bundle" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /展开其余/ })).toBeNull();
+  fireEvent.change(search, { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "展开其余 48 个回传包" }));
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   fireEvent.change(search, { target: { value: "package-0052.bundle" } });
+  expect(screen.queryByRole("navigation", { name: "回传包分页" })).toBeNull();
   expect(screen.getByRole("heading", { name: "/usb/package-0052.bundle" })).toBeTruthy();
   fireEvent.change(search, { target: { value: "no-such-package" } });
   expect(screen.getByText("没有匹配的回传包。")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "导入回传" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "清除搜索" }));
   expect(screen.getByText("1–20 / 53")).toBeTruthy();
+});
+
+it("五个以内不显示折叠入口，包的刷新不会自动展开", () => {
+  const { rerender } = render(view(packages(5)));
+  expect(screen.getAllByRole("listitem")).toHaveLength(5);
+  expect(screen.queryByRole("button", { name: /展开其余/ })).toBeNull();
+  rerender(view(packages(6)));
+  expect(screen.getAllByRole("listitem")).toHaveLength(5);
+  expect(screen.getByRole("listitem", { name: "package-0006.bundle" })).toBeTruthy();
+  expect(screen.queryByRole("listitem", { name: "package-0001.bundle" })).toBeNull();
+  expect(screen.getByRole("button", { name: "展开其余 1 个回传包" })).toBeTruthy();
 });
 
 it("不按导入状态筛选，所有包都直接显示导入入口", () => {
