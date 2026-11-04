@@ -83,7 +83,7 @@ describe("内网同步与分支工作流", () => {
       ...status(path), isRepo: path === "/mirror", branches: [],
     }));
     render(view());
-    await waitFor(() => expect(screen.queryByText("正在读取仓库与回传包…")).toBeNull());
+    await waitFor(() => expect(screen.queryByText("正在读取仓库状态…")).toBeNull());
     const imports = screen.getByRole("region", { name: "导入回传" });
     expect(within(imports).getByRole("region", { name: "分支操作" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "导出更新" })).toBeTruthy();
@@ -155,7 +155,7 @@ describe("内网同步与分支工作流", () => {
     await act(async () => pending.resolve({ repoId: "project-id", outSeq: 4, lastHeads: [], lastExportAt: null }));
     await waitFor(() => expect(exportButton.disabled).toBe(false));
     state.mockRejectedValueOnce(new Error("state disk unavailable"));
-    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
     const error = await screen.findByText(/无法读取同步记录，请检查后重试/);
     expect(error.textContent).toContain("Error: state disk unavailable");
     expect(error.closest(".operation-popups")).toBeNull();
@@ -163,7 +163,7 @@ describe("内网同步与分支工作流", () => {
     expect(exportButton.disabled).toBe(true);
     fireEvent.click(exportButton);
     expect(exported).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
     await waitFor(() => expect(exportButton.disabled).toBe(false));
     expect(screen.queryByText(/Error: state disk unavailable/)).toBeNull();
     fireEvent.click(exportButton);
@@ -337,7 +337,8 @@ describe("内网同步与分支工作流", () => {
     expect(screen.queryByRole("button", { name: /^检查并推送 / })).toBeNull();
     packages.mockResolvedValue([returnPackage()]);
     repo.mockImplementation(async (path) => ({ ...status(path), branches: [], isRepo: path === "/mirror", exists: path === "/mirror" }));
-    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新传输目录" }));
     const button = await screen.findByRole<HTMLButtonElement>("button", { name: "导入回传" });
     expect(button.disabled).toBe(true);
     fireEvent.click(button);

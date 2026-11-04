@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api, baseCandidates, defaultBaseFor, prefixWarning, type BranchInfo, type OpOutcome, type Profile, type RepoStatus } from "./api";
 import { Feedback, OperationStatus, useRunner } from "./runner";
 import { BranchTable, useRequestGeneration } from "./repoBits";
-import { ActionButton, ActionIconButton, BaseSelect, Check, Code, CommitList, Fold, Notice, OutcomeView, TextInput } from "./ui";
+import { ActionButton, ActionIconButton, BaseSelect, Check, Code, CommitList, Fold, Notice, OutcomeView, RefreshButton, TextInput } from "./ui";
 import { Icon } from "./icons";
 
 export function BranchManager({ profile, repoPath, status, loading, error, onRefresh, selected, onSelect, multi = true, pushBlocked = false }: {
@@ -96,7 +96,9 @@ export function BranchManager({ profile, repoPath, status, loading, error, onRef
 
   return <>
     <section className="inline-branch-tools" aria-label="分支操作" aria-busy={loading}>
-      <div className="sync-location"><Icon name="folder" /><span className="min-w-0 flex-1 truncate" title={repoPath}>{repoPath || "未配置工作仓库"}</span></div>
+      <div className="sync-location"><Icon name="folder" /><span className="min-w-0 flex-1 truncate" title={repoPath}>{repoPath || "未配置工作仓库"}</span>
+        <RefreshButton label="刷新分支" loading={loading} onClick={onRefresh} />
+      </div>
       {error && <Feedback kind="error" text={`读取工作仓库失败\n${error}`} />}
       {!ready && !loading && !error && <Feedback kind="warn" text={internal ? "请先在项目设置中填写已克隆的内网工作仓库。" : "请先导入更新，再同步开发仓库。"} />}
       <div className="sync-branch-form">

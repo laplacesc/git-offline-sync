@@ -189,14 +189,15 @@ describe("分支选择", () => {
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: /^选择 feature\/two/ }).getAttribute("aria-checked")).toBe("true");
 
     available = [branches[1]];
-    fireEvent.click(screen.getAllByRole("button", { name: "刷新" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
     await waitFor(() => expect(screen.queryByRole("checkbox", { name: /^选择 feature\/one/ })).toBeNull());
     expect((screen.getByRole("checkbox", { name: /^选择 feature\/two/ }) as HTMLInputElement).getAttribute("aria-checked")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "导出回传" }));
     await waitFor(() => expect(exported).toHaveBeenCalledWith(expect.objectContaining({ branches: ["feature/two"] })));
 
     available = [];
-    fireEvent.click(screen.getAllByRole("button", { name: "刷新" })[0]);
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新分支" }).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
     await waitFor(() => expect(screen.queryByRole("checkbox", { name: /^选择 feature\/two/ })).toBeNull());
     expect(screen.queryByRole("checkbox", { name: /^选择 feature\/two/ })).toBeNull();
     expect(screen.getByText("还没有可回传的开发分支。")).toBeTruthy();
@@ -204,7 +205,7 @@ describe("分支选择", () => {
 
     // 仓库切换后即使存在同名分支，也不沿用前一个仓库的选择。
     available = branches;
-    fireEvent.click(screen.getAllByRole("button", { name: "刷新" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /^选择 feature\/one/ }));
     expect((screen.getByRole("checkbox", { name: /^选择 feature\/one/ }) as HTMLInputElement).getAttribute("aria-checked")).toBe("true");
     fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));

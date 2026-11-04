@@ -23,38 +23,55 @@ export function InternalView({ profile, navigationTarget, onNavigate, refreshVer
   const work = useRepoStatus(workDir, base, releases, false);
   const refreshKey = JSON.stringify([profile.id, profile.repoName, profile.remoteUrl, mirrorDir, workDir, base, releases, profile.transferDir]);
   const beginRefresh = useRequestGeneration(refreshKey);
+  const beginPackageRefresh = useRequestGeneration(refreshKey);
   const beginAction = useRequestGeneration(refreshKey);
   const [snapshot, setSnapshot] = useState<{
     key: string; loading: boolean; state: InternalState | null; stateError: string | null;
-    packages: ReturnPackageInfo[]; packageError: string | null;
   } | null>(null);
+  const [packageSnapshot, setPackageSnapshot] = useState<{
+    key: string; loading: boolean; packages: ReturnPackageInfo[]; packageError: string | null;
+  } | null>(null);
+  const currentPackages = packageSnapshot?.key === refreshKey ? packageSnapshot : null;
+  const packagesLoading = !currentPackages || currentPackages.loading;
   const current = snapshot?.key === refreshKey ? snapshot : null;
   const refreshing = !current || current.loading;
   const state = current?.state ?? null;
   const stateError = current?.stateError ?? null;
-  const packageError = current?.packageError ?? null;
-  const packages = (current?.packages ?? []).filter((p) => !p.manifest || p.manifest.kind === "back" || p.manifest.kind === "patch");
+  const packageError = currentPackages?.packageError ?? null;
+  const packages = (currentPackages?.packages ?? []).filter((p) => !p.manifest || p.manifest.kind === "back" || p.manifest.kind === "patch");
   const mirrorReady = !!mirror.status?.isRepo;
   const workReady = !!work.status?.isRepo && !work.status.isBare;
 
-  const reloadAll = useCallback(async () => {
+  const reloadLocal = useCallback(async () => {
     const isCurrent = beginRefresh();
     if (!isCurrent()) return;
     setSnapshot((previous) => previous?.key === refreshKey ? { ...previous, loading: true } : null);
-    const [stateResult, packageResult] = await Promise.all([
+    const [stateResult] = await Promise.all([
       mirrorDir ? api.internalState(mirrorDir).then(
         (state) => ({ state, stateError: null }),
         (error) => ({ state: null, stateError: String(error) }),
       ) : { state: null, stateError: null },
-      api.listReturnPackages(workDir, profile.transferDir).then(
-        (packages) => ({ packages, packageError: null }),
-        (error) => ({ packages: [] as ReturnPackageInfo[], packageError: String(error) }),
-      ),
       mirror.reload(), work.reload(),
     ]);
-    if (isCurrent()) setSnapshot({ key: refreshKey, loading: false, ...stateResult, ...packageResult });
-  }, [beginRefresh, refreshKey, mirrorDir, workDir, profile.transferDir, mirror.reload, work.reload]);
-  useEffect(() => { void reloadAll(); }, [reloadAll, refreshVersion]);
+    if (isCurrent()) setSnapshot({ key: refreshKey, loading: false, ...stateResult });
+  }, [beginRefresh, refreshKey, mirrorDir, mirror.reload, work.reload]);
+  const reloadPackages = useCallback(async () => {
+    const isCurrent = beginPackageRefresh();
+    if (!isCurrent()) return;
+    setPackageSnapshot((previous) => previous?.key === refreshKey ? { ...previous, loading: true } : null);
+    const result = await api.listReturnPackages(workDir, profile.transferDir).then(
+      (packages) => ({ packages, packageError: null }),
+      (error) => ({ packages: [] as ReturnPackageInfo[], packageError: String(error) }),
+    );
+    if (isCurrent()) setPackageSnapshot({ key: refreshKey, loading: false, ...result });
+  }, [beginPackageRefresh, refreshKey, workDir, profile.transferDir]);
+  const reloadAll = useCallback(async () => {
+    // 目录扫描在后台完成，操作结果只等待本地仓库刷新。
+    void reloadPackages();
+    await reloadLocal();
+  }, [reloadPackages, reloadLocal]);
+  useEffect(() => { void reloadLocal(); }, [reloadLocal, refreshVersion]);
+  useEffect(() => { void reloadPackages(); }, [reloadPackages, refreshVersion]);
   useRefreshOnFocus(reloadAll);
 
   const [forceFull, setForceFull] = useState(false);
@@ -77,7 +94,7 @@ export function InternalView({ profile, navigationTarget, onNavigate, refreshVer
   async function initialize() {
     const isCurrent = beginAction();
     await run("建立镜像", () => api.initMirror(profile.remoteUrl?.trim() ?? "", mirrorDir));
-    if (isCurrent()) await reloadAll();
+    if (isCurrent()) await reloadLocal();
   }
   async function exportUpdate() {
     const isCurrent = beginAction();
@@ -155,7 +172,7 @@ export function InternalView({ profile, navigationTarget, onNavigate, refreshVer
             <p className="text-xs text-muted-foreground">补丁会在当前工作仓库切换到所填分支并应用，请保持工作区干净。</p>
           </div>}
         </Fold>
-        <ActionButton variant="default" disabled={!workReady || work.loading || refreshing || !!stateError || !!reason || unfinished}
+        <ActionButton variant="default" disabled={!workReady || work.loading || refreshing || packagesLoading || !!stateError || !!reason || unfinished}
           onClick={() => patch ? receivePatch(pkg) : receive(pkg.payloadPath, !manifest)}>导入回传</ActionButton>
       </div>
     </div>;
@@ -163,11 +180,11 @@ export function InternalView({ profile, navigationTarget, onNavigate, refreshVer
 
   return <><Tabs className="sync-workspace" orientation={navigationTarget ? "vertical" : "horizontal"}
     value="sync" onValueChange={() => onNavigate?.()}>
-    {!current && <Feedback kind="progress" text="正在读取仓库与回传包…" />}
+    {!current && <Feedback kind="progress" text="正在读取仓库状态…" />}
     <WorkspaceNavigation target={navigationTarget}><TabsList className="sync-tabs" aria-label="同步操作">
       <TabsTrigger value="sync" onClick={() => onNavigate?.()}><Icon name="copy" />同步与回传</TabsTrigger>
     </TabsList></WorkspaceNavigation>
-    <div className="sync-location"><Icon name="folder" /><span className="sync-location-label">传输目录</span><span className="min-w-0 flex-1 truncate" title={profile.transferDir}>{profile.transferDir}</span><RefreshButton onClick={reloadAll} /></div>
+    <div className="sync-location"><Icon name="folder" /><span className="sync-location-label">传输目录</span><span className="min-w-0 flex-1 truncate" title={profile.transferDir}>{profile.transferDir}</span><RefreshButton label="刷新传输目录" loading={packagesLoading} onClick={reloadPackages} /></div>
     {stateError && <Feedback kind="error" text={`无法读取同步记录，请检查后重试\n${stateError}`} />}
     <TabsContent className="sync-panel" value="sync" forceMount hidden={false} aria-busy={refreshing || mirror.loading || work.loading}>
       <header className="internal-page-heading"><div><h1>同步与回传</h1></div></header>
@@ -195,21 +212,22 @@ export function InternalView({ profile, navigationTarget, onNavigate, refreshVer
       </div>
       </section>
       <section className="sync-workflow-section internal-return" aria-label="导入回传">
+      {packagesLoading && <Feedback kind="progress" text="正在读取传输目录…" />}
       {packageError && <Feedback kind="error" text={`无法读取传输目录，请检查连接后刷新\n${packageError}`} />}
       <header className="internal-page-heading">
         <div><h2>导入回传</h2><p>回传包导入工作仓库后，可在下方检查分支、整理和推送。</p></div>
         <ActionButton size="sm" variant="ghost" onClick={browse} disabled={!workReady || work.loading || refreshing || !!stateError || unfinished}><Icon name="folder" />选择其他文件…</ActionButton>
       </header>
-      <InProgressBanners status={work.status} onDone={(result) => { if (result) setOutcome(result); void reloadAll(); }} />
-      {!packageError && current && <PackageInbox key={`inbox:${refreshKey}`}
-        packages={packages} disabled={!!busy || work.loading || refreshing} renderDetails={packageRow} />}
+      <InProgressBanners status={work.status} onDone={(result) => { if (result) setOutcome(result); void reloadLocal(); }} />
+      {!packageError && currentPackages && <PackageInbox key={`inbox:${refreshKey}`}
+        packages={packages} disabled={!!busy || work.loading || refreshing || packagesLoading} renderDetails={packageRow} />}
       {returnResult && returnResult.branches.length > 0 && <div className="return-import-result" role="status">
         <div><h2>已导入本地分支</h2><p>回传已导入，可在下方检查分支、整理和推送。</p><p>{returnResult.branches.map((branch) => <Code key={branch.local}>{branch.local}</Code>)}</p></div>
       </div>}
       {returnResult?.warnings.map((warning) => <Feedback key={warning} kind="warn" text={warning} />)}
       {outcome && !outcome.ok && <OutcomeView outcome={outcome} />}
-      <BranchManager key={refreshKey} profile={profile} repoPath={workDir} status={work.status} loading={work.loading || refreshing} error={work.error}
-        onRefresh={reloadAll} selected={selected} onSelect={setSelected} pushBlocked={refreshing || !!stateError} />
+      <BranchManager key={refreshKey} profile={profile} repoPath={workDir} status={work.status} loading={work.loading} error={work.error}
+        onRefresh={reloadLocal} selected={selected} onSelect={setSelected} pushBlocked={refreshing || !!stateError} />
       </section>
     </TabsContent>
   </Tabs>

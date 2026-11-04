@@ -64,19 +64,27 @@ it("搜索内全选与取消全选保留搜索外的选择，清空选择覆盖�
   expect(document.querySelector("output")?.textContent).toBe("");
 });
 
-it("刷新期间展示进度并拦截重复点击", async () => {
+it("刷新按钮使用独立加载状态拦截重复点击，不占用全局任务", async () => {
   let finish!: () => void;
   const refresh = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
-  render(<RunnerProvider><RefreshButton onClick={refresh} /><OperationStatus /></RunnerProvider>);
+  function Harness() {
+    const [loading, setLoading] = useState(false);
+    return <RunnerProvider><RefreshButton loading={loading} onClick={async () => {
+      setLoading(true);
+      await refresh();
+      setLoading(false);
+    }} /><OperationStatus /></RunnerProvider>;
+  }
+  render(<Harness />);
   fireEvent.click(screen.getByRole("button", { name: "刷新" }));
   const pending = screen.getByRole("button", { name: "刷新" });
-  expect(screen.getByText("正在刷新，请稍候…").closest(".operation-popups")).toBeTruthy();
-  expect(screen.queryByText("刷新中…")).toBeNull();
+  expect(screen.queryByText("正在刷新，请稍候…")).toBeNull();
+  expect(pending.getAttribute("aria-busy")).toBe("true");
   expect((pending as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(pending);
   expect(refresh).toHaveBeenCalledTimes(1);
   await act(async () => finish());
-  expect(screen.getByRole("button", { name: "刷新" })).toBeTruthy();
+  expect((pending as HTMLButtonElement).disabled).toBe(false);
 });
 
 it("日志允许暂停和恢复跟随", () => {

@@ -36,13 +36,18 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
   ]);
   const actionKey = JSON.stringify([refreshKey, devDir]);
   const beginRefresh = useRequestGeneration(refreshKey);
+  const beginPackageRefresh = useRequestGeneration(refreshKey);
   const beginAction = useRequestGeneration(actionKey);
   const revision = useRef(0);
   const [snapshot, setSnapshot] = useState<{
     key: string; loading: boolean; state: MirrorState | null; stateError: string | null;
-    packages: PackageInfo[]; packageError: string | null;
     devs: Awaited<ReturnType<typeof api.devSyncStatus>>; devError: string | null;
   } | null>(null);
+  const [packageSnapshot, setPackageSnapshot] = useState<{
+    key: string; loading: boolean; packages: PackageInfo[]; packageError: string | null;
+  } | null>(null);
+  const currentPackages = packageSnapshot?.key === refreshKey ? packageSnapshot : null;
+  const packagesLoading = !currentPackages || currentPackages.loading;
   const current = snapshot?.key === refreshKey ? snapshot : null;
   const state = current?.state;
   const lastIn = state?.lastInSeq ?? 0;
@@ -58,31 +63,44 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
     if (!isCurrent()) return;
     revision.current += 1;
     setSnapshot((previous) => previous?.key === refreshKey ? { ...previous, loading: true } : null);
-    const [stateResult, packageResult, devResult] = await Promise.all([
+    const [stateResult, devResult] = await Promise.all([
       mirrorDir ? api.mirrorState(mirrorDir).then(
         (state) => ({ state, stateError: null }),
         (error) => ({ state: null, stateError: String(error) }),
       ) : { state: null, stateError: null },
-      api.listPackages(profile.transferDir).then(
-        (packages) => ({ packages, packageError: null }),
-        (error) => ({ packages: [] as PackageInfo[], packageError: String(error) }),
-      ),
       mirrorDir ? api.devSyncStatus(mirrorDir, JSON.parse(devReposKey) as string[]).then(
         (devs) => ({ devs, devError: null }),
         (error) => ({ devs: [], devError: String(error) }),
       ) : { devs: [], devError: null },
       mirror.reload(),
     ]);
-    if (isCurrent()) setSnapshot({ key: refreshKey, loading: false, ...stateResult, ...packageResult, ...devResult });
-  }, [beginRefresh, refreshKey, mirrorDir, profile.transferDir, devReposKey, mirror.reload]);
-  const reloadAll = useCallback(async () => {
+    if (isCurrent()) setSnapshot({ key: refreshKey, loading: false, ...stateResult, ...devResult });
+  }, [beginRefresh, refreshKey, mirrorDir, devReposKey, mirror.reload]);
+  const reloadPackages = useCallback(async () => {
+    const isCurrent = beginPackageRefresh();
+    if (!isCurrent()) return;
+    revision.current += 1;
+    setPackageSnapshot((previous) => previous?.key === refreshKey ? { ...previous, loading: true } : null);
+    const result = await api.listPackages(profile.transferDir).then(
+      (packages) => ({ packages, packageError: null }),
+      (error) => ({ packages: [] as PackageInfo[], packageError: String(error) }),
+    );
+    if (isCurrent()) setPackageSnapshot({ key: refreshKey, loading: false, ...result });
+  }, [beginPackageRefresh, refreshKey, profile.transferDir]);
+  const reloadLocal = useCallback(async () => {
     await Promise.all([reloadShared(), repo.reload()]);
   }, [reloadShared, repo.reload]);
+  const reloadAll = useCallback(async () => {
+    // 目录扫描在后台完成，操作结果只等待本地仓库刷新。
+    void reloadPackages();
+    await reloadLocal();
+  }, [reloadPackages, reloadLocal]);
   useEffect(() => { void reloadShared(); }, [reloadShared, refreshVersion]);
   useEffect(() => { void repo.reload(); }, [repo.reload, refreshVersion]);
+  useEffect(() => { void reloadPackages(); }, [reloadPackages, refreshVersion]);
   useRefreshOnFocus(reloadAll);
 
-  const updatePackages = (current?.packages ?? []).filter((p) => {
+  const updatePackages = (currentPackages?.packages ?? []).filter((p) => {
     const m = p.manifest;
     return m && (m.kind === "full" || m.kind === "incr")
       && (state?.repoId ? m.repoId === state.repoId : m.repoName === profile.repoName && m.baseBranch === base);
@@ -96,7 +114,8 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
   const missing = !needsFull && !chosen && packages.some((p) => p.manifest!.seq > lastIn + 1);
   const fullGap = chosen?.manifest?.kind === "full" && !needsFull && chosen.manifest.seq > lastIn + 1;
   const missingImpact = fullGap && !mirrorRefs;
-  const importReady = ready && !!mirrorDir.trim() && !mirror.loading && (!mirror.status?.isRepo || mirrorReady);
+  const importReady = ready && !packagesLoading && !currentPackages?.packageError
+    && !!mirrorDir.trim() && !mirror.loading && (!mirror.status?.isRepo || mirrorReady);
   const canImport = importReady && !missingImpact && !!chosen;
   const canSyncDevs = ready && mirrorReady && !needsFull && !mirror.loading && devRepos.length > 0;
 
@@ -137,7 +156,7 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
       name: profile.userName ?? "", email: profile.userEmail ?? "",
     }));
     if (!isCurrent()) return;
-    await reloadAll();
+    await reloadLocal();
   };
 
   const [selected, setSelected] = useState<string[]>([]);
@@ -179,13 +198,15 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
     await reloadAll();
   };
 
-  let summary = current?.packageError ? "暂时无法检查新包。" : "没有新的更新。";
+  let summary = "没有新的更新。";
   if (needsFull) summary = "请将本项目的全量包放入传输目录后导入。";
   if (chosen) summary = `本次更新 #${chosen.manifest!.seq} · ${chosen.manifest!.kind === "full" ? "全量" : "增量"}`;
+  if (packagesLoading) summary = "正在读取传输目录…";
+  else if (currentPackages.packageError) summary = "暂时无法检查新包。";
   if (!current || current.loading) summary = "正在检查同步状态…";
   else if (current.stateError || mirror.error) summary = "暂时无法检查同步状态，请刷新重试。";
   return <>
-    {!current && <Feedback kind="progress" text="正在检查更新…" />}
+    {!current && <Feedback kind="progress" text="正在读取仓库状态…" />}
     <Tabs className="sync-workspace" orientation={navigationTarget ? "vertical" : "horizontal"}
       value="sync" onValueChange={() => onNavigate?.()}>
     <WorkspaceNavigation target={navigationTarget}><TabsList className="sync-tabs" aria-label="外网同步">
@@ -195,7 +216,7 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
       <Icon name="folder" /><span className="sync-location-label">传输目录</span>
       <span className="min-w-0 flex-1 truncate" title={profile.transferDir}>
         {profile.transferDir}</span>
-      <RefreshButton onClick={reloadAll} />
+      <RefreshButton label="刷新传输目录" loading={packagesLoading} onClick={reloadPackages} />
     </div>
     {!mirrorDir.trim() && <Feedback kind="warn" text="请在项目设置中填写外网镜像目录。" />}
     {!devRepos.length && <Feedback kind="warn" text="请在项目设置中添加开发仓库目录。" />}
@@ -229,9 +250,9 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
           })}
         </div>
       </section>
-      <section className="sync-workflow-section" aria-label="导入更新">
-      {current?.packageError && <Feedback kind="error" text={`无法读取传输目录，请检查连接后刷新。\n${current.packageError}`} />}
-      {current && !current.loading && !current.stateError && <>
+      <section className="sync-workflow-section" aria-label="导入更新" aria-busy={packagesLoading}>
+      {currentPackages?.packageError && <Feedback kind="error" text={`无法读取传输目录，请检查连接后刷新。\n${currentPackages.packageError}`} />}
+      {current && !current.loading && !current.stateError && !packagesLoading && !currentPackages?.packageError && <>
         {missing && <Feedback kind="warn" text={`缺少更新 #${lastIn + 1}，请在传输目录补齐更新包或放入较新的全量包。`} />}
         {missingImpact && <Feedback kind="warn" text="无法读取完整引用影响，请刷新后再使用全量包跳号。" />}
       </>}
@@ -239,8 +260,8 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
         <div><h2>导入更新</h2><p><span>{summary}</span> · 仅导入镜像仓库</p></div>
         <ActionButton size="sm" variant="ghost" onClick={() => importUpdate()} disabled={!canImport}>导入下一包</ActionButton>
       </header>
-      {current && !current.packageError && !current.stateError && <PackageInbox key={`updates:${refreshKey}`}
-        packages={updatePackages} packageLabel="更新包" disabled={!!busy || current.loading}
+      {current && currentPackages && !currentPackages.packageError && !current.stateError && <PackageInbox key={`updates:${refreshKey}`}
+        packages={updatePackages} packageLabel="更新包" disabled={!!busy || current.loading || packagesLoading}
         renderDetails={(pkg) => {
           const manifest = pkg.manifest!;
           const gap = manifest.kind === "full" && !needsFull && manifest.seq > lastIn + 1;
@@ -279,10 +300,10 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
       </header>
       <InProgressBanners status={repo.status} onDone={(outcome) => {
         if (outcome) setOpRes(outcome);
-        void reloadAll();
+        void reloadLocal();
       }} />
       <BranchManager key={actionKey} profile={profile} repoPath={devDir} status={repo.status} loading={repo.loading} error={repo.error}
-        onRefresh={reloadAll} selected={selectedBranches} onSelect={setSelected} multi={mode === "bundle"} />
+        onRefresh={reloadLocal} selected={selectedBranches} onSelect={setSelected} multi={mode === "bundle"} />
 
       {opRes && !opRes.ok && <OutcomeView outcome={opRes} />}
       {exportRes?.status === "exported" && <Fold className="sync-details" title={`查看回传 #${exportRes.seq} 文件`}>

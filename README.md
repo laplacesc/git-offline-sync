@@ -2,7 +2,7 @@
 
 在只能访问内网 GitLab 的机器与外网开发机之间，通过 U 盘传递 Git Bundle 或 Patch。支持 Windows 和 macOS，使用 Rust + Tauri v2 + React + shadcn/ui。
 
-当前版本：**2.1.13**。安装包见 [Releases](https://github.com/laplacesc/git-offline-sync/releases)，开发约定见 [AGENTS.md](AGENTS.md)。
+当前版本：**2.1.14**。安装包见 [Releases](https://github.com/laplacesc/git-offline-sync/releases)，开发约定见 [AGENTS.md](AGENTS.md)。
 
 ## 安装
 
@@ -27,6 +27,8 @@
 外网镜像是裸仓库，可供多个开发仓库共用。开发仓库以镜像为 `origin`，同步只更新远程跟踪引用和标签，保留本地工作分支、暂存区及未提交内容。导入更新后不会自动同步开发仓库。
 
 包列表默认展示最新 5 个，展开后每页 20 个，搜索覆盖全部包。分支列表提供新建分支、worktree、提交身份、Rebase 和删除；内网还可检查并推送。底部“查看记录”展示 Git 命令及输出。
+
+传输目录与本地仓库独立刷新：“刷新传输目录”只扫描更新包或回传包，“刷新分支”只读取本地仓库和同步记录。远程传输目录读取缓慢或失败时，仍可操作本地分支；分支操作完成后不会触发目录扫描。窗口回到前台时，两类数据分别刷新。
 
 ## 分支与回传规则
 
