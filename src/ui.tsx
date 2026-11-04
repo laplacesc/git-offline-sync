@@ -40,9 +40,11 @@ export function ActionIconButton({ icon, label, title = label, className, ...pro
   </ActionButton>;
 }
 
-export function RefreshButton({ onClick }: { onClick: () => unknown }) {
-  const { run } = useRunner();
-  return <ActionButton size="sm" variant="ghost" onClick={() => run("刷新", async () => onClick())}>刷新</ActionButton>;
+export function RefreshButton({ onClick, loading = false, label = "刷新" }: {
+  onClick: () => unknown; loading?: boolean; label?: string;
+}) {
+  return <ActionButton size="sm" variant="ghost" disabled={loading} aria-busy={loading}
+    onClick={() => void onClick()}>{label}</ActionButton>;
 }
 
 export function Fold({ title, children, className }: { title: ReactNode; children: ReactNode; className?: string }) {

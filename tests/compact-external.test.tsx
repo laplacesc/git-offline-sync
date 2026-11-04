@@ -52,7 +52,8 @@ function view(value = profile) {
 }
 async function loaded(value = profile) {
   const result = render(view(value));
-  await waitFor(() => expect(screen.queryByText("正在检查更新…")).toBeNull());
+  await waitFor(() => expect(screen.queryByText("正在读取仓库状态…")).toBeNull());
+  await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新传输目录" }).disabled).toBe(false));
   return result;
 }
 function managedCheckbox(name: string) { return within(screen.getByRole("row", { name, exact: true })).getByRole<HTMLInputElement>("checkbox"); }
@@ -436,7 +437,7 @@ describe("精简外网同步", () => {
   it("刷新移除分支后清理选择并禁止空导出", async () => {
     await loaded(); selectBranch("feature/one");
     vi.mocked(api.repoStatus).mockImplementation(async (path) => ({ ...status(path), branches: [] }));
-    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
     await waitFor(() => expect(screen.queryByRole("checkbox", { name: /^选择 feature\/one/, exact: true })).toBeNull());
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "导出回传" }).disabled).toBe(true);
   });
