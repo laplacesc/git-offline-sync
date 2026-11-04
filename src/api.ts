@@ -277,11 +277,11 @@ export const api = {
   repoStatus: (path: string, baseBranch: string, releaseBranches: string[]) =>
     readOnce<RepoStatus>("repo_status", { path, baseBranch, releaseBranches }),
   internalState: (mirrorDir: string) =>
-    invoke<InternalState>("sync_state", { path: mirrorDir, external: false }),
+    readOnce<InternalState>("sync_state", { path: mirrorDir, external: false }),
   mirrorState: (mirrorDir: string) =>
-    invoke<MirrorState>("sync_state", { path: mirrorDir, external: true }),
-  listPackages: (dir: string) => invoke<PackageInfo[]>("list_packages", { dir }),
-  listReturnPackages: (workDir: string, dir: string) => invoke<ReturnPackageInfo[]>("list_return_packages", { workDir, dir }),
+    readOnce<MirrorState>("sync_state", { path: mirrorDir, external: true }),
+  listPackages: (dir: string) => readOnce<PackageInfo[]>("list_packages", { dir }),
+  listReturnPackages: (workDir: string, dir: string) => readOnce<ReturnPackageInfo[]>("list_return_packages", { workDir, dir }),
   abortOp: (repo: string) => mutate<OpOutcome>("abort_op", { repo }),
   continueOp: (repo: string) => mutate<OpOutcome>("continue_op", { repo }),
   rebaseOnto: (repo: string, branch: string, baseBranch: string, fetchUpstream: boolean) =>

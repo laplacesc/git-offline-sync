@@ -1,3 +1,4 @@
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render as renderComponent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -80,19 +81,17 @@ it("原生日志高度按钮逐步调整高度，在上下限禁用且离开边�
   expect(increase.disabled).toBe(false);
 });
 
-it("原生日志高度按钮支持 Enter 和空格键激活", () => {
+it("原生日志高度按钮支持 Enter 和空格键激活", async () => {
   const { container } = render(<LogPanel lines={[]} clear={() => {}} open setOpen={() => {}} />);
   const panel = container.querySelector<HTMLElement>(".log-panel")!;
   const increase = screen.getByRole("button", { name: "增大日志面板" });
   const decrease = screen.getByRole("button", { name: "缩小日志面板" });
 
   act(() => increase.focus());
-  fireEvent.keyDown(increase, { key: "Enter", code: "Enter" });
-  fireEvent.keyUp(increase, { key: "Enter", code: "Enter" });
+  await userEvent.keyboard("{Enter}");
   expect(panel.style.getPropertyValue("--log-height")).toBe("300px");
   act(() => decrease.focus());
-  fireEvent.keyDown(decrease, { key: " ", code: "Space" });
-  fireEvent.keyUp(decrease, { key: " ", code: "Space" });
+  await userEvent.keyboard(" ");
   expect(panel.style.getPropertyValue("--log-height")).toBe("240px");
 });
 

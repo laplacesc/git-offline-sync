@@ -1,0 +1,65 @@
+/* Neutral surfaces and control hierarchy, informed by PI-Desktop. */
+:root {
+  color-scheme: light;
+  --background: #ffffff;
+  --foreground: #1a1c1f;
+  --sidebar: #f3f3f3;
+  --card: color-mix(in oklab, var(--foreground) 3.5%, transparent);
+  --card-foreground: var(--foreground);
+  --popover: #ffffff;
+  --popover-foreground: var(--foreground);
+  --primary: #1a1c1f;
+  --primary-foreground: #ffffff;
+  --primary-hover: #303030;
+  --secondary: color-mix(in oklab, var(--foreground) 6%, transparent);
+  --secondary-foreground: var(--foreground);
+  --muted: #f9f9f9;
+  --muted-foreground: #5d5d5d;
+  --accent: color-mix(in oklab, var(--foreground) 8%, transparent);
+  --accent-foreground: var(--foreground);
+  --destructive: #b42320;
+  --success: #237b46;
+  --warning: #9b4a16;
+  --border: color-mix(in oklab, var(--foreground) 8%, transparent);
+  --input: transparent;
+  --ring: var(--foreground);
+  --raised: #ffffff;
+  --raised-shadow: 0 1px 2px rgb(0 0 0 / 10%), 0 0 0 0.5px rgb(0 0 0 / 4%);
+  --panel-shadow: 0 16px 48px rgb(0 0 0 / 16%);
+  --modal-backdrop: rgb(0 0 0 / 28%);
+  --radius: 10px;
+  --control-radius: 10px;
+  --panel-radius: 18px;
+  --sidebar-width: 248px;
+  --toolbar-height: 46px;
+  --motion-fast: 150ms;
+  --motion-normal: 200ms;
+  --spring: cubic-bezier(.22, 1, .36, 1);
+  --destructive-soft: color-mix(in oklab, var(--destructive) 10%, transparent);
+  --log-fg: var(--foreground);
+  --log-text: var(--muted-foreground);
+  --log-muted: var(--muted-foreground);
+  --log-border: var(--border);
+  --log-head: var(--card);
+  --log-hover: var(--secondary);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #181818;
+  --foreground: #ffffff;
+  --sidebar: #000000;
+  --popover: #282828;
+  --primary: #ffffff;
+  --primary-foreground: #181818;
+  --primary-hover: #ededed;
+  --muted: #212121;
+  --muted-foreground: #afafaf;
+  --destructive: #ff6764;
+  --success: #40c977;
+  --warning: #ffad78;
+  --raised: #282828;
+  --raised-shadow: 0 1px 2px rgb(0 0 0 / 35%);
+  --panel-shadow: 0 16px 48px rgb(0 0 0 / 55%);
+  --modal-backdrop: rgb(0 0 0 / 45%);
+}

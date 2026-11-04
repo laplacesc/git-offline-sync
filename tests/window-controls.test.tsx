@@ -11,15 +11,16 @@ vi.mock("../src/runner", () => ({ useRunner: () => ({ notify: mocks.notify }) })
 let resize: () => Promise<void>;
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
   mocks.window.minimize.mockResolvedValue(undefined);
   mocks.window.toggleMaximize.mockResolvedValue(undefined);
   mocks.window.close.mockResolvedValue(undefined);
   mocks.window.isMaximized.mockResolvedValue(false);
   mocks.window.onResized.mockImplementation(async (handler) => { resize = handler; return mocks.stop; });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-it("窗口按钮分别调用原生动作，关闭走 CloseRequested 而非直接销毁", async () => {
+it("Windows 透明标题栏按钮调用原生动作，关闭走 CloseRequested", async () => {
   render(<WindowControls />);
   await waitFor(() => expect(mocks.window.isMaximized).toHaveBeenCalled());
   fireEvent.click(screen.getByRole("button", { name: "最小化窗口" }));
@@ -30,6 +31,13 @@ it("窗口按钮分别调用原生动作，关闭走 CloseRequested 而非直接
   expect(mocks.window.close).toHaveBeenCalledTimes(1);
   expect(mocks.window.destroy).not.toHaveBeenCalled();
   expect(screen.getByRole("group", { name: "窗口控制" }).getAttribute("data-tauri-drag-region")).toBe("false");
+});
+
+it("macOS 使用原生红绿灯，不重复渲染自绘按钮或注册尺寸监听", () => {
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X)");
+  render(<WindowControls />);
+  expect(screen.queryByRole("group", { name: "窗口控制" })).toBeNull();
+  expect(mocks.window.onResized).not.toHaveBeenCalled();
 });
 
 it("初始最大化及系统缩放事件会同步还原按钮状态", async () => {

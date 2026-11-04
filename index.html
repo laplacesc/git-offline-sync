@@ -1,27 +1,27 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light" style="color-scheme: light; background-color: #ffffff">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#ffffff" />
+    <title>Git 离线同步</title>
     <script>
       (() => {
         let preference = "system";
         try {
           const saved = localStorage.getItem("app-shell-theme");
           if (saved === "light" || saved === "dark" || saved === "system") preference = saved;
-        } catch { /* Storage can be unavailable in a WebView. */ }
-        const dark = preference === "dark" || (preference === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+        } catch {}
+        const dark = preference === "dark" || (preference === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
         const theme = dark ? "dark" : "light";
+        const background = dark ? "#181818" : "#ffffff";
         document.documentElement.dataset.theme = theme;
         document.documentElement.style.colorScheme = theme;
-        document.documentElement.style.backgroundColor = dark ? "#181818" : "#ffffff";
-        document.querySelector('meta[name="theme-color"]').content = dark ? "#181818" : "#ffffff";
+        document.documentElement.style.backgroundColor = background;
+        document.querySelector('meta[name="theme-color"]').setAttribute("content", background);
       })();
     </script>
-    <title>Git 离线同步</title>
   </head>
-
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

@@ -1,30 +1,22 @@
 import { memo } from "react";
-import { DateField, TimeField } from "@heroui/react";
-import { fromDate, getLocalTimeZone, parseDateTime, toCalendarDateTime, toTime } from "@internationalized/date";
 
-/** Read-only timestamps share HeroUI's date segments without looking editable. */
+/** 只读时间使用原生 time 语义，不引入可编辑日期控件。 */
 export const DateTime = memo(function DateTime({ value, label = "日期时间" }: {
   value: number | string | null | undefined;
   label?: string;
 }) {
-  let date;
-  try {
-    if (value == null || value === "") return <span>—</span>;
-    date = typeof value === "number"
-      ? toCalendarDateTime(fromDate(new Date(value * 1000), getLocalTimeZone()))
-      : parseDateTime(value.length === 10 ? `${value}T00:00` : value.replace(" ", "T"));
-  } catch {
-    return <span>—</span>;
-  }
-  return <DateField className="readonly-date" aria-label={label} value={date} isReadOnly isDisabled granularity="minute" hourCycle={24}>
-    <DateField.Input>{(segment) => <DateField.Segment segment={segment} />}</DateField.Input>
-  </DateField>;
+  if (value == null || value === "") return <span>—</span>;
+  const date = typeof value === "number" ? new Date(value * 1000) : new Date(value.replace(" ", "T"));
+  if (!Number.isFinite(date.getTime())) return <span>—</span>;
+  return <time className="readonly-date" aria-label={label} dateTime={date.toISOString()}>
+    {date.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}
+  </time>;
 });
 
 export const Time = memo(function Time({ value, label = "时间" }: { value: number; label?: string }) {
-  if (!Number.isFinite(value)) return <span>—</span>;
-  const time = toTime(fromDate(new Date(value), getLocalTimeZone()));
-  return <TimeField className="readonly-date" aria-label={label} value={time} isReadOnly isDisabled granularity="second" hourCycle={24}>
-    <TimeField.Input>{(segment) => <TimeField.Segment segment={segment} />}</TimeField.Input>
-  </TimeField>;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return <span>—</span>;
+  return <time className="readonly-date" aria-label={label} dateTime={date.toISOString()}>
+    {date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" })}
+  </time>;
 });

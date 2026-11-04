@@ -3,7 +3,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { api, type Profile } from "../src/api";
 import { useState } from "react";
-import { Tabs } from "@heroui/react";
+import userEvent from "@testing-library/user-event";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "../src/components/ui/tabs";
 import { WorkspaceNavigation } from "../src/ui";
 import { useRunner } from "../src/runner";
 
@@ -11,13 +12,14 @@ const operation = vi.hoisted(() => ({ run: vi.fn<() => Promise<void>>() }));
 const nativeWindow = vi.hoisted(() => ({
   onResized: vi.fn(async () => () => {}), isMaximized: vi.fn(async () => false),
   minimize: vi.fn(async () => {}), toggleMaximize: vi.fn(async () => {}), close: vi.fn(async () => {}),
+  setTheme: vi.fn(async () => {}), setBackgroundColor: vi.fn(async () => {}),
 }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => nativeWindow }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
-vi.mock("../src/ExternalView", () => ({ ExternalView: ({ profile }: { profile: Profile }) => {
+vi.mock("../src/ExternalView", () => ({ ExternalView: ({ profile, refreshVersion }: { profile: Profile; refreshVersion?: number }) => {
   const { run } = useRunner();
-  return <><p>外网工作区：{profile.name}</p><input aria-label="工作区输入" defaultValue="" />
+  return <><p data-refresh-version={refreshVersion}>外网工作区：{profile.name}</p><input aria-label="工作区输入" defaultValue="" />
     <button onClick={() => void run("同步更新", operation.run)}>执行同步</button></>;
 } }));
 vi.mock("../src/InternalView", () => ({ InternalView: ({ profile }: { profile: Profile }) => <p>内网工作区：{profile.name}</p> }));
@@ -28,6 +30,7 @@ const profiles: Profile[] = [
 ];
 
 beforeEach(() => {
+  localStorage.clear();
   operation.run.mockReset().mockResolvedValue(undefined);
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   vi.stubGlobal("matchMedia", (query: string) => ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }));
@@ -37,10 +40,10 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-it("Windows 顶栏可拖动，打开设置后仍可操作窗口按钮", async () => {
+it("Windows 无标题栏，保留拖动区与弹窗中的窗口控制", async () => {
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
   render(<App />);
-  expect(screen.getByRole("banner").getAttribute("data-tauri-drag-region")).toBe("deep");
+  expect(document.querySelector(".window-drag-region")?.getAttribute("data-tauri-drag-region")).toBe("deep");
   expect(document.querySelector(".titlebar-drag")).toBeNull();
   expect(screen.getByRole("group", { name: "窗口控制" })).toBeTruthy();
   fireEvent.click(await screen.findByRole("button", { name: "打开设置" }));
@@ -50,14 +53,20 @@ it("Windows 顶栏可拖动，打开设置后仍可操作窗口按钮", async ()
   expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
 });
 
-it("macOS 合并顶栏可拖动，保留原生窗口按钮和配置列表", async () => {
+it("macOS 保留原生红绿灯，透明标题栏随主题变化", async () => {
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+  vi.stubGlobal("isTauri", true);
   render(<App />);
   await screen.findByRole("button", { name: "打开设置" });
   expect(document.querySelector(".titlebar-drag")).toBeNull();
-  expect(screen.getByRole("banner").getAttribute("data-tauri-drag-region")).toBe("deep");
+  expect(document.querySelector(".window-drag-region")?.getAttribute("data-tauri-drag-region")).toBe("deep");
   expect(screen.queryByRole("group", { name: "窗口控制" })).toBeNull();
   expect(await screen.findByRole("button", { name: "切换配置：基础平台" })).toBeTruthy();
+  await waitFor(() => expect(nativeWindow.setBackgroundColor).toHaveBeenCalledWith("#ffffff"));
+  fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+  fireEvent.click(screen.getByRole("radio", { name: "深色", exact: true }));
+  await waitFor(() => expect(nativeWindow.setTheme).toHaveBeenCalledWith("dark"));
+  expect(nativeWindow.setBackgroundColor).toHaveBeenLastCalledWith("#181818");
 });
 
 it("配置列表直接显示全部配置，当前配置可辨认", async () => {
@@ -65,26 +74,57 @@ it("配置列表直接显示全部配置，当前配置可辨认", async () => {
   expect(await screen.findByRole("button", { name: "切换配置：订单服务" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "切换配置：基础平台" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "切换配置：订单服务" }).getAttribute("aria-current")).toBe("page");
-  fireEvent.click(screen.getByRole("button", { name: "新建配置" }));
+  await userEvent.click(screen.getByRole("button", { name: "新建配置" }));
   expect(screen.getByRole("menuitem", { name: "新建内网端配置" })).toBeTruthy();
   expect(screen.getByRole("menuitem", { name: "新建外网端配置" })).toBeTruthy();
   expect(api.saveConfig).not.toHaveBeenCalled();
 });
 
-it("侧栏外观菜单提供浅色、深色和跟随系统，并保存选择", async () => {
-  localStorage.clear();
+it("配置菜单在窗口失焦时关闭，仍可通过指针再次打开", async () => {
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "外观：跟随系统" }));
-  expect(await screen.findByRole("menuitemradio", { name: "浅色" })).toBeTruthy();
-  expect(screen.getByRole("menuitemradio", { name: "跟随系统" }).getAttribute("aria-checked")).toBe("true");
-  fireEvent.click(screen.getByRole("menuitemradio", { name: "深色" }));
+  const trigger = await screen.findByRole("button", { name: "新建配置" });
+  await userEvent.click(trigger);
+  expect(screen.getByRole("menuitem", { name: "新建外网端配置" })).toBeTruthy();
+  fireEvent(window, new FocusEvent("blur"));
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  await userEvent.click(trigger);
+  expect(screen.getByRole("menuitem", { name: "新建外网端配置" })).toBeTruthy();
+});
+
+it("外观即时应用到主界面和设置，取消设置不会撤销外观偏好", async () => {
+  localStorage.setItem("app-shell-theme", "light");
+  render(<App />);
+  await screen.findByText("外网工作区：订单服务");
+  expect(document.documentElement.dataset.theme).toBe("light");
+  fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+  const dialog = await screen.findByRole("dialog", { name: "设置" });
+  expect(dialog.querySelector(".app-surface")).toBeTruthy();
+  fireEvent.click(screen.getByRole("radio", { name: "深色", exact: true }));
   expect(document.documentElement.dataset.theme).toBe("dark");
   expect(localStorage.getItem("app-shell-theme")).toBe("dark");
-  fireEvent.click(screen.getByRole("button", { name: "外观：深色" }));
-  fireEvent.click(await screen.findByRole("menuitemradio", { name: "跟随系统" }));
-  expect(localStorage.getItem("app-shell-theme")).toBe("system");
-  expect(document.documentElement.dataset.theme).toBe("light");
-  localStorage.clear();
+  fireEvent.click(screen.getByRole("button", { name: "取消", exact: true }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(document.documentElement.dataset.theme).toBe("dark");
+  expect(api.saveConfig).not.toHaveBeenCalled();
+});
+
+it("设置目录的返回入口同样保护未保存的 Git 路径", async () => {
+  render(<App />);
+  const entry = await screen.findByRole("button", { name: "打开设置" });
+  fireEvent.click(entry);
+  expect(screen.getByRole("navigation", { name: "设置导航" })).toBeTruthy();
+  fireEvent.change(screen.getByRole("textbox", { name: "git 可执行文件" }), { target: { value: "/custom/git" } });
+  fireEvent.click(screen.getByRole("button", { name: "返回应用" }));
+  const warning = await screen.findByRole("alertdialog", { name: "放弃未保存的修改？" });
+  fireEvent.click(within(warning).getByRole("button", { name: "继续编辑" }));
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  expect((screen.getByRole("textbox", { name: "git 可执行文件" }) as HTMLInputElement).value).toBe("/custom/git");
+  fireEvent.click(screen.getByRole("button", { name: "返回应用" }));
+  fireEvent.click(await screen.findByRole("button", { name: "放弃修改" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(api.saveConfig).not.toHaveBeenCalled();
+  expect(document.activeElement).toBe(entry);
 });
 
 it("项目列表可收起，记录按需打开并能用 Escape 收起", async () => {
@@ -176,50 +216,56 @@ it("首次使用可以选择内外网角色创建配置", async () => {
   expect(await screen.findByText("选择当前电脑的角色，配置仓库和传输目录。")).toBeTruthy();
   expect(screen.queryByRole("region", { name: "同步流程说明" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "新建内网端配置" }));
-  await waitFor(() => expect((screen.getByRole("radio", { name: /内网端/ }) as HTMLInputElement).checked).toBe(true));
+  await waitFor(() => expect((screen.getByRole("radio", { name: /内网端/ }) as HTMLInputElement).getAttribute("aria-checked")).toBe("true"));
   expect(screen.getByRole("textbox", { name: "GitLab 仓库地址" })).toBeTruthy();
 });
 
 function PortaledWorkspace() {
   const [target, setTarget] = useState<HTMLDivElement | null>(null);
+  const [tab, setTab] = useState("import");
   return <><nav aria-label="任务导航"><div ref={setTarget} /></nav>
-    <Tabs orientation="vertical" defaultSelectedKey="import">
-      <WorkspaceNavigation target={target}><Tabs.List aria-label="同步步骤">
-        <Tabs.Tab id="import">导入内网包</Tabs.Tab><Tabs.Tab id="dev">开发仓库</Tabs.Tab>
-      </Tabs.List></WorkspaceNavigation>
-      <Tabs.Panel id="import" shouldForceMount style={({ isInert }) => ({ display: isInert ? "none" : undefined })}>
+    <Tabs orientation="vertical" value={tab} onValueChange={setTab}>
+      <WorkspaceNavigation target={target}><TabsList aria-label="同步步骤">
+        <TabsTrigger value="import">导入内网包</TabsTrigger><TabsTrigger value="dev">开发仓库</TabsTrigger>
+      </TabsList></WorkspaceNavigation>
+      <TabsContent value="import" forceMount hidden={tab !== "import"}>
         <input aria-label="包路径" defaultValue="/usb" />
-      </Tabs.Panel>
-      <Tabs.Panel id="dev">仓库内容</Tabs.Panel>
+      </TabsContent>
+      <TabsContent value="dev" hidden={tab !== "dev"}>仓库内容</TabsContent>
     </Tabs>
   </>;
 }
 
-it("侧栏页签支持纵向键盘切换，隐藏面板保留输入且导航关联正确", () => {
+it("侧栏页签支持纵向键盘切换，隐藏面板保留输入且导航关联正确", async () => {
   render(<PortaledWorkspace />);
   const navigation = screen.getByRole("navigation", { name: "任务导航" });
   const tabs = within(navigation).getAllByRole("tab");
   fireEvent.change(screen.getByRole("textbox", { name: "包路径" }), { target: { value: "/changed" } });
   act(() => tabs[0].focus());
-  fireEvent.keyDown(tabs[0], { key: "ArrowDown" });
+  await userEvent.keyboard("{ArrowDown}");
   expect(document.activeElement).toBe(tabs[1]);
   expect(tabs[1].getAttribute("aria-selected")).toBe("true");
   expect(screen.getByRole("tabpanel").id).toBe(tabs[1].getAttribute("aria-controls"));
   expect(screen.queryByRole("textbox", { name: "包路径" })).toBeNull();
-  fireEvent.keyDown(tabs[1], { key: "Home" });
+  await userEvent.keyboard("{Home}");
   expect((screen.getByRole("textbox", { name: "包路径" }) as HTMLInputElement).value).toBe("/changed");
 });
 
-it("设置不提供主题切换，保存 Git 路径后重新检测环境", async () => {
+it("设置提供三种外观，保存 Git 路径后重新检测环境并刷新原工作区", async () => {
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "打开设置" }));
-  expect(screen.queryByText("外观", { exact: true })).toBeNull();
-  expect(screen.queryByRole("button", { name: /主题$/ })).toBeNull();
+  const workspace = await screen.findByText("外网工作区：订单服务");
+  expect(workspace.getAttribute("data-refresh-version")).toBe("0");
+  fireEvent.change(screen.getByRole("textbox", { name: "工作区输入" }), { target: { value: "未完成输入" } });
+  fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+  expect(screen.getByRole("radiogroup", { name: "主题" })).toBeTruthy();
+  expect(screen.getByRole("radio", { name: "跟随系统" }).getAttribute("aria-checked")).toBe("true");
   fireEvent.change(screen.getByRole("textbox", { name: "git 可执行文件" }), { target: { value: " /custom/git " } });
   fireEvent.click(screen.getByRole("button", { name: "保存并重新检测" }));
   await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith({ profiles, lastProfileId: "orders", gitPath: "/custom/git" }));
   await waitFor(() => expect(screen.queryByRole("button", { name: "保存并重新检测" })).toBeNull());
   expect(api.environment).toHaveBeenCalledTimes(2);
+  expect(workspace.getAttribute("data-refresh-version")).toBe("1");
+  expect(screen.getByRole<HTMLInputElement>("textbox", { name: "工作区输入" }).value).toBe("未完成输入");
 });
 
 it("取消设置修改后保留原 Git 路径", async () => {
@@ -286,7 +332,7 @@ it("配置保存失败时保留模态和填写内容，重试成功后返回工�
   fireEvent.change(name, { target: { value: "订单新版" } });
   fireEvent.click(within(dialog).getByRole("button", { name: "保存", exact: true }));
   expect((await screen.findByText("保存配置失败：Error: 配置不可写")).closest(".operation-popups")).toBeTruthy();
-  expect(within(dialog).queryByRole("alert")).toBeNull();
+  expect(within(dialog).getByRole("alert").textContent).toContain("配置不可写");
   expect(name.value).toBe("订单新版");
   expect(screen.getByRole("dialog", { name: "编辑同步配置" })).toBeTruthy();
   fireEvent.click(within(dialog).getByRole("button", { name: "保存", exact: true }));
@@ -359,18 +405,18 @@ it("配置读取失败可以重试，并保留 Git 不可用提示", async () =>
   vi.mocked(api.loadConfig).mockRejectedValueOnce(new Error("配置损坏"));
   vi.mocked(api.environment).mockResolvedValue({ os: "macos", git: { Err: "找不到 git" }, configPath: "/config.json", version: "2.0.1" });
   render(<App />);
-  expect((await screen.findByText(/无法读取同步配置/)).closest(".operation-popups")).toBeTruthy();
+  expect((await screen.findByText(/无法读取同步配置/)).closest(".page-content")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "重新读取配置" }));
   expect(await screen.findByText("外网工作区：订单服务")).toBeTruthy();
-  expect((await screen.findByText(/找不到可用的 git/)).closest(".operation-popups")).toBeTruthy();
+  expect((await screen.findByText(/找不到可用的 git/)).closest(".page-content")).toBeTruthy();
 });
 
 it("配置列表可新建外网配置，取消后回到原配置", async () => {
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "新建配置" }));
+  await userEvent.click(await screen.findByRole("button", { name: "新建配置" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "新建外网端配置" }));
   const dialog = await screen.findByRole("dialog", { name: "新建同步配置" });
-  expect((within(dialog).getByRole("radio", { name: /外网端/ }) as HTMLInputElement).checked).toBe(true);
+  expect((within(dialog).getByRole("radio", { name: /外网端/ }) as HTMLInputElement).getAttribute("aria-checked")).toBe("true");
   fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "新建同步配置" })).toBeNull());
   expect(screen.getByText("外网工作区：订单服务")).toBeTruthy();

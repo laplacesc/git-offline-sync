@@ -1,321 +1,179 @@
-/**
- * 应用级组合组件：全部基于 HeroUI v3，只在这里做一次“设计系统化”的组合，
- * 页面代码直接使用这些组件，避免到处写一次性样式。
- */
-import { ReactNode, useId } from "react";
+import { type ComponentProps, type ReactNode, useId } from "react";
 import { createPortal } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
-import {
-  Button,
-  Checkbox,
-  Chip,
-  Description,
-  Disclosure,
-  EmptyState,
-  Input,
-  InputGroup,
-  Label,
-  ListBox,
-  Select,
-  Separator,
-  Surface,
-  TextField,
-  FieldError,
-  Fieldset,
-  Meter,
-  Typography,
-} from "@heroui/react";
-import type { ButtonProps } from "@heroui/react";
+import { ChevronRight } from "lucide-react";
+import { Button } from "./components/ui/button";
+import { Badge } from "./components/ui/badge";
+import { Checkbox } from "./components/ui/checkbox";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
+import { Empty as EmptyState, EmptyDescription } from "./components/ui/empty";
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "./components/ui/field";
+import { Input } from "./components/ui/input";
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "./components/ui/input-group";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
+import { Separator } from "./components/ui/separator";
+import { cn } from "./lib/utils";
 import { DateTime } from "./DateTime";
 import { CommitInfo, OpOutcome, shortSha } from "./api";
 import { useRunner } from "./runner";
 import { Icon, type IconName } from "./icons";
 export { Notice, type Tone } from "./Notice";
 
+type ButtonProps = ComponentProps<typeof Button>;
+
 /** Keep tab state in the workspace while placing its navigation in the app sidebar. */
 export function WorkspaceNavigation({ target, children }: { target?: HTMLElement | null; children: ReactNode }) {
   return target ? createPortal(children, target) : <>{children}</>;
 }
 
-// ---------------------------------------------------------------------------
-// 按钮：全局串行执行，有操作进行中时自动禁用
-// ---------------------------------------------------------------------------
-
-export function ActionButton({ isDisabled, ...props }: ButtonProps) {
+/** 操作进行中时，统一禁用会修改仓库的按钮。 */
+export function ActionButton({ disabled, type = "button", ...props }: ButtonProps) {
   const { busy } = useRunner();
-  return <Button {...props} isDisabled={!!isDisabled || !!busy} />;
+  return <Button {...props} type={type} disabled={disabled || !!busy} />;
 }
 
-export function ActionIconButton({ icon, label, title = label, className = "", ...props }: Omit<ButtonProps, "children" | "isIconOnly" | "aria-label"> & {
+export function ActionIconButton({ icon, label, title = label, className, ...props }: Omit<ButtonProps, "children" | "aria-label"> & {
   icon: IconName; label: string; title?: string;
 }) {
-  return <ActionButton size="sm" variant="ghost" {...props} isIconOnly className={`action-icon-button ${className}`}
-    aria-label={label}><span className="inline-flex h-full w-full items-center justify-center" title={title}><Icon name={icon} /></span></ActionButton>;
+  return <ActionButton variant="ghost" size="icon-sm" {...props} className={cn("action-icon-button", className)} aria-label={label} title={title}>
+    <Icon name={icon} />
+  </ActionButton>;
 }
 
-/** 卡片右上角的刷新按钮：重新读取仓库状态与传输目录 */
-export function RefreshButton({ onPress, iconOnly = false }: { onPress: () => unknown; iconOnly?: boolean }) {
+export function RefreshButton({ onClick }: { onClick: () => unknown }) {
   const { run } = useRunner();
-  if (iconOnly) return <ActionIconButton icon="refresh" label="刷新" onPress={() => run("刷新", async () => onPress())} />;
-  return <ActionButton size="sm" variant="ghost" onPress={() => run("刷新", async () => onPress())}>刷新</ActionButton>;
+  return <ActionButton size="sm" variant="ghost" onClick={() => run("刷新", async () => onClick())}>刷新</ActionButton>;
 }
 
-/** 业务折叠区只组合原生插槽，展开、键盘和焦点由 Disclosure 管理。 */
-export function Fold({ title, children, className = "" }: {
-  title: ReactNode;
-  children: ReactNode;
-  className?: string;
-}) {
-  return <Disclosure className={`fold ${className}`}>
-    <Disclosure.Heading>
-      <Disclosure.Trigger><Disclosure.Indicator />{title}</Disclosure.Trigger>
-    </Disclosure.Heading>
-    <Disclosure.Content><Disclosure.Body>{children}</Disclosure.Body></Disclosure.Content>
-  </Disclosure>;
+export function Fold({ title, children, className }: { title: ReactNode; children: ReactNode; className?: string }) {
+  return <Collapsible className={cn("fold", className)}>
+    <CollapsibleTrigger className="fold-trigger"><ChevronRight aria-hidden />{title}</CollapsibleTrigger>
+    <CollapsibleContent className="fold-content">{children}</CollapsibleContent>
+  </Collapsible>;
 }
 
 export function AheadBehind({ ahead, behind }: { ahead: number; behind: number }) {
   const total = Math.max(ahead + behind, 1);
-  return <Meter className="ahead-behind" aria-label="分支提交差异" aria-valuetext={`落后 ${behind} 个提交，领先 ${ahead} 个提交`} value={behind} maxValue={total}>
-    <span className={behind ? "text-warning" : "text-muted"}>↓{behind}</span>
-    <Meter.Track className="ahead-behind-track" data-has-ahead={ahead > 0}><Meter.Fill className="ahead-behind-fill" /></Meter.Track>
-    <span className={ahead ? "text-success" : "text-muted"}>↑{ahead}</span>
-  </Meter>;
+  return <span className="ahead-behind" role="meter" aria-label="分支提交差异" aria-valuemin={0} aria-valuemax={total} aria-valuenow={behind}
+    aria-valuetext={`落后 ${behind} 个提交，领先 ${ahead} 个提交`}>
+    <span className={behind ? "text-warning" : "text-muted-foreground"}>↓{behind}</span>
+    <span className="ahead-behind-track" data-has-ahead={ahead > 0}><span className="ahead-behind-fill" style={{ width: `${behind / total * 100}%` }} /></span>
+    <span className={ahead ? "text-success" : "text-muted-foreground"}>↑{ahead}</span>
+  </span>;
 }
 
-export function TextInput({
-  label,
-  value,
-  onChange,
-  description,
-  placeholder,
-  isReadOnly,
-  mono,
-  className,
-  id,
-  error,
-}: {
-  label: string;
-  value: string;
-  onChange?: (v: string) => void;
-  description?: string;
-  placeholder?: string;
-  isReadOnly?: boolean;
-  mono?: boolean;
-  className?: string;
-  id?: string;
-  error?: string;
+export function TextInput({ label, value, onChange, description, placeholder, readOnly, className, id, error }: {
+  label: string; value: string; onChange?: (v: string) => void; description?: string; placeholder?: string;
+  readOnly?: boolean; className?: string; id?: string; error?: string;
 }) {
-  return (
-    <TextField id={id} value={value} onChange={onChange} isReadOnly={isReadOnly} isInvalid={!!error} fullWidth className={className}>
-      <Label>{label}</Label>
-      <Input name={id ?? label} autoComplete="off" placeholder={placeholder} spellCheck={false} className={mono ? "font-mono text-[13px]" : undefined} />
-      {description && <Description>{description}</Description>}
-      {error && <FieldError>{error}</FieldError>}
-    </TextField>
-  );
+  const generatedId = useId();
+  const inputId = id ?? generatedId;
+  const describedBy = [description && `${inputId}-description`, error && `${inputId}-error`].filter(Boolean).join(" ") || undefined;
+  return <Field className={className} data-invalid={!!error}>
+    <FieldLabel htmlFor={inputId}>{label}</FieldLabel>
+    <Input id={inputId} name={id ?? label} autoComplete="off" placeholder={placeholder} spellCheck={false} readOnly={readOnly}
+      value={value} onChange={(event) => onChange?.(event.target.value)} aria-invalid={!!error} aria-describedby={describedBy} />
+    {description && <FieldDescription id={`${inputId}-description`}>{description}</FieldDescription>}
+    {error && <FieldError id={`${inputId}-error`}>{error}</FieldError>}
+  </Field>;
 }
 
-/** 基准分支下拉框：主线在前，发布分支在后。 */
-export function BaseSelect({
-  label,
-  value,
-  options,
-  onChange,
-  mainline,
-  className,
-  isDisabled,
-}: {
-  label: string;
-  value: string;
-  options: string[];
-  onChange: (v: string) => void;
-  /** 主线分支名，用于在选项里标注“主线 / 发布” */
-  mainline: string;
-  className?: string;
-  isDisabled?: boolean;
+/** 记录的基准不在配置列表里时，也保留显示。 */
+export function BaseSelect({ label, value, options, onChange, mainline, className, disabled }: {
+  label: string; value: string; options: string[]; onChange: (v: string) => void; mainline: string; className?: string; disabled?: boolean;
 }) {
-  // 记录的基准不在配置档列表里时（如发布分支已从配置中移除），也要能显示
+  const id = useId();
   const all = options.includes(value) || !value ? options : [...options, value];
-  function roleOf(branch: string) {
-    if (branch === mainline) return "主线";
-    return options.includes(branch) ? "发布" : "未配置";
-  }
-  return (
-    <Select
-      className={className ?? "w-56"}
-      isDisabled={isDisabled}
-      value={value}
-      onChange={(k) => k != null && onChange(String(k))}
-    >
-      <Label>{label}</Label>
-      <Select.Trigger className="font-mono text-[13px]">
-        <Select.Value />
-        <Select.Indicator />
-      </Select.Trigger>
-      <Select.Popover>
-        <ListBox>
-          {all.map((b) => (
-            <ListBox.Item key={b} id={b} textValue={b}>
-              <span className="font-mono text-[13px]">{b}</span>
-              <span className="ml-auto pr-6 pl-3 text-xs text-muted">{roleOf(b)}</span>
-              <ListBox.ItemIndicator />
-            </ListBox.Item>
-          ))}
-        </ListBox>
-      </Select.Popover>
+  return <Field className={className ?? "w-56"} data-disabled={disabled}>
+    <FieldLabel htmlFor={id}>{label}</FieldLabel>
+    <Select disabled={disabled} value={value} onValueChange={onChange}>
+      <SelectTrigger id={id} className="w-full"><SelectValue placeholder="选择基准分支" /></SelectTrigger>
+      <SelectContent><SelectGroup>{all.map((branch) => <SelectItem key={branch} value={branch}>
+        <span>{branch}</span>
+        <span className="ml-auto pl-3 text-xs text-muted-foreground">{branch === mainline ? "主线" : options.includes(branch) ? "发布" : "未配置"}</span>
+      </SelectItem>)}</SelectGroup></SelectContent>
     </Select>
-  );
+  </Field>;
 }
 
-export function PathInput({
-  label,
-  value,
-  onChange,
-  directory = true,
-  placeholder,
-  description,
-  id,
-  error,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  directory?: boolean;
-  placeholder?: string;
-  description?: string;
-  id?: string;
-  error?: string;
+export function PathInput({ label, value, onChange, directory = true, placeholder, description, id, error }: {
+  label: string; value: string; onChange: (v: string) => void; directory?: boolean; placeholder?: string; description?: string; id?: string; error?: string;
 }) {
+  const generatedId = useId();
+  const inputId = id ?? generatedId;
+  const describedBy = [description && `${inputId}-description`, error && `${inputId}-error`].filter(Boolean).join(" ") || undefined;
   const browse = async () => {
-    const picked = await open({
-      directory,
-      multiple: false,
-      defaultPath: value || undefined,
-    });
+    const picked = await open({ directory, multiple: false, defaultPath: value || undefined });
     if (typeof picked === "string") onChange(picked);
   };
-  return (
-    <TextField id={id} value={value} onChange={onChange} isInvalid={!!error} fullWidth>
-      <Label>{label}</Label>
-      <InputGroup fullWidth>
-        <InputGroup.Input name={id ?? label} autoComplete="off" placeholder={placeholder} spellCheck={false} className="font-mono text-[13px]" />
-        <InputGroup.Suffix className="pr-1">
-          <Button size="sm" variant="ghost" onPress={browse} aria-label={`浏览${label}`}>
-            浏览…
-          </Button>
-        </InputGroup.Suffix>
-      </InputGroup>
-      {description && <Description>{description}</Description>}
-      {error && <FieldError>{error}</FieldError>}
-    </TextField>
-  );
+  return <Field data-invalid={!!error}>
+    <FieldLabel htmlFor={inputId}>{label}</FieldLabel>
+    <InputGroup>
+      <InputGroupInput id={inputId} name={id ?? label} autoComplete="off" placeholder={placeholder} spellCheck={false} value={value}
+        onChange={(event) => onChange(event.target.value)} aria-invalid={!!error} aria-describedby={describedBy} />
+      <InputGroupAddon align="inline-end"><InputGroupButton size="sm" onClick={browse} aria-label={`浏览${label}`}>浏览…</InputGroupButton></InputGroupAddon>
+    </InputGroup>
+    {description && <FieldDescription id={`${inputId}-description`}>{description}</FieldDescription>}
+    {error && <FieldError id={`${inputId}-error`}>{error}</FieldError>}
+  </Field>;
 }
 
-export function Check({
-  checked,
-  onChange,
-  children,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  children: ReactNode;
-}) {
-  return (
-    <Checkbox isSelected={checked} onChange={onChange}>
-      <Checkbox.Content className="text-sm">
-        <Checkbox.Control>
-          <Checkbox.Indicator />
-        </Checkbox.Control>
-        {children}
-      </Checkbox.Content>
-    </Checkbox>
-  );
+export function Check({ checked, onChange, children }: { checked: boolean; onChange: (v: boolean) => void; children: ReactNode }) {
+  const id = useId();
+  return <Field orientation="horizontal">
+    <Checkbox id={id} checked={checked} onCheckedChange={(value) => onChange(value === true)} />
+    <FieldLabel htmlFor={id}>{children}</FieldLabel>
+  </Field>;
 }
-
-// ---------------------------------------------------------------------------
-// 状态展示
-// ---------------------------------------------------------------------------
 
 export function OutcomeView({ outcome }: { outcome: OpOutcome }) {
   if (outcome.ok || outcome.files.length === 0) return null;
   return <div className="mt-1 flex flex-wrap items-center gap-1.5">
     <span>{outcome.conflict ? "冲突文件：" : "相关文件："}</span>
-    {outcome.files.map((file) => <Chip key={file} size="sm" variant="secondary" className="font-mono">{file}</Chip>)}
+    {outcome.files.map((file) => <Badge key={file} variant="secondary" className="font-mono">{file}</Badge>)}
   </div>;
 }
 
 export function Empty({ children }: { children: ReactNode }) {
-  return <EmptyState className="px-0 py-1">{children}</EmptyState>;
+  return <EmptyState className="empty-state border-0 px-0 py-1"><EmptyDescription>{children}</EmptyDescription></EmptyState>;
 }
 
-/** 带分隔线的只读列表容器 */
 export function ListSurface({ children }: { children: ReactNode[] }) {
-  return (
-    <Surface variant="default" className="list-surface overflow-hidden rounded-2xl border border-border">
-      {children.map((c, i) => (
-        <div key={i}>
-          {i > 0 && <Separator />}
-          {c}
-        </div>
-      ))}
-    </Surface>
-  );
+  return <div className="list-surface overflow-hidden rounded-lg border">
+    {children.map((child, index) => <div key={index}>{index > 0 && <Separator />}{child}</div>)}
+  </div>;
 }
 
 export function CommitList({ commits, empty = "没有提交" }: { commits: CommitInfo[]; empty?: string }) {
   if (commits.length === 0) return <Empty>{empty}</Empty>;
-  return (
-    <div className="max-h-72 overflow-y-auto rounded-2xl">
-      <ListSurface>
-        {commits.map((c) => (
-          <div key={c.sha} className="commit-row">
-            <Code className="commit-sha">{shortSha(c.sha)}</Code>
-            <span className="text-sm font-medium">{c.subject}</span>
-            <div className="commit-author text-xs text-muted">
-              {c.author} &lt;{c.email}&gt; · <DateTime value={c.date} label="提交时间" />
-            </div>
-          </div>
-        ))}
-      </ListSurface>
-    </div>
-  );
+  return <div className="max-h-72 overflow-y-auto rounded-lg"><ListSurface>
+    {commits.map((commit) => <div key={commit.sha} className="commit-row">
+      <Code className="commit-sha">{shortSha(commit.sha)}</Code>
+      <span className="text-sm font-medium">{commit.subject}</span>
+      <div className="commit-author text-xs text-muted-foreground">{commit.author} &lt;{commit.email}&gt; · <DateTime value={commit.date} label="提交时间" /></div>
+    </div>)}
+  </ListSurface></div>;
 }
 
-export function Code({ children, className = "" }: { children: ReactNode; className?: string }) {
-  return (
-    <Typography.Code className={"workbench-code font-mono text-[12px] break-all text-foreground " + className}>
-      {children}
-    </Typography.Code>
-  );
+export function Code({ children, className }: { children: ReactNode; className?: string }) {
+  return <code className={cn("workbench-code font-mono text-xs break-all", className)}>{children}</code>;
 }
 
-/** 应用标志符号：与应用图标（assets/icon/*.svg）同一图形，颜色跟随 currentColor */
+/** 应用标志符号与打包图标共享路径。 */
 export function AppGlyph({ className = "size-5" }: { className?: string }) {
-  return (
-    <svg viewBox="236 300 552 424" className={className} aria-hidden fill="none">
-      <g stroke="currentColor" strokeWidth={58} strokeLinecap="round" strokeLinejoin="round">
-        <path d="M372 420 H692" />
-        <path d="M616 344 L692 420 L616 496" />
-        <path d="M652 604 H332" />
-        <path d="M408 528 L332 604 L408 680" />
-      </g>
-      <g fill="currentColor">
-        <circle cx="316" cy="420" r="50" />
-        <circle cx="708" cy="604" r="50" />
-      </g>
-    </svg>
-  );
+  return <svg viewBox="236 300 552 424" className={className} aria-hidden fill="none">
+    <g stroke="currentColor" strokeWidth={58} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M372 420 H692" /><path d="M616 344 L692 420 L616 496" />
+      <path d="M652 604 H332" /><path d="M408 528 L332 604 L408 680" />
+    </g>
+    <g fill="currentColor"><circle cx="316" cy="420" r="50" /><circle cx="708" cy="604" r="50" /></g>
+  </svg>;
 }
 
-/** 配置与设置共用的分组布局，说明列与字段列随可用宽度切换。 */
 export function FormSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
-  const titleId = useId();
-  return <Fieldset<"section"> render={(props) => <section {...props} />} role="group" aria-labelledby={titleId} className="form-section">
-    <div className="space-y-1">
-      <Fieldset.Legend<"h2"> render={(props) => <h2 {...props} />} id={titleId} className="text-base font-semibold">{title}</Fieldset.Legend>
-      <Description className="text-sm leading-relaxed text-muted">{description}</Description>
-    </div>
-    <Fieldset.Group className="min-w-0">{children}</Fieldset.Group>
-  </Fieldset>;
+  return <FieldSet className="form-section">
+    <FieldLegend>{title}</FieldLegend>
+    <FieldDescription>{description}</FieldDescription>
+    <FieldGroup className="min-w-0">{children}</FieldGroup>
+  </FieldSet>;
 }

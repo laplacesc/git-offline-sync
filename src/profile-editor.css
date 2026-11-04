@@ -1,0 +1,263 @@
+.profile-editor-form {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.profile-editor[data-slot="card"] {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  gap: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--foreground);
+  box-shadow: none;
+}
+
+.profile-editor-header {
+  flex-shrink: 0;
+  gap: 5px;
+  padding: 20px 22px 18px;
+}
+
+.profile-editor-title {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+}
+
+.profile-editor-description {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.profile-editor-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+  gap: 24px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  container-type: inline-size;
+  padding: 0 22px 8px;
+  scroll-padding-block: 12px;
+}
+
+.profile-editor-content > * {
+  flex-shrink: 0;
+}
+
+.profile-editor .form-section {
+  min-width: 0;
+  gap: 10px;
+}
+
+.profile-editor .form-section > [data-slot="field-legend"] {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.profile-editor .form-section > [data-slot="field-description"] {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.profile-editor .form-section > [data-slot="field-group"] {
+  gap: 14px;
+}
+
+.profile-editor-field-grid,
+.profile-editor-roles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.profile-editor-roles {
+  gap: 8px;
+  align-items: stretch;
+}
+
+.profile-editor-role {
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  border-radius: var(--control-radius);
+  background: var(--card);
+  padding: 12px;
+}
+
+.profile-editor-role[data-selected="true"] {
+  background: var(--secondary);
+}
+
+.profile-editor-role > [role="radio"] {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.profile-editor-role-copy {
+  min-width: 0;
+  gap: 4px;
+}
+
+.profile-editor-role-copy [data-slot="field-label"] {
+  line-height: 1.5;
+}
+
+.profile-editor-role-copy [data-slot="field-description"] {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.profile-editor-role-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  border-radius: var(--control-radius);
+  background: var(--card);
+  padding: 12px;
+}
+
+.profile-editor-role-name {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.profile-editor-role-summary p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.profile-editor-paths,
+.profile-editor-dev-repos {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.profile-editor-dev-repos {
+  gap: 12px;
+}
+
+.profile-editor-dev-row {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.profile-editor-dev-path {
+  flex: 1;
+  min-width: 0;
+}
+
+.profile-editor-remove {
+  flex-shrink: 0;
+  margin-top: 27px;
+}
+
+.profile-editor-errors {
+  padding: 12px;
+  font-size: 13px;
+}
+
+.profile-editor-error-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 6px;
+}
+
+.profile-editor-error-links a {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.profile-editor-footer {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 16px 22px 20px;
+}
+
+.profile-editor-missing {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.profile-editor-actions,
+.profile-editor-submit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.profile-editor-actions {
+  justify-content: flex-end;
+}
+
+.profile-editor-delete {
+  margin-right: auto;
+}
+
+@container (max-width: 460px) {
+  .profile-editor-field-grid,
+  .profile-editor-roles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .profile-editor-role-summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+}
+
+@media (max-width: 520px) {
+  .profile-editor-header {
+    padding: 18px 16px 16px;
+  }
+
+  .profile-editor-content {
+    padding-inline: 16px;
+  }
+
+  .profile-editor-footer {
+    padding: 14px 16px 16px;
+  }
+
+  .profile-editor-submit-actions {
+    flex: 1;
+    justify-content: flex-end;
+  }
+}

@@ -675,6 +675,75 @@ fn combined_sync_preserves_development_and_reads_real_refs() {
 }
 
 #[test]
+fn sync_updates_imports_mirror_before_explicitly_syncing_development() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let f = Fixture::new(&g);
+    sync::create_branch(&g, &f.dev, "feature/local", "main", None).unwrap();
+    commit(&f.dev, "local", "local\n");
+    fs::write(f.dev.join("local"), "staged\n").unwrap();
+    git(&f.dev, &["add", "local"]);
+    fs::write(f.dev.join("base"), "uncommitted\n").unwrap();
+    fs::write(f.dev.join("untracked"), "keep me\n").unwrap();
+    let refs = git(&f.dev, &["show-ref"]);
+    let local_heads = git(&f.dev, &["show-ref", "--heads"]);
+    let head = git(&f.dev, &["rev-parse", "HEAD"]);
+    let origin_main = git(&f.dev, &["rev-parse", "refs/remotes/origin/main"]);
+    let staged = git(&f.dev, &["diff", "--cached", "--binary"]);
+    let unstaged = git(&f.dev, &["diff", "--binary"]);
+    let dirty = git(&f.dev, &["status", "--porcelain=v1"]);
+    let dirs = vec![f.dev.to_string_lossy().into_owned()];
+    let bundle = f.advance(&g);
+    let upstream = git(&f.seed, &["rev-parse", "refs/heads/main"]);
+    assert_ne!(origin_main, upstream);
+    assert_eq!(git(&f.ext, &["rev-parse", "refs/heads/main"]), origin_main);
+
+    let imported = sync::sync_updates(&g, &f.ext, Some(&bundle), &[], "", "").unwrap();
+    assert_eq!(imported.imported.unwrap().seq, Some(2));
+    assert!(imported.repositories.is_empty());
+    assert_eq!(git(&f.ext, &["rev-parse", "refs/heads/main"]), upstream);
+    assert_eq!(git(&f.dev, &["show-ref"]), refs);
+    assert_eq!(
+        sync::dev_sync_status(&g, &f.ext, &dirs)[0].status,
+        "needsFetch"
+    );
+    assert_eq!(git(&f.dev, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&f.dev, &["branch", "--show-current"]), "feature/local");
+    assert_eq!(git(&f.dev, &["diff", "--cached", "--binary"]), staged);
+    assert_eq!(git(&f.dev, &["diff", "--binary"]), unstaged);
+    assert_eq!(git(&f.dev, &["status", "--porcelain=v1"]), dirty);
+    assert_eq!(
+        fs::read_to_string(f.dev.join("untracked")).unwrap(),
+        "keep me\n"
+    );
+
+    let synced = sync::sync_updates(&g, &f.ext, None, &dirs, "", "").unwrap();
+    assert!(synced.imported.is_none());
+    assert_eq!(synced.repositories.len(), 1);
+    assert_eq!(synced.repositories[0].path, dirs[0]);
+    assert_eq!(synced.repositories[0].status, "fetched");
+    assert_eq!(
+        git(&f.dev, &["rev-parse", "refs/remotes/origin/main"]),
+        upstream
+    );
+    assert_eq!(
+        sync::dev_sync_status(&g, &f.ext, &dirs)[0].status,
+        "upToDate"
+    );
+    assert_eq!(git(&f.dev, &["show-ref", "--heads"]), local_heads);
+    assert_eq!(git(&f.dev, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&f.dev, &["branch", "--show-current"]), "feature/local");
+    assert_eq!(git(&f.dev, &["diff", "--cached", "--binary"]), staged);
+    assert_eq!(git(&f.dev, &["diff", "--binary"]), unstaged);
+    assert_eq!(git(&f.dev, &["status", "--porcelain=v1"]), dirty);
+    assert_eq!(
+        fs::read_to_string(f.dev.join("untracked")).unwrap(),
+        "keep me\n"
+    );
+}
+
+#[test]
 fn combined_sync_cancellation_does_not_start_later_repositories() {
     let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let quiet = |_: LogEvent| {};

@@ -4,18 +4,17 @@ import { DateTime, Time } from "../src/DateTime";
 
 afterEach(cleanup);
 
-it("提交日期使用 HeroUI 只读字段，键盘不能修改时间", () => {
+it("提交日期以语义化只读时间展示，不进入键盘焦点顺序", () => {
   const { container } = render(<DateTime value="2026-10-19 14:35" label="提交时间" />);
-  const field = screen.getByRole("group", { name: "提交时间" });
-  expect(field.getAttribute("data-readonly")).not.toBeNull();
+  const field = screen.getByLabelText("提交时间");
+  expect(field.tagName).toBe("TIME");
+  expect(field.getAttribute("datetime")).toBe(new Date(2026, 9, 19, 14, 35).toISOString());
   expect(field.textContent).toContain("2026");
   expect(field.textContent).toContain("35");
   const before = field.textContent;
-  const year = container.querySelector('[data-type="year"]')!;
-  fireEvent.keyDown(year, { key: "ArrowUp" });
+  fireEvent.keyDown(field, { key: "ArrowUp" });
   expect(field.textContent).toBe(before);
-  expect(container.querySelector('[contenteditable="true"]')).toBeNull();
-  expect(container.querySelector('[tabindex="0"]')).toBeNull();
+  expect(container.querySelector('[contenteditable="true"], [tabindex="0"], input')).toBeNull();
 });
 
 it("缺失或损坏日期显示占位，Unix 零时刻仍可展示", () => {
@@ -24,13 +23,11 @@ it("缺失或损坏日期显示占位，Unix 零时刻仍可展示", () => {
   rerender(<DateTime value="invalid" />);
   expect(screen.getByText("—")).toBeTruthy();
   rerender(<DateTime value={0} />);
-  expect(screen.getByRole("group", { name: "日期时间" })).toBeTruthy();
+  expect(screen.getByLabelText("日期时间").getAttribute("datetime")).toBe("1970-01-01T00:00:00.000Z");
 });
 
-it("日志使用 HeroUI 只读时间字段并保留秒", () => {
+it("日志时间保留秒，不提供编辑控件", () => {
   const { container } = render(<Time value={new Date(2026, 9, 19, 14, 35, 42).getTime()} label="日志时间" />);
-  const field = screen.getByRole("group", { name: "日志时间" });
-  expect(field.getAttribute("data-readonly")).not.toBeNull();
-  expect(field.textContent).toContain("42");
-  expect(container.querySelector('[tabindex="0"]')).toBeNull();
+  expect(screen.getByLabelText("日志时间").textContent).toBe("14:35:42");
+  expect(container.querySelector('[tabindex="0"], input')).toBeNull();
 });

@@ -1,5 +1,6 @@
 import { ReactNode } from "react";
-import { Alert } from "@heroui/react";
+import { CircleAlertIcon, CircleCheckIcon } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 
 export type Tone = "success" | "warning" | "danger" | "accent" | "default";
 
@@ -12,13 +13,13 @@ export function Notice({ tone, title, children, actions, indicator }: {
   indicator?: ReactNode;
 }) {
   return (
-    <Alert status={tone} className="flash" data-tone={tone}
+    <Alert variant={tone === "danger" ? "destructive" : "default"} className="flash flex items-start gap-3" data-tone={tone}
       role={tone === "danger" || tone === "warning" ? "alert" : "status"}>
-      <Alert.Indicator aria-hidden="true">{indicator}</Alert.Indicator>
-      <Alert.Content>
-        {title && <Alert.Title>{title}</Alert.Title>}
-        {children && <Alert.Description<"div"> render={(props) => <div {...props} />} className="break-words">{children}</Alert.Description>}
-      </Alert.Content>
+      <span className="notice-indicator" aria-hidden="true">{indicator ?? (tone === "success" ? <CircleCheckIcon className="size-4" /> : <CircleAlertIcon className="size-4" />)}</span>
+      <div className="notice-content">
+        {title && <AlertTitle>{title}</AlertTitle>}
+        {children && <AlertDescription className="break-words">{children}</AlertDescription>}
+      </div>
       {actions && <div className="notice-actions">{actions}</div>}
     </Alert>
   );

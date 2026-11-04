@@ -1,6 +1,8 @@
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Button, Chip, Disclosure, ToggleButton } from "@heroui/react";
+import { Badge } from "./components/ui/badge";
+import { Button } from "./components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
 import { LOG_EVENT, LogEvent } from "./api";
 import { Icon } from "./icons";
 import { Time } from "./DateTime";
@@ -77,40 +79,40 @@ export function LogPanel({
 
   return (
     <section aria-label="命令日志">
-    <Disclosure isExpanded={open} onExpandedChange={setOpen}
+    <Collapsible open={open} onOpenChange={setOpen}
       className="log-panel" data-open={open} style={{ "--log-height": `${height}px` } as CSSProperties}>
       <div className="log-toolbar">
-        <Disclosure.Heading><Disclosure.Trigger className="log-toggle">
+        <CollapsibleTrigger className="log-toggle">
           <Icon name="terminal" /><span>命令日志</span><Icon name="chevron" className="log-chevron" />
-        </Disclosure.Trigger></Disclosure.Heading>
+        </CollapsibleTrigger>
         <span className="log-count" aria-label={`${lines.length} 条日志`}>{lines.length}</span>
         {errors > 0 && (
-          <Chip size="sm" variant="soft" color="danger">
+          <Badge variant="destructive">
             {errors} 个错误
-          </Chip>
+          </Badge>
         )}
         <span className="flex-1" />
         {open && <>
-          <Button size="sm" variant="ghost" isIconOnly aria-label="缩小日志面板" isDisabled={height <= 150} onPress={() => setHeight((h) => Math.max(150, h - 60))}>−</Button>
-          <Button size="sm" variant="ghost" isIconOnly aria-label="增大日志面板" isDisabled={height >= 480} onPress={() => setHeight((h) => Math.min(480, h + 60))}>+</Button>
+          <Button size="icon-sm" variant="ghost" aria-label="缩小日志面板" disabled={height <= 150} onClick={() => setHeight((h) => Math.max(150, h - 60))}>−</Button>
+          <Button size="icon-sm" variant="ghost" aria-label="增大日志面板" disabled={height >= 480} onClick={() => setHeight((h) => Math.min(480, h + 60))}>+</Button>
         </>}
-        {open && <ToggleButton size="sm" variant="ghost" isSelected={following} onChange={setFollowing}>
+        {open && <Button size="sm" variant="ghost" aria-pressed={following} onClick={() => setFollowing((value) => !value)}>
           {following ? "暂停跟随" : "跟随最新"}
-        </ToggleButton>}
-        {open && lines.length > 0 && <Button size="sm" variant="ghost" onPress={async () => {
+        </Button>}
+        {open && lines.length > 0 && <Button size="sm" variant="ghost" onClick={async () => {
           try {
             await navigator.clipboard.writeText(lines.map((line) => `${time(line.ts)} ${line.kind === "cmd" ? "$ " : ""}${line.text}`).join("\n"));
             notify("ok", "日志已复制");
           } catch { notify("error", "复制失败，请选择日志文本复制"); }
         }}>复制日志</Button>}
         {open && (lines.length > 0 || operations.length > 0) && (
-          <Button size="sm" variant="ghost" className="text-muted hover:text-foreground" onPress={clear}>
+          <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-foreground" onClick={clear}>
             清空
           </Button>
         )}
       </div>
       {open && (
-        <Disclosure.Content className="log-content">
+        <CollapsibleContent className="log-content">
         <div id="git-log-output" aria-label="命令输出" tabIndex={0} ref={bodyRef} onScroll={(event) => {
           const el = event.currentTarget;
           if (el.scrollHeight - el.scrollTop - el.clientHeight > 24) setFollowing(false);
@@ -120,23 +122,23 @@ export function LogPanel({
             const op = group.operation;
             const failed = op?.failed || group.lines.some((line) => line.kind === "error");
             const status = operationStatus(op, failed, id !== undefined);
-            return <Disclosure key={id ?? "background"} className="log-group" defaultExpanded>
-              <Disclosure.Heading><Disclosure.Trigger><Disclosure.Indicator /><Icon name="terminal" /><strong>{op?.label ?? (id === undefined ? "仓库状态与其他输出" : `较早操作 #${id}`)}</strong>
+            return <Collapsible key={id ?? "background"} className="log-group" defaultOpen>
+              <CollapsibleTrigger><Icon name="chevron" /><Icon name="terminal" /><strong>{op?.label ?? (id === undefined ? "仓库状态与其他输出" : `较早操作 #${id}`)}</strong>
                 <span className={failed ? "text-danger" : "log-count"}>{status}</span>
-                {op && <div className="log-duration"><Time value={op.startedAt} label="操作开始时间" />{op.endedAt !== undefined ? ` · ${((op.endedAt - op.startedAt) / 1000).toFixed(1)}s` : ""}</div>}
-              </Disclosure.Trigger></Disclosure.Heading>
-              <Disclosure.Content><Disclosure.Body>
+                {op && <span className="log-duration"><Time value={op.startedAt} label="操作开始时间" />{op.endedAt !== undefined ? ` · ${((op.endedAt - op.startedAt) / 1000).toFixed(1)}s` : ""}</span>}
+              </CollapsibleTrigger>
+              <CollapsibleContent><div>
               {op?.stopRequested && <p className="log-line text-warning">已请求停止；停止不代表回滚，请检查操作结果。</p>}
               {group.lines.map((line, i) => <div key={i} className="log-line">
                 <div className="log-time"><Time value={line.ts} label="日志时间" /></div><span className={`log-${line.kind}`}>{line.text}</span>
               </div>)}
               {!group.lines.length && <p className="log-line log-count">暂无命令输出</p>}
-              </Disclosure.Body></Disclosure.Content>
-            </Disclosure>;
+              </div></CollapsibleContent>
+            </Collapsible>;
           })}
-        </div></Disclosure.Content>
+        </div></CollapsibleContent>
       )}
-    </Disclosure>
+    </Collapsible>
     </section>
   );
 }
