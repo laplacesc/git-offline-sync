@@ -1,6 +1,6 @@
 [package]
 name = "git-offline-sync"
-version = "2.1.12"
+version = "2.1.13"
 description = "Sync Git repositories between an offline intranet and the internet via git bundle"
 authors = ["laplacesc"]
 edition = "2021"
