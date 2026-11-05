@@ -263,6 +263,7 @@ input:read-only { color: var(--muted-foreground); }
 .branch-name-text { min-width: 0; font: 500 13px/1.5 var(--font-mono); }
 .branch-name .action-icon-button { width: 24px; height: 24px; min-height: 24px; color: var(--muted-foreground); }
 .branch-metadata { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-height: 20px; max-width: 100%; color: var(--muted-foreground); font-size: 11px; }
+.branch-metadata:empty { display: none; }
 .branch-worktree { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .branch-metadata .branch-current { background: var(--accent); }
 .branch-metadata .branch-dirty { background: color-mix(in oklab, var(--warning) 10%, transparent); color: var(--warning); }
