@@ -3,6 +3,8 @@
 //! 全量 → 外网开发 → bundle 回传 → 内网 rebase + push → 增量（含指向旧提交的新分支）
 //! → patch 回传 → 冲突与中止 → 各种保护性检查。
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -182,7 +184,7 @@ fn full_round_trip() {
     // ---------- 外网端：首次导入到镜像 ----------
     let extm = root.join("external/mirror.git");
     let ext = root.join("external/proj");
-    let r = sync::import_in(&g, &full, &extm, false).unwrap();
+    let r = support::import_confirmed(&g, &full, &extm, false).unwrap();
     assert!(r.created);
     assert!(repo::is_ext_mirror(&g, &extm));
     assert!(repo::is_bare(&g, &extm).unwrap());
@@ -194,7 +196,7 @@ fn full_round_trip() {
     let stale = root.join("external/stale");
     fs::create_dir_all(&stale).unwrap();
     fs::write(stale.join("x"), "x").unwrap();
-    let err = sync::import_in(&g, &full, &stale, false)
+    let err = support::import_confirmed(&g, &full, &stale, false)
         .unwrap_err()
         .to_string();
     assert!(err.contains("不是外网镜像"), "{err}");
@@ -214,7 +216,7 @@ fn full_round_trip() {
     fm["seq"] = 9.into();
     fm["payload"] = "proj-out-0009-incr.bundle".into();
     fs::write(usb.join("proj-out-0009-incr.manifest.json"), fm.to_string()).unwrap();
-    let err = sync::import_in(&g, &fake_incr, &empty, false)
+    let err = support::import_confirmed(&g, &fake_incr, &empty, false)
         .unwrap_err()
         .to_string();
     assert!(err.contains("必须使用全量包"), "{err}");
@@ -228,7 +230,7 @@ fn full_round_trip() {
     // 故意让初始 HEAD 指向一个包里没有的分支
     sh(&m2, &["init", "-q", "--bare", "-b", "not-a-real-branch"]);
     sh(&m2, &["config", "offlinesync.role", "mirror"]);
-    sync::import_in(&g, &bare_bundle, &m2, false).unwrap();
+    sync::import_manual_bundle(&g, &bare_bundle, &m2).unwrap();
     let head = sh(&m2, &["symbolic-ref", "HEAD"]);
     assert!(
         repo::rev_exists(&g, &m2, &head),
@@ -255,7 +257,7 @@ fn full_round_trip() {
         .success());
 
     // 重复导入全量包到已存在的镜像：允许（当作重新同步），不报错
-    let r = sync::import_in(&g, &full, &extm, false).unwrap();
+    let r = support::import_confirmed(&g, &full, &extm, false).unwrap();
     assert!(!r.created);
 
     // ---------- 外网端：开发并回传 ----------
@@ -300,7 +302,7 @@ fn full_round_trip() {
     sh(&seed, &["push", "-q", "origin", "main"]);
 
     // 回传包不能在外网端导入
-    assert!(sync::import_in(&g, &back.2, &extm, false).is_err());
+    assert!(support::import_confirmed(&g, &back.2, &extm, false).is_err());
 
     let ib = sync::import_back(&g, &work, &back.2, "main", &[]).unwrap();
     assert_eq!(ib.branches.len(), 1);
@@ -330,7 +332,7 @@ fn full_round_trip() {
         exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false).unwrap());
     assert_eq!((kind, seq), (BundleKind::Incr, 2));
 
-    let r = sync::import_in(&g, &incr, &extm, false).unwrap();
+    let r = support::import_confirmed(&g, &incr, &extm, false).unwrap();
     assert!(!r.created);
     assert!(r.changes.iter().any(|c| c.name == "refs/heads/release"));
     sync::sync_dev_repo(&g, &ext, &extm).unwrap();
@@ -345,7 +347,7 @@ fn full_round_trip() {
     sh(&ext, &["fetch", "origin", "release"]);
 
     // 重复导入同一增量包被拒绝
-    let err = sync::import_in(&g, &incr, &extm, false)
+    let err = support::import_confirmed(&g, &incr, &extm, false)
         .unwrap_err()
         .to_string();
     assert!(err.contains("已导入过"), "{err}");
@@ -374,13 +376,13 @@ fn full_round_trip() {
     m["seq"] = 5.into();
     m["payload"] = "proj-out-0005-incr.bundle".into();
     fs::write(usb.join("proj-out-0005-incr.manifest.json"), m.to_string()).unwrap();
-    let err = sync::import_in(&g, &fake, &extm, false)
+    let err = support::import_confirmed(&g, &fake, &extm, false)
         .unwrap_err()
         .to_string();
     assert!(err.contains("序号不连续"), "{err}");
 
     // 分支删除：镜像靠 manifest 校正，开发仓库靠 fetch --prune 跟上
-    sync::import_in(&g, &incr3, &extm, false).unwrap();
+    support::import_confirmed(&g, &incr3, &extm, false).unwrap();
     assert!(!repo::rev_exists(&g, &extm, "refs/heads/release"));
     sync::sync_dev_repo(&g, &ext, &extm).unwrap();
     assert!(!repo::rev_exists(&g, &ext, "refs/remotes/origin/release"));
@@ -624,7 +626,7 @@ fn full_round_trip() {
         fut.to_string(),
     )
     .unwrap();
-    let err = sync::import_in(&g, &future, &extm, true)
+    let err = support::import_confirmed(&g, &future, &extm, true)
         .unwrap_err()
         .to_string();
     assert!(err.contains("格式版本"), "{err}");
@@ -691,7 +693,7 @@ fn release_hotfix_round_trip() {
 
     let extm = root.join("external/mirror.git");
     let ext = root.join("external/proj");
-    sync::import_in(&g, &full, &extm, false).unwrap();
+    support::import_confirmed(&g, &full, &extm, false).unwrap();
     sync::create_dev_repo(&g, &extm, &ext, "Dev Mac", "dev@corp.example").unwrap();
 
     // ---------- 外网：从 release/1.0 拉 hotfix，基准被记录 ----------
@@ -1009,7 +1011,7 @@ fn snapshot_fixture(root: &Path, g: &Git) -> (PathBuf, PathBuf, PathBuf, PathBuf
     let full =
         exported(sync::export_out(g, &mirror, &usb, "test", "main", false, false).unwrap()).2;
     let ext = root.join("external.git");
-    sync::import_in(g, &full, &ext, false).unwrap();
+    support::import_confirmed(g, &full, &ext, false).unwrap();
     (seed, mirror, usb, ext, full)
 }
 
@@ -1193,7 +1195,7 @@ fn ref_only_changes_and_legacy_state_are_synced_once() {
             "refs-only must stay format-1 compatible"
         );
         assert_eq!(seq, index as u32 + 2);
-        sync::import_in(&g, &bundle, &ext, false).unwrap();
+        support::import_confirmed(&g, &bundle, &ext, false).unwrap();
         assert_eq!(
             repo::list_refs(&g, &ext, &["refs/heads", "refs/tags"]).unwrap(),
             repo::list_refs(&g, &mirror, &["refs/heads", "refs/tags"]).unwrap()
@@ -1287,7 +1289,7 @@ fn malformed_manifests_never_change_or_delete_refs() {
     for (index, m) in variants.iter().enumerate() {
         fs::write(manifest_path_for(&bad), serde_json::to_vec(m).unwrap()).unwrap();
         assert!(
-            sync::import_in(&g, &bad, &ext, true).is_err(),
+            support::import_confirmed(&g, &bad, &ext, true).is_err(),
             "variant {index} unexpectedly accepted"
         );
         assert_eq!(
@@ -1327,7 +1329,7 @@ fn import_transaction_and_state_failures_are_retryable() {
     // Lock failure in one ref must abort additions, updates AND deletions together.
     let lock = ext.join("refs/heads/main.lock");
     fs::write(&lock, "fault injection").unwrap();
-    assert!(sync::import_in(&g, &incr, &ext, false).is_err());
+    assert!(support::import_confirmed(&g, &incr, &ext, false).is_err());
     assert_eq!(
         repo::list_refs(&g, &ext, &["refs/heads", "refs/tags"]).unwrap(),
         before
@@ -1340,7 +1342,7 @@ fn import_transaction_and_state_failures_are_retryable() {
         &["symbolic-ref", "HEAD", "refs/heads/already-missing"],
     );
     fs::write(ext.join("HEAD.lock"), "fault injection").unwrap();
-    assert!(sync::import_in(&g, &incr, &ext, false).is_err());
+    assert!(support::import_confirmed(&g, &incr, &ext, false).is_err());
     assert_eq!(
         repo::load_state::<repo::MirrorState>(&ext)
             .unwrap()
@@ -1351,7 +1353,7 @@ fn import_transaction_and_state_failures_are_retryable() {
     // Fail the state backup after the ref transaction has succeeded.
     let backup = ext.join("offline-sync/state.json.bak");
     fs::create_dir(&backup).unwrap();
-    assert!(sync::import_in(&g, &incr, &ext, false).is_err());
+    assert!(support::import_confirmed(&g, &incr, &ext, false).is_err());
     assert_eq!(
         sh(&ext, &["rev-parse", "main"]),
         sh(&seed, &["rev-parse", "main"])
@@ -1363,7 +1365,7 @@ fn import_transaction_and_state_failures_are_retryable() {
         1
     );
     fs::remove_dir(backup).unwrap();
-    sync::import_in(&g, &incr, &ext, false).unwrap();
+    support::import_confirmed(&g, &incr, &ext, false).unwrap();
     assert_eq!(
         repo::load_state::<repo::MirrorState>(&ext)
             .unwrap()
@@ -1404,7 +1406,7 @@ fn interrupted_export_is_hidden_and_finishes_with_the_same_sequence() {
     assert_eq!(recovered, pending);
     assert!(!mirror.join("offline-sync/export-pending.json").exists());
     assert_eq!(sync::list_packages(&usb).unwrap().len(), 2);
-    sync::import_in(&g, &recovered, &ext, false).unwrap();
+    support::import_confirmed(&g, &recovered, &ext, false).unwrap();
     assert!(matches!(
         sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap(),
         ExportOutcome::NothingToSync { .. }

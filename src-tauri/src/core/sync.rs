@@ -102,10 +102,17 @@ fn create_and_verify_bundle(
     g: &Git,
     cwd: &Path,
     bundle: &Path,
-    a: Vec<std::ffi::OsString>,
+    revisions: &[String],
     empty_msg: &str,
 ) -> Result<Option<ExportOutcome>> {
-    let out = g.exec(Some(cwd), &a, None, true)?;
+    // Bound argv even when a mirror contains thousands of heads and tags.
+    let input = revisions.join("\n") + "\n";
+    let out = g.exec(
+        Some(cwd),
+        &args!["bundle", "create", bundle, "--stdin"],
+        Some(&input),
+        true,
+    )?;
     if !out.ok() {
         let _ = fs::remove_file(bundle);
         if out.stderr.contains("empty bundle") {
@@ -692,12 +699,12 @@ pub fn abort(g: &Git, repo: &Path) -> Result<OpOutcome> {
     Ok(OpOutcome::done("已中止"))
 }
 
-/// 冲突解决后继续 rebase / am。
+/// 冲突解决后继续 rebase / am / merge。
 pub fn continue_op(g: &Git, repo: &Path) -> Result<OpOutcome> {
     let gd = repo::git_dir(g, repo)?;
     let _lock = OperationLock::acquire(&gd.join("offline-sync-operation"))?;
-    let rebasing = repo::in_progress(&gd).as_deref() == Some("rebase");
-    let a = match repo::in_progress(&gd).as_deref() {
+    let operation = repo::in_progress(&gd);
+    let a = match operation.as_deref() {
         Some("rebase") => {
             match_rebase_journal(&gd)?;
             args!["-c", "core.editor=true", "rebase", "--continue"]
@@ -706,6 +713,7 @@ pub fn continue_op(g: &Git, repo: &Path) -> Result<OpOutcome> {
             match_patch_journal(g, repo, &gd)?;
             args!["am", "--continue"]
         }
+        Some("merge") => args!["-c", "core.editor=true", "merge", "--continue"],
         _ => {
             recover_rebase(g, repo, &gd)?;
             recover_patch(g, repo, &gd)?;
@@ -714,10 +722,10 @@ pub fn continue_op(g: &Git, repo: &Path) -> Result<OpOutcome> {
     };
     let out = g.exec(Some(repo), &a, None, true)?;
     if out.ok() {
-        if rebasing {
-            finish_rebase(g, repo, &gd)?;
-        } else {
-            finish_patch(g, repo, &gd)?;
+        match operation.as_deref() {
+            Some("rebase") => finish_rebase(g, repo, &gd)?,
+            Some("am") => finish_patch(g, repo, &gd)?,
+            _ => {}
         }
         Ok(OpOutcome::done("已继续完成"))
     } else {
@@ -795,14 +803,15 @@ pub fn export_out(
     );
     let mut bundle = staging.path().join(&file_name);
 
-    // 只打包分支和 tag（GitLab 镜像里的 refs/merge-requests、refs/keep-around 等不需要）
-    let mut a = args!["bundle", "create", &bundle];
+    // Use full ref names: --branches/--tags can omit ambiguous branch/tag names.
+    // Only heads/tags belong to the captured snapshot, not GitLab internal refs.
+    let mut revisions = Vec::new();
     if full {
-        a.push("HEAD".into());
+        revisions.push("HEAD".into());
     }
-    a.push("--branches".into());
-    a.push("--tags".into());
+    revisions.extend(refs.iter().map(|(name, _)| name.clone()));
     let mut warnings = Vec::new();
+    let mut baseline = Vec::new();
     if !full {
         // 过滤掉已被 gc 的旧对象，否则 bundle create 会报 bad object
         let base = repo::existing_objects(g, mirror, &state.last_heads)?;
@@ -812,25 +821,25 @@ pub fn export_out(
                 state.last_heads.len() - base.len()
             ));
         }
-        a.push("--not".into());
-        a.extend(base.iter().map(Into::into));
+        revisions.extend(base.iter().map(|oid| format!("^{oid}")));
+        baseline = base;
     }
 
-    if create_and_verify_bundle(g, mirror, &bundle, a, "内网没有新提交，无需同步")?.is_some()
+    if create_and_verify_bundle(g, mirror, &bundle, &revisions, "内网没有新提交，无需同步")?
+        .is_some()
     {
         // Git cannot encode ref-only changes as an empty incremental bundle. Keep
         // format 1 compatibility by publishing a full bundle with the new snapshot.
         full = true;
+        baseline.clear();
         file_name = format!("{}-out-{seq:04}-full.bundle", sanitize(repo_name));
         bundle = staging.path().join(&file_name);
         warnings.push("引用发生变化但没有新对象，已回退为全量包".into());
-        if let Some(nothing) = create_and_verify_bundle(
-            g,
-            mirror,
-            &bundle,
-            args!["bundle", "create", &bundle, "HEAD", "--branches", "--tags"],
-            "仓库没有可导出的引用",
-        )? {
+        let mut fallback = vec!["HEAD".into()];
+        fallback.extend(refs.iter().map(|(name, _)| name.clone()));
+        if let Some(nothing) =
+            create_and_verify_bundle(g, mirror, &bundle, &fallback, "仓库没有可导出的引用")?
+        {
             return Ok(nothing);
         }
     }
@@ -860,6 +869,7 @@ pub fn export_out(
         refs: ref_entries,
         tool_version: tool_version(),
     };
+    validate_bundle_snapshot(g, mirror, &bundle, &manifest, &baseline)?;
     state.repo_id = Some(rid);
     state.out_seq = seq;
     state.last_heads = refs.into_iter().map(|(_, s)| s).collect();
@@ -875,6 +885,58 @@ fn parse_list_heads(out: &str) -> Vec<(String, String)> {
             Some((name.to_string(), sha.to_string()))
         })
         .collect()
+}
+
+/// A ref may be omitted by Git only when its object is already in the frozen
+/// exclusion baseline. Checking local existence alone would hide export races.
+fn validate_bundle_snapshot(
+    g: &Git,
+    repo: &Path,
+    bundle: &Path,
+    manifest: &Manifest,
+    baseline: &[String],
+) -> Result<()> {
+    let advertised: BTreeMap<_, _> =
+        parse_list_heads(&g.query(repo, args!["bundle", "list-heads", bundle])?)
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
+            .collect();
+    let wanted: BTreeMap<_, _> = manifest
+        .refs
+        .iter()
+        .map(|r| (r.name.clone(), r.sha.clone()))
+        .collect();
+    if advertised
+        .iter()
+        .any(|(name, sha)| wanted.get(name) != Some(sha))
+    {
+        return invalid("manifest 与 bundle 引用不一致；请刷新后重试");
+    }
+    let missing: Vec<_> = wanted
+        .iter()
+        .filter(|(name, _)| !advertised.contains_key(*name))
+        .collect();
+    if !missing.is_empty() {
+        if baseline.is_empty() {
+            return invalid("bundle 缺少快照引用且基线无法满足；请刷新后重试");
+        }
+        let input = missing
+            .iter()
+            .map(|(_, sha)| sha.to_string())
+            .chain(baseline.iter().map(|oid| format!("^{oid}")))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let uncovered = g.query_stdin(
+            repo,
+            args!["rev-list", "--objects", "--no-object-names", "--stdin"],
+            &input,
+        )?;
+        if !uncovered.trim().is_empty() {
+            return invalid("bundle 缺少快照引用且基线无法满足；请刷新后重试");
+        }
+    }
+    Ok(())
 }
 
 /// Load objects without touching any refs. Even a damaged snapshot must never
@@ -1555,6 +1617,16 @@ fn bundle_object_format(bundle: &Path) -> Result<String> {
     Ok(format.unwrap_or_else(|| "sha1".into()))
 }
 
+/// The manifest and mirror snapshot the caller displayed before import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportConfirmation {
+    pub manifest: Manifest,
+    pub last_in_seq: u32,
+    pub mirror_refs: BTreeMap<String, String>,
+    pub allow_full_gap: bool,
+}
+
 /// 内网 → 外网：把包导入**外网镜像**（bare 仓库）。
 ///
 /// 镜像不是开发仓库：它只是内网状态在外网的一份只读副本，开发仓库 clone 它、
@@ -1570,22 +1642,70 @@ pub fn import_in(
     g: &Git,
     bundle: &Path,
     mirror_dir: &Path,
-    allow_gap: bool,
+    confirmation: Option<&ImportConfirmation>,
+) -> Result<ImportInResult> {
+    let confirmation =
+        confirmation.ok_or_else(|| SyncError::Invalid("缺少导入确认，请刷新后重新导入".into()))?;
+    import_in_snapshot(g, bundle, mirror_dir, Some(confirmation))
+}
+
+/// Core-only compatibility for manually created bundles, never exposed by IPC.
+/// Tool packages must use import_in with a manifest and explicit confirmation.
+pub fn import_manual_bundle(g: &Git, bundle: &Path, mirror_dir: &Path) -> Result<ImportInResult> {
+    import_in_snapshot(g, bundle, mirror_dir, None)
+}
+
+fn import_in_snapshot(
+    g: &Git,
+    bundle: &Path,
+    mirror_dir: &Path,
+    confirmation: Option<&ImportConfirmation>,
 ) -> Result<ImportInResult> {
     let _lock = OperationLock::acquire(mirror_dir)?;
     // Resolve shared state before reading the import cursor. If the transfer
     // medium is unavailable recovery fails explicitly and import does not start.
     recover_export(mirror_dir)?;
     let manifest = Manifest::read_for(bundle)?;
+    match (confirmation, &manifest) {
+        (Some(expected), Some(actual)) => {
+            // Ref order has no meaning; compare every manifest field otherwise.
+            let mut expected = expected.manifest.clone();
+            let mut actual = actual.clone();
+            expected.refs.sort_by(|a, b| a.name.cmp(&b.name));
+            actual.refs.sort_by(|a, b| a.name.cmp(&b.name));
+            if expected != actual {
+                return invalid("包清单已变化，请刷新后重新确认导入");
+            }
+        }
+        (Some(_), None) => return invalid("包清单已缺失，请刷新后重新确认导入"),
+        (None, Some(_)) => return invalid("工具生成的包必须提供导入确认"),
+        (None, None) => {}
+    }
     if let Some(m) = &manifest {
         if matches!(m.kind, BundleKind::Back | BundleKind::Patch) {
             return invalid("这是回传包，应在内网端导入");
         }
     }
 
+    // All subsequent verification and unbundling uses this private copy and the
+    // in-memory manifest, even if the transfer path is replaced during import.
+    let frozen = tempfile::NamedTempFile::new()?;
+    fs::copy(bundle, frozen.path())?;
+    let bundle = frozen.path();
     let object_format = bundle_object_format(bundle)?;
     // ---------- 首次：建空镜像 ----------
     let created = !repo::is_ext_mirror(g, mirror_dir);
+    let mut state: MirrorState = repo::load_state(mirror_dir)?;
+    let before = if created {
+        BTreeMap::new()
+    } else {
+        mirror_refs(g, mirror_dir)?
+    };
+    if let Some(expected) = confirmation {
+        if state.last_in_seq != expected.last_in_seq || before != expected.mirror_refs {
+            return invalid("镜像序号或引用已变化，请刷新后重新确认导入");
+        }
+    }
     if created {
         if repo::is_nonempty_dir(mirror_dir) {
             return invalid(format!(
@@ -1641,7 +1761,6 @@ pub fn import_in(
         }
     }
 
-    let mut state: MirrorState = repo::load_state(mirror_dir)?;
     if let Some(m) = &manifest {
         if let Some(rid) = &state.repo_id {
             if rid != &m.repo_id {
@@ -1654,6 +1773,13 @@ pub fn import_in(
                 m.seq, state.last_in_seq
             ));
         }
+        if m.kind == BundleKind::Full
+            && state.last_in_seq > 0
+            && m.seq > state.last_in_seq.saturating_add(1)
+            && !confirmation.is_some_and(|c| c.allow_full_gap)
+        {
+            return invalid("全量包跳号需要明确确认，请刷新后确认引用变化");
+        }
         if m.kind == BundleKind::Incr && state.last_in_seq > 0 {
             if m.seq <= state.last_in_seq {
                 return invalid(format!(
@@ -1661,7 +1787,7 @@ pub fn import_in(
                     m.seq, state.last_in_seq
                 ));
             }
-            if m.seq != state.last_in_seq + 1 && !allow_gap {
+            if m.seq != state.last_in_seq + 1 {
                 return invalid(format!(
                     "序号不连续：上次导入 #{}，本包 #{}，中间的包可能遗漏",
                     state.last_in_seq, m.seq
@@ -1670,8 +1796,22 @@ pub fn import_in(
         }
     }
 
-    let before = mirror_refs(g, mirror_dir)?;
+    if let Some(m) = &manifest {
+        let baseline = if m.kind == BundleKind::Incr {
+            before.values().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        validate_bundle_snapshot(g, mirror_dir, bundle, m, &baseline)?;
+    }
     let wanted = unpack_snapshot(g, mirror_dir, bundle, manifest.as_ref())?;
+    let current: MirrorState = repo::load_state(mirror_dir)?;
+    if current.last_in_seq != state.last_in_seq
+        || current.repo_id != state.repo_id
+        || mirror_refs(g, mirror_dir)? != before
+    {
+        return invalid("镜像序号或引用已变化，请刷新后重新确认导入");
+    }
     // Format 1 full/incr manifests are complete mirror snapshots: prune tags as
     // well as branches. A manual bundle without a manifest only adds/updates refs.
     replace_refs(g, mirror_dir, &before, &wanted, manifest.is_some())?;
@@ -1799,6 +1939,7 @@ pub fn sync_dev_repo(g: &Git, dev_dir: &Path, mirror_dir: &Path) -> Result<()> {
             "fetch",
             "--no-tags",
             "--prune",
+            "--refmap=",
             "origin",
             "+refs/heads/*:refs/remotes/origin/*",
             "+refs/tags/*:refs/tags/*"
@@ -1863,16 +2004,20 @@ pub struct SyncUpdatesResult {
     pub repositories: Vec<SyncedRepository>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sync_updates(
     g: &Git,
     mirror: &Path,
     bundle: Option<&Path>,
+    confirmation: Option<&ImportConfirmation>,
     dev_dirs: &[String],
     name: &str,
     email: &str,
 ) -> Result<SyncUpdatesResult> {
     g.check_cancelled()?;
-    let imported = bundle.map(|b| import_in(g, b, mirror, false)).transpose()?;
+    let imported = bundle
+        .map(|b| import_in(g, b, mirror, confirmation))
+        .transpose()?;
     let mut repositories = Vec::new();
     for path in dev_dirs {
         g.check_cancelled()?;
@@ -2031,7 +2176,7 @@ pub fn export_back(
     let bundle = staging.path().join(&file_name);
 
     let mut refs = Vec::new();
-    let mut a = args!["bundle", "create", &bundle];
+    let mut revisions = Vec::new();
     for b in branches {
         let r = format!("refs/heads/{b}");
         refs.push(RefEntry {
@@ -2039,13 +2184,21 @@ pub fn export_back(
             sha: repo::rev_parse(g, repo, &r)?,
             base: Some(repo::resolve_base(g, repo, b, base_branch, releases).0),
         });
-        a.push(r.into());
+        revisions.push(r);
     }
-    a.extend(args!["--not", "--remotes=origin"]);
+    let baseline: Vec<_> = repo::list_refs(g, repo, &["refs/remotes/origin"])?
+        .into_iter()
+        .map(|(_, oid)| oid)
+        .collect();
+    revisions.extend(baseline.iter().map(|oid| format!("^{oid}")));
 
-    if let Some(nothing) =
-        create_and_verify_bundle(g, repo, &bundle, a, "所选分支没有内网尚未包含的新提交")?
-    {
+    if let Some(nothing) = create_and_verify_bundle(
+        g,
+        repo,
+        &bundle,
+        &revisions,
+        "所选分支没有内网尚未包含的新提交",
+    )? {
         return Ok(nothing);
     }
 
@@ -2061,6 +2214,7 @@ pub fn export_back(
         refs,
         tool_version: tool_version(),
     };
+    validate_bundle_snapshot(g, repo, &bundle, &manifest, &baseline)?;
     state.back_seq = seq;
     publish_export(
         mirror_dir,
@@ -2127,6 +2281,24 @@ pub fn export_patches(
         return Ok(ExportOutcome::NothingToSync {
             message: format!("{branch} 相对 {from} 没有新提交"),
         });
+    }
+    for oid in g.query(repo, args!["rev-list", &range])?.lines() {
+        if g.query(
+            repo,
+            args![
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                oid
+            ],
+        )?
+        .trim()
+        .is_empty()
+        {
+            return invalid("待导出范围包含空提交，Patch 无法保留空提交；请使用 Bundle 回传");
+        }
     }
     fs::create_dir_all(&dir)?;
     g.run(repo, args!["format-patch", "--binary", "-o", &dir, range])?;

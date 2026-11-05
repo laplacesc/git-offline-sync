@@ -98,7 +98,7 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
   useEffect(() => { void reloadShared(); }, [reloadShared, refreshVersion]);
   useEffect(() => { void repo.reload(); }, [repo.reload, refreshVersion]);
   useEffect(() => { void reloadPackages(); }, [reloadPackages, refreshVersion]);
-  useRefreshOnFocus(reloadAll);
+  useRefreshOnFocus(reloadLocal);
 
   const updatePackages = (currentPackages?.packages ?? []).filter((p) => {
     const m = p.manifest;
@@ -112,18 +112,18 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
   const chosen = packages.find((p) => usable(p) && (needsFull || p.manifest!.seq === lastIn + 1))
     ?? packages.find((p) => usable(p) && p.manifest!.kind === "full");
   const missing = !needsFull && !chosen && packages.some((p) => p.manifest!.seq > lastIn + 1);
-  const fullGap = chosen?.manifest?.kind === "full" && !needsFull && chosen.manifest.seq > lastIn + 1;
-  const missingImpact = fullGap && !mirrorRefs;
+  const missingImpact = mirrorReady && !mirrorRefs;
   const importReady = ready && !packagesLoading && !currentPackages?.packageError
     && !!mirrorDir.trim() && !mirror.loading && (!mirror.status?.isRepo || mirrorReady);
   const canImport = importReady && !missingImpact && !!chosen;
   const canSyncDevs = ready && mirrorReady && !needsFull && !mirror.loading && devRepos.length > 0;
 
   const importUpdate = async (bundle = chosen) => {
-    if (!importReady || !bundle || !usable(bundle)) return;
+    if (!importReady || missingImpact || !bundle || !usable(bundle)) return;
     const isCurrent = beginAction();
     const startedAt = revision.current;
-    const m = bundle?.manifest;
+    const m = bundle.manifest!;
+    let allowFullGap = false;
     if (m?.kind === "full" && !needsFull && m.seq > lastIn + 1) {
       if (!mirrorRefs) return;
       const targetRefs = new Map(m.refs.map((ref) => [ref.name, ref.sha]));
@@ -140,9 +140,15 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
         </div>,
       });
       if (!approved || !isCurrent() || startedAt !== revision.current) return;
+      allowFullGap = true;
     }
     await run("导入更新", () => api.syncUpdates({
       bundle: bundle.payloadPath, mirrorDir, devDirs: [], name: "", email: "",
+      confirmation: {
+        manifest: m, lastInSeq: lastIn,
+        mirrorRefs: Object.fromEntries((mirrorReady ? mirrorRefs! : []).map((ref) => [ref.name, ref.sha])),
+        allowFullGap,
+      },
     }));
     if (!isCurrent()) return;
     await reloadAll();
@@ -203,7 +209,7 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
   if (chosen) summary = `本次更新 #${chosen.manifest!.seq} · ${chosen.manifest!.kind === "full" ? "全量" : "增量"}`;
   if (packagesLoading) summary = "正在读取传输目录…";
   else if (currentPackages.packageError) summary = "暂时无法检查新包。";
-  if (!current || current.loading) summary = "正在检查同步状态…";
+  if (!current) summary = "正在检查同步状态…";
   else if (current.stateError || mirror.error) summary = "暂时无法检查同步状态，请刷新重试。";
   return <>
     {!current && <Feedback kind="progress" text="正在读取仓库状态…" />}
@@ -223,12 +229,15 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
     {current?.stateError && <Feedback kind="error" text={`无法读取同步记录，请检查后刷新。\n${current.stateError}`} />}
     {mirror.error && <Feedback kind="error" text={`无法读取外网镜像。\n${mirror.error}`} />}
     {mirror.status?.isRepo && !mirror.status.isBare && <Feedback kind="error" text="镜像目录必须是裸仓库，请检查项目设置。" />}
-    <TabsContent className="sync-panel" value="sync" forceMount hidden={false} aria-busy={!current || current.loading || mirror.loading || repo.loading}>
+    <TabsContent className="sync-panel" value="sync" forceMount hidden={false}>
       <header className="internal-page-heading"><div><h1>同步与回传</h1></div></header>
-      <section className="sync-workflow-section" aria-label="同步开发仓库">
+      <section className="sync-workflow-section" aria-label="同步开发仓库" aria-busy={!current || current.loading || mirror.loading}>
         <header className="internal-page-heading">
           <div><h2>同步开发仓库</h2><p>从镜像获取最新引用，保留本地工作分支和未提交修改。</p></div>
-          <ActionButton variant="default" onClick={() => syncDevelopmentRepos()} disabled={!canSyncDevs}>同步开发仓库</ActionButton>
+          <div className="sync-button-group">
+            <RefreshButton label="刷新同步状态" loading={!current || current.loading || mirror.loading} onClick={reloadLocal} />
+            <ActionButton variant="default" onClick={() => syncDevelopmentRepos()} disabled={!canSyncDevs}>同步开发仓库</ActionButton>
+          </div>
         </header>
         <div className="workflow-surface">
           {!mirrorReady && <p>请先在下方导入更新，准备镜像仓库。</p>}
@@ -254,14 +263,14 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
       {currentPackages?.packageError && <Feedback kind="error" text={`无法读取传输目录，请检查连接后刷新。\n${currentPackages.packageError}`} />}
       {current && !current.loading && !current.stateError && !packagesLoading && !currentPackages?.packageError && <>
         {missing && <Feedback kind="warn" text={`缺少更新 #${lastIn + 1}，请在传输目录补齐更新包或放入较新的全量包。`} />}
-        {missingImpact && <Feedback kind="warn" text="无法读取完整引用影响，请刷新后再使用全量包跳号。" />}
+        {missingImpact && <Feedback kind="warn" text="无法读取完整引用影响，请刷新后再导入更新。" />}
       </>}
       <header className="internal-page-heading">
         <div><h2>导入更新</h2><p><span>{summary}</span> · 仅导入镜像仓库</p></div>
         <ActionButton size="sm" variant="ghost" onClick={() => importUpdate()} disabled={!canImport}>导入下一包</ActionButton>
       </header>
       {current && currentPackages && !currentPackages.packageError && !current.stateError && <PackageInbox key={`updates:${refreshKey}`}
-        packages={updatePackages} packageLabel="更新包" disabled={!!busy || current.loading || packagesLoading}
+        packages={updatePackages} packageLabel="更新包" disabled={!!busy || packagesLoading}
         renderDetails={(pkg) => {
           const manifest = pkg.manifest!;
           const gap = manifest.kind === "full" && !needsFull && manifest.seq > lastIn + 1;
@@ -303,7 +312,7 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
         void reloadLocal();
       }} />
       <BranchManager key={actionKey} profile={profile} repoPath={devDir} status={repo.status} loading={repo.loading} error={repo.error}
-        onRefresh={reloadLocal} selected={selectedBranches} onSelect={setSelected} multi={mode === "bundle"} />
+        onRefresh={repo.reload} selected={selectedBranches} onSelect={setSelected} multi={mode === "bundle"} />
 
       {opRes && !opRes.ok && <OutcomeView outcome={opRes} />}
       {exportRes?.status === "exported" && <Fold className="sync-details" title={`查看回传 #${exportRes.seq} 文件`}>

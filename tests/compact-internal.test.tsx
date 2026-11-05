@@ -155,7 +155,7 @@ describe("内网同步与分支工作流", () => {
     await act(async () => pending.resolve({ repoId: "project-id", outSeq: 4, lastHeads: [], lastExportAt: null }));
     await waitFor(() => expect(exportButton.disabled).toBe(false));
     state.mockRejectedValueOnce(new Error("state disk unavailable"));
-    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新同步状态" }));
     const error = await screen.findByText(/无法读取同步记录，请检查后重试/);
     expect(error.textContent).toContain("Error: state disk unavailable");
     expect(error.closest(".operation-popups")).toBeNull();
@@ -163,7 +163,7 @@ describe("内网同步与分支工作流", () => {
     expect(exportButton.disabled).toBe(true);
     fireEvent.click(exportButton);
     expect(exported).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新同步状态" }));
     await waitFor(() => expect(exportButton.disabled).toBe(false));
     expect(screen.queryByText(/Error: state disk unavailable/)).toBeNull();
     fireEvent.click(exportButton);

@@ -72,7 +72,7 @@ export function InternalView({ profile, navigationTarget, onNavigate, refreshVer
   }, [reloadPackages, reloadLocal]);
   useEffect(() => { void reloadLocal(); }, [reloadLocal, refreshVersion]);
   useEffect(() => { void reloadPackages(); }, [reloadPackages, refreshVersion]);
-  useRefreshOnFocus(reloadAll);
+  useRefreshOnFocus(reloadLocal);
 
   const [forceFull, setForceFull] = useState(false);
   const [fetchFirst, setFetchFirst] = useState(true);
@@ -186,16 +186,19 @@ export function InternalView({ profile, navigationTarget, onNavigate, refreshVer
     </TabsList></WorkspaceNavigation>
     <div className="sync-location"><Icon name="folder" /><span className="sync-location-label">传输目录</span><span className="min-w-0 flex-1 truncate" title={profile.transferDir}>{profile.transferDir}</span><RefreshButton label="刷新传输目录" loading={packagesLoading} onClick={reloadPackages} /></div>
     {stateError && <Feedback kind="error" text={`无法读取同步记录，请检查后重试\n${stateError}`} />}
-    <TabsContent className="sync-panel" value="sync" forceMount hidden={false} aria-busy={refreshing || mirror.loading || work.loading}>
+    <TabsContent className="sync-panel" value="sync" forceMount hidden={false}>
       <header className="internal-page-heading"><div><h1>同步与回传</h1></div></header>
-      <section className="sync-workflow-section" aria-label="导出更新">
+      <section className="sync-workflow-section" aria-label="导出更新" aria-busy={refreshing || mirror.loading}>
       {mirror.error && <Feedback kind="error" text={`读取镜像失败\n${mirror.error}`} />}
       <header className="internal-page-heading">
         <div><h2>导出更新</h2>
           <p className="text-sm text-muted-foreground">{mirrorReady ? `${base}${releases.length ? `、${releases.join("、")}` : ""} 等 ${mirror.status?.branches.length ?? 0} 个分支` : "首次使用时从 GitLab 准备代码"}</p>
         </div>
+        <div className="sync-button-group">
+        <RefreshButton label="刷新同步状态" loading={refreshing || mirror.loading} onClick={reloadLocal} />
         {mirrorReady ? <ActionButton variant="default" onClick={exportUpdate} disabled={refreshing || !!stateError || !!mirror.error || mirror.loading}>导出更新</ActionButton>
           : <ActionButton variant="default" onClick={initialize} disabled={refreshing || !profile.remoteUrl?.trim() || !mirrorDir || mirror.loading || !!mirror.error || !!stateError}>建立镜像</ActionButton>}
+        </div>
       </header>
       <div className="workflow-surface">
       <section className="workspace-section" aria-label="导出设置">
@@ -220,14 +223,14 @@ export function InternalView({ profile, navigationTarget, onNavigate, refreshVer
       </header>
       <InProgressBanners status={work.status} onDone={(result) => { if (result) setOutcome(result); void reloadLocal(); }} />
       {!packageError && currentPackages && <PackageInbox key={`inbox:${refreshKey}`}
-        packages={packages} disabled={!!busy || work.loading || refreshing || packagesLoading} renderDetails={packageRow} />}
+        packages={packages} disabled={!!busy || packagesLoading} renderDetails={packageRow} />}
       {returnResult && returnResult.branches.length > 0 && <div className="return-import-result" role="status">
         <div><h2>已导入本地分支</h2><p>回传已导入，可在下方检查分支、整理和推送。</p><p>{returnResult.branches.map((branch) => <Code key={branch.local}>{branch.local}</Code>)}</p></div>
       </div>}
       {returnResult?.warnings.map((warning) => <Feedback key={warning} kind="warn" text={warning} />)}
       {outcome && !outcome.ok && <OutcomeView outcome={outcome} />}
       <BranchManager key={refreshKey} profile={profile} repoPath={workDir} status={work.status} loading={work.loading} error={work.error}
-        onRefresh={reloadLocal} selected={selected} onSelect={setSelected} pushBlocked={refreshing || !!stateError} />
+        onRefresh={work.reload} selected={selected} onSelect={setSelected} pushBlocked={refreshing || !!stateError} />
       </section>
     </TabsContent>
   </Tabs>

@@ -37,7 +37,7 @@ pub struct RefEntry {
     pub base: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
     pub format: u32,

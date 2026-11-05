@@ -171,6 +171,10 @@ describe("精简外网同步", () => {
     fireEvent.click(screen.getByRole("button", { name: "导入下一包", exact: true }));
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith({
       bundle: "/usb/matching-3.bundle", mirrorDir: "/mirror", devDirs: [], name: "", email: "",
+      confirmation: {
+        manifest: pkg(3).manifest, lastInSeq: 2, allowFullGap: false,
+        mirrorRefs: Object.fromEntries(status("/mirror").refs.map((ref) => [ref.name, ref.sha])),
+      },
     }));
   });
 
@@ -181,6 +185,10 @@ describe("精简外网同步", () => {
     fireEvent.click(screen.getByRole("button", { name: "导入下一包", exact: true }));
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledExactlyOnceWith({
       bundle: "/usb/matching-3.bundle", mirrorDir: "/mirror", devDirs: [], name: "", email: "",
+      confirmation: {
+        manifest: pkg(3).manifest, lastInSeq: 2, allowFullGap: false,
+        mirrorRefs: Object.fromEntries(status("/mirror").refs.map((ref) => [ref.name, ref.sha])),
+      },
     }));
   });
 
@@ -216,7 +224,13 @@ describe("精简外网同步", () => {
     fireEvent.click(screen.getByRole("button", { name: "导入更新 #7", exact: true }));
     dialog = await screen.findByRole("alertdialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "导入到 #7" }));
-    await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({ bundle: "/usb/matching-7.bundle" })));
+    await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({
+      bundle: "/usb/matching-7.bundle",
+      confirmation: {
+        manifest: pkg(7, "full").manifest, lastInSeq: 2, allowFullGap: true,
+        mirrorRefs: Object.fromEntries(status("/mirror").refs.map((ref) => [ref.name, ref.sha])),
+      },
+    })));
   });
 
   it("首轮读取真实引用差异，镜像已导入时用 null 同步开发仓库", async () => {
@@ -270,7 +284,10 @@ describe("精简外网同步", () => {
     await loaded();
     expect(screen.getByText("本次更新 #4 · 全量")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "导入下一包", exact: true }));
-    await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({ bundle: "/usb/matching-4.bundle" })));
+    await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({
+      bundle: "/usb/matching-4.bundle",
+      confirmation: { manifest: pkg(4, "full").manifest, lastInSeq: 0, mirrorRefs: {}, allowFullGap: false },
+    })));
   });
 
   it("缺包时自动匹配可用全量包，确认目标及受影响引用后同步", async () => {
@@ -294,14 +311,14 @@ describe("精简外网同步", () => {
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({ bundle: "/usb/matching-5.bundle" })));
   });
 
-  it("全量跳号必须先获得完整分支与标签影响，不能用分支列表代替", async () => {
-    vi.mocked(api.listPackages).mockResolvedValue([pkg(5, "full")]);
+  it.each(["full", "incr"] as const)("%s 导入必须先获得完整分支与标签快照，不能用分支列表代替", async (kind) => {
+    vi.mocked(api.listPackages).mockResolvedValue([pkg(kind === "full" ? 5 : 3, kind)]);
     vi.mocked(api.repoStatus).mockImplementation(async (path) => {
       const { refs: _refs, ...withoutRefs } = status(path);
       return withoutRefs;
     });
     await loaded();
-    expect(screen.getByText("无法读取完整引用影响，请刷新后再使用全量包跳号。")).toBeTruthy();
+    expect(screen.getByText("无法读取完整引用影响，请刷新后再导入更新。")).toBeTruthy();
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "导入下一包", exact: true }).disabled).toBe(true);
     expect(api.syncUpdates).not.toHaveBeenCalled();
   });

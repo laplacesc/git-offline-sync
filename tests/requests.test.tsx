@@ -27,6 +27,7 @@ function status(path: string): RepoStatus {
   return {
     path, exists: true, isRepo: true, isBare: path === "/mirror", isMirror: path === "/mirror",
     currentBranch: "main", worktrees: [], dirtyTrees: [], inProgress: null, inProgressTrees: [], remoteUrl: null,
+    refs: [],
     branches: ["feature/one", "feature/two"].map((name) => ({
       name, sha: "abcdef123", base: "main", baseInferred: false, ahead: 1, behind: 0, current: false, worktree: null,
     })),
@@ -161,8 +162,10 @@ describe("仓库查询", () => {
     ]);
     renderView("external");
 
-    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新分支" }).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
+    vi.useFakeTimers();
+    act(() => focus.listener?.({ payload: true }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(301); });
+    vi.useRealTimers();
     await waitFor(() => expect(within(devRow("/dev-two")).getByRole("button", { name: "从镜像克隆" })).toBeTruthy());
     await act(async () => old.resolve([{ path: "/dev-two", status: "upToDate", error: null }]));
     expect(within(devRow("/dev-two")).getByText("尚未克隆")).toBeTruthy();
@@ -179,6 +182,62 @@ describe("仓库查询", () => {
 });
 
 describe.each(["external", "internal"] as const)("%s 独立刷新", (role) => {
+  it.each([false, true])("刷新分支不扫描目录或阻塞包浏览（同时获得焦点=%s）", async (withFocus) => {
+    const packages = Array.from({ length: 25 }, (_, index) => {
+      const value = pkg(`package-${index + 1}.bundle`, role === "internal" ? "back" : "full");
+      value.manifest!.seq = index + 1;
+      return value;
+    });
+    const scan = vi.spyOn(api, role === "external" ? "listPackages" : "listReturnPackages").mockResolvedValue(packages);
+    renderView(role);
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新同步状态" }).disabled).toBe(false));
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新传输目录" }).disabled).toBe(false));
+    const label = role === "internal" ? "回传包" : "更新包";
+    fireEvent.click(screen.getByRole("button", { name: `展开其余 20 个${label}` }));
+    const pending = deferred<RepoStatus>();
+    const repoPath = role === "internal" ? "/work" : "/dev-one";
+    const stateValue = { repoId: "matching", outSeq: 1, lastHeads: [], lastExportAt: null, lastInSeq: 1, backSeq: 0, lastImportAt: null };
+    const pendingState = deferred<typeof stateValue>();
+    vi.spyOn(api, role === "internal" ? "internalState" : "mirrorState").mockReturnValue(pendingState.promise);
+    vi.mocked(invoke).mockClear();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "repo_status" && (args as { path: string }).path === repoPath) return pending.promise;
+      return ipc(command, args as Record<string, unknown>);
+    });
+    if (withFocus) {
+      vi.useFakeTimers();
+      act(() => focus.listener?.({ payload: true }));
+    }
+    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("repo_status", { path: repoPath, baseBranch: "main", releaseBranches: [] });
+    if (withFocus) await act(async () => { await vi.advanceTimersByTimeAsync(301); });
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新传输目录" }).disabled).toBe(false);
+    expect(screen.queryByText("正在读取传输目录…")).toBeNull();
+    expect(screen.queryByText("正在检查同步状态…")).toBeNull();
+    expect(screen.getByRole("region", { name: "分支操作", exact: true }).getAttribute("aria-busy")).toBe("true");
+    const search = screen.getByRole<HTMLInputElement>("textbox", { name: `搜索${label}` });
+    expect(search.disabled).toBe(false);
+    const next = screen.getByRole<HTMLButtonElement>("button", { name: "下一页" });
+    expect(next.disabled).toBe(false);
+    fireEvent.click(next);
+    expect(screen.getByText("21–25 / 25")).toBeTruthy();
+    fireEvent.change(search, { target: { value: "package-1.bundle" } });
+    expect(screen.getByRole("listitem", { name: "package-1.bundle" })).toBeTruthy();
+    if (role === "internal") {
+      expect(screen.getByRole<HTMLButtonElement>("button", { name: "导入回传", exact: true }).disabled).toBe(true);
+    } else {
+      expect(screen.getByText("本次更新 #2 · 全量")).toBeTruthy();
+      expect(screen.getByRole<HTMLButtonElement>("button", { name: "导入下一包" }).disabled).toBe(withFocus);
+    }
+    await act(async () => {
+      pending.resolve(status(repoPath));
+      pendingState.resolve(stateValue);
+    });
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(search.value).toBe("package-1.bundle");
+  });
+
   it("较晚完成的旧刷新不覆盖最新包列表和状态", async () => {
     const old = deferred<ReturnPackageInfo[]>();
     const latest = deferred<ReturnPackageInfo[]>();
@@ -187,13 +246,12 @@ describe.each(["external", "internal"] as const)("%s 独立刷新", (role) => {
     const oldState = deferred<typeof stateValue>();
     const stateApi = role === "external" ? "mirrorState" : "internalState";
     vi.spyOn(api, stateApi).mockReturnValueOnce(oldState.promise).mockResolvedValueOnce(stateValue);
-    renderView(role);
+    const { rerender } = renderView(role);
     if (role === "internal") fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));
 
-    vi.useFakeTimers();
-    act(() => focus.listener?.({ payload: true }));
-    await act(async () => { await vi.advanceTimersByTimeAsync(301); });
-    vi.useRealTimers();
+    rerender(<RunnerProvider>{role === "external"
+      ? <ExternalView profile={profile} refreshVersion={1} />
+      : <InternalView profile={{ ...profile, role }} refreshVersion={1} />}<OperationStatus /></RunnerProvider>);
     await act(async () => latest.resolve([pkg("new.bundle", role === "internal" ? "back" : "full")]));
     const latestText = role === "external" ? "本次更新 #10 · 全量" : /new\.bundle/;
     expect(await screen.findAllByText(latestText)).not.toHaveLength(0);
@@ -343,8 +401,8 @@ it.each(["external", "internal"] as const)("%s 重新检测 Git 后重新读取�
   const workspace = (version: number) => <RunnerProvider>{role === "external"
     ? <ExternalView profile={value} refreshVersion={version} />
     : <InternalView profile={value} refreshVersion={version} />}</RunnerProvider>;
-  const { rerender, container } = render(workspace(0));
-  await waitFor(() => expect(container.querySelector(".sync-panel")?.getAttribute("aria-busy")).toBe("false"));
+  const { rerender } = render(workspace(0));
+  await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新同步状态" }).disabled).toBe(false));
   fireEvent.change(screen.getByRole("textbox", { name: "新分支" }), { target: { value: "feature/draft" } });
   vi.mocked(invoke).mockClear();
   rerender(workspace(1));
@@ -517,14 +575,20 @@ it("导入前阻止缺号、身份不符和缺失文件，只有可用的本项�
   await screen.findByText("本次更新 #3 · 增量");
   expect(screen.queryByRole("button", { name: /选择更新包/ })).toBeNull();
   vi.mocked(api.mirrorState).mockResolvedValue({ repoId: "matching", lastInSeq: 3, backSeq: 0, lastImportAt: null });
-  fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
+  fireEvent.click(screen.getByRole("button", { name: "刷新同步状态" }));
   await screen.findByText("本次更新 #7 · 全量");
   fireEvent.click(screen.getByRole("button", { name: "导入下一包" }));
   const dialog = await screen.findByRole("alertdialog");
   expect(within(dialog).getByText(/跳过 #4–#6/)).toBeTruthy();
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "sync_updates")).toBe(false);
   fireEvent.click(within(dialog).getByRole("button", { name: "导入到 #7" }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("sync_updates", { bundle: "/usb/7.bundle", mirrorDir: "/mirror", devDirs: [], name: "", email: "" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("sync_updates", {
+    bundle: "/usb/7.bundle", mirrorDir: "/mirror", devDirs: [], name: "", email: "",
+    confirmation: {
+      manifest: makePackage(7, "matching", true, "full").manifest,
+      lastInSeq: 3, mirrorRefs: {}, allowFullGap: true,
+    },
+  }));
 });
 
 it.each(["system", "light", "dark"])("旧 %s 主题偏好被忽略，保存配置时移除该字段", async (theme) => {
