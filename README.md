@@ -2,7 +2,7 @@
 
 在只能访问内网 GitLab 的机器与外网开发机之间，通过 U 盘传递 Git Bundle 或 Patch。支持 Windows 和 macOS，使用 Rust + Tauri v2 + React + shadcn/ui。
 
-当前版本：**2.1.15**。安装包见 [Releases](https://github.com/laplacesc/git-offline-sync/releases)，开发约定见 [AGENTS.md](AGENTS.md)。
+当前版本：**2.1.16**。安装包见 [Releases](https://github.com/laplacesc/git-offline-sync/releases)，开发约定见 [AGENTS.md](AGENTS.md)。
 
 ## 安装
 
