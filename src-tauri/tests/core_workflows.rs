@@ -1,4 +1,6 @@
 //! Business invariants exercised against real temporary Git repositories.
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -84,7 +86,7 @@ impl Fixture {
         sync::init_mirror(g, remote.to_str().unwrap(), &mirror).unwrap();
         let full =
             payload(sync::export_out(g, &mirror, &usb, "test", "main", true, false).unwrap());
-        sync::import_in(g, &full, &ext, false).unwrap();
+        support::import_confirmed(g, &full, &ext, false).unwrap();
         sync::create_dev_repo(g, &ext, &dev, "Tester", "tester@example.com").unwrap();
         Self {
             root,
@@ -145,7 +147,7 @@ fn return_with_missing_prerequisites_explains_fetch_and_preserves_refs() {
     let g = Git::new(None, &log);
     let f = Fixture::new(&g);
     let update = f.advance(&g);
-    sync::import_in(&g, &update, &f.ext, false).unwrap();
+    support::import_confirmed(&g, &update, &f.ext, false).unwrap();
     sync::sync_dev_repo(&g, &f.dev, &f.ext).unwrap();
     let bundle = f.back(&g);
     let before = git(&f.work, &["show-ref"]);
@@ -296,7 +298,7 @@ fn moved_tags_sync_from_exported_snapshots_and_retry_without_changing_local_bran
     git(&f.seed, &["push", "origin", "refs/tags/v1"]);
     let first =
         payload(sync::export_out(&g, &f.mirror, &f.usb, "test", "main", true, false).unwrap());
-    sync::import_in(&g, &first, &f.ext, false).unwrap();
+    support::import_confirmed(&g, &first, &f.ext, false).unwrap();
     sync::sync_dev_repo(&g, &f.dev, &f.ext).unwrap();
     let old_tag = git(&f.dev, &["rev-parse", "refs/tags/v1"]);
     commit(&f.seed, "tag-update", "new tag target\n");
@@ -307,7 +309,7 @@ fn moved_tags_sync_from_exported_snapshots_and_retry_without_changing_local_bran
     );
     let moved =
         payload(sync::export_out(&g, &f.mirror, &f.usb, "test", "main", true, false).unwrap());
-    sync::import_in(&g, &moved, &f.ext, false).unwrap();
+    support::import_confirmed(&g, &moved, &f.ext, false).unwrap();
     let expected = git(&f.seed, &["rev-parse", "refs/tags/v1"]);
     assert_ne!(old_tag, expected);
     let dirs = vec![f.dev.to_string_lossy().into_owned()];
@@ -617,12 +619,20 @@ fn combined_sync_preserves_development_and_reads_real_refs() {
         fresh.to_string_lossy().into_owned(),
     ];
     let incr = f.advance(&g);
-    sync::import_in(&g, &incr, &f.ext, false).unwrap();
+    support::import_confirmed(&g, &incr, &f.ext, false).unwrap();
     let status = sync::dev_sync_status(&g, &f.ext, &dirs);
     assert_eq!(status[0].status, "needsFetch");
     assert_eq!(status[1].status, "notCloned");
-    let result =
-        sync::sync_updates(&g, &f.ext, None, &dirs, "Tester", "tester@example.com").unwrap();
+    let result = sync::sync_updates(
+        &g,
+        &f.ext,
+        None,
+        None,
+        &dirs,
+        "Tester",
+        "tester@example.com",
+    )
+    .unwrap();
     assert!(result.imported.is_none());
     assert_eq!(result.repositories[0].status, "fetched");
     assert_eq!(result.repositories[1].status, "cloned");
@@ -699,7 +709,16 @@ fn sync_updates_imports_mirror_before_explicitly_syncing_development() {
     assert_ne!(origin_main, upstream);
     assert_eq!(git(&f.ext, &["rev-parse", "refs/heads/main"]), origin_main);
 
-    let imported = sync::sync_updates(&g, &f.ext, Some(&bundle), &[], "", "").unwrap();
+    let imported = sync::sync_updates(
+        &g,
+        &f.ext,
+        Some(&bundle),
+        Some(&support::confirmation(&g, &bundle, &f.ext, false).unwrap()),
+        &[],
+        "",
+        "",
+    )
+    .unwrap();
     assert_eq!(imported.imported.unwrap().seq, Some(2));
     assert!(imported.repositories.is_empty());
     assert_eq!(git(&f.ext, &["rev-parse", "refs/heads/main"]), upstream);
@@ -718,7 +737,7 @@ fn sync_updates_imports_mirror_before_explicitly_syncing_development() {
         "keep me\n"
     );
 
-    let synced = sync::sync_updates(&g, &f.ext, None, &dirs, "", "").unwrap();
+    let synced = sync::sync_updates(&g, &f.ext, None, None, &dirs, "", "").unwrap();
     assert!(synced.imported.is_none());
     assert_eq!(synced.repositories.len(), 1);
     assert_eq!(synced.repositories[0].path, dirs[0]);
@@ -763,6 +782,7 @@ fn combined_sync_cancellation_does_not_start_later_repositories() {
         &g,
         &f.ext,
         Some(&incr),
+        Some(&support::confirmation(&setup, &incr, &f.ext, false).unwrap()),
         &[
             f.dev.to_string_lossy().into_owned(),
             later.to_string_lossy().into_owned(),
@@ -781,6 +801,7 @@ fn combined_sync_cancellation_does_not_start_later_repositories() {
     sync::sync_updates(
         &setup,
         &f.ext,
+        None,
         None,
         &[f.dev.to_string_lossy().into_owned()],
         "",
@@ -1318,7 +1339,7 @@ fn old_export_journal_never_restores_stale_import_cursor_and_pending_blocks_impo
     let manifest = Manifest::read_for(&bundle).unwrap().unwrap();
     let old_state = repo::load_state::<repo::MirrorState>(&f.ext).unwrap();
     let incr = f.advance(&g);
-    sync::import_in(&g, &incr, &f.ext, false).unwrap();
+    support::import_confirmed(&g, &incr, &f.ext, false).unwrap();
     // Simulate a legacy pending return export that published its files but did
     // not commit backSeq; an independently newer import must still survive.
     let mut current = repo::load_state::<repo::MirrorState>(&f.ext).unwrap();
@@ -1350,7 +1371,7 @@ fn old_export_journal_never_restores_stale_import_cursor_and_pending_blocks_impo
         .join(bundle.file_name().unwrap()));
     fs::write(&journal_path, serde_json::to_vec(&missing).unwrap()).unwrap();
     let before = repo::list_refs(&g, &f.ext, &["refs/heads", "refs/tags"]).unwrap();
-    assert!(sync::import_in(&g, &incr, &f.ext, false).is_err());
+    assert!(support::import_confirmed(&g, &incr, &f.ext, false).is_err());
     assert_eq!(
         repo::list_refs(&g, &f.ext, &["refs/heads", "refs/tags"]).unwrap(),
         before

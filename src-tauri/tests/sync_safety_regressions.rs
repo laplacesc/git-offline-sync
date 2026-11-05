@@ -1,4 +1,6 @@
 //! Regression tests for patch snapshots, branch deletion CAS and bundle object formats.
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -516,7 +518,7 @@ fn sha256_bundle_round_trip_with_manifest_and_manual_bundle() {
         sync::export_out(&g, &mirror, &f.path("usb"), "test", "main", true, false).unwrap(),
     );
     let external = f.path("external.git");
-    sync::import_in(&g, &full, &external, false).unwrap();
+    support::import_confirmed(&g, &full, &external, false).unwrap();
     let initial = git(&seed, &["rev-parse", "main"]);
     assert_eq!(git(&external, &["rev-parse", "main"]), initial);
     assert_eq!(initial.len(), 64);
@@ -550,7 +552,7 @@ fn sha256_bundle_round_trip_with_manifest_and_manual_bundle() {
         &["bundle", "create", manual.to_str().unwrap(), "--all"],
     );
     let manual_mirror = f.path("manual.git");
-    sync::import_in(&g, &manual, &manual_mirror, false).unwrap();
+    sync::import_manual_bundle(&g, &manual, &manual_mirror).unwrap();
     assert_eq!(git(&manual_mirror, &["rev-parse", "topic"]), tip);
     assert_eq!(
         git(&manual_mirror, &["config", "extensions.objectFormat"]),
@@ -574,7 +576,7 @@ fn sha1_bundle_overrides_sha256_local_default() {
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
     let external = f.path("external.git");
-    let result = sync::import_in(&g, &manual, &external, false);
+    let result = sync::import_manual_bundle(&g, &manual, &external);
     std::env::remove_var("GIT_DEFAULT_HASH");
     result.unwrap();
     assert_eq!(
@@ -615,7 +617,7 @@ fn git_225_sha1_import_avoids_new_format_options_and_sha256_fails_before_init() 
     // Direct legacy SHA-1 import remains readable, but application operations
     // require 2.36 for lossless worktree path enumeration.
     let external = f.path("legacy.git");
-    sync::import_in(&g, &manual, &external, false).unwrap();
+    sync::import_manual_bundle(&g, &manual, &external).unwrap();
     assert_eq!(
         git(&external, &["rev-parse", "main"]),
         git(&seed, &["rev-parse", "main"])
@@ -625,7 +627,7 @@ fn git_225_sha1_import_avoids_new_format_options_and_sha256_fails_before_init() 
     let sha256 = f.path("sha256.bundle");
     fs::write(&sha256, "# v3 git bundle\n@object-format=sha256\n\n").unwrap();
     let unsupported = f.path("unsupported.git");
-    let error = sync::import_in(&g, &sha256, &unsupported, false)
+    let error = sync::import_manual_bundle(&g, &sha256, &unsupported)
         .unwrap_err()
         .to_string();
     assert!(
@@ -673,7 +675,7 @@ fn mismatched_empty_mirror_keeps_unreferenced_objects_and_state() {
     .unwrap();
     let config = fs::read(external.join("config")).unwrap();
     let state = fs::read(external.join("offline-sync/state.json")).unwrap();
-    let error = sync::import_in(&g, &manual, &external, false)
+    let error = sync::import_manual_bundle(&g, &manual, &external)
         .unwrap_err()
         .to_string();
     assert!(
@@ -690,7 +692,7 @@ fn mismatched_empty_mirror_keeps_unreferenced_objects_and_state() {
         state
     );
     let recovered = f.path("recovered.git");
-    sync::import_in(&g, &manual, &recovered, false).unwrap();
+    sync::import_manual_bundle(&g, &manual, &recovered).unwrap();
     assert_eq!(
         git(&recovered, &["rev-parse", "main"]),
         git(&seed, &["rev-parse", "main"])

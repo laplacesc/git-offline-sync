@@ -211,6 +211,13 @@ export interface SyncUpdatesResult {
   repositories: { path: string; status: "fetched" | "cloned" }[];
 }
 
+export interface ImportConfirmation {
+  manifest: Manifest;
+  lastInSeq: number;
+  mirrorRefs: Record<string, string>;
+  allowFullGap: boolean;
+}
+
 export interface InternalState {
   repoId: string | null;
   outSeq: number;
@@ -315,7 +322,7 @@ export const api = {
   // 外网端
   devSyncStatus: (mirrorDir: string, devDirs: string[]) =>
     readOnce<DevSyncStatus[]>("dev_sync_status", { mirrorDir, devDirs }),
-  syncUpdates: (a: { bundle: string | null; mirrorDir: string; devDirs: string[]; name: string; email: string }) =>
+  syncUpdates: (a: { bundle: string | null; confirmation?: ImportConfirmation; mirrorDir: string; devDirs: string[]; name: string; email: string }) =>
     mutate<SyncUpdatesResult>("sync_updates", a),
   configureRepo: (repo: string, name: string, email: string) =>
     mutate<null>("configure_repo", { repo, name, email }),

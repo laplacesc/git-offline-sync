@@ -10,7 +10,7 @@ import { Icon } from "./icons";
 
 export function BranchManager({ profile, repoPath, status, loading, error, onRefresh, selected, onSelect, multi = true, pushBlocked = false }: {
   profile: Profile; repoPath: string; status: RepoStatus | null; loading: boolean; error: string | null;
-  onRefresh: () => Promise<void>; selected: string[]; onSelect: (names: string[]) => void;
+  onRefresh: () => Promise<unknown>; selected: string[]; onSelect: (names: string[]) => void;
   multi?: boolean; pushBlocked?: boolean;
 }) {
   const { run, notify, confirm, busy } = useRunner();
