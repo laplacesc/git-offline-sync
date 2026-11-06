@@ -48,7 +48,6 @@ function Shell() {
   const [savingConfig, setSavingConfig] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(() => !window.matchMedia("(max-width: 800px)").matches);
-  const [navigationTarget, setNavigationTarget] = useState<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
@@ -193,7 +192,6 @@ function Shell() {
               ))}
               {config && !config.profiles.length && <li className="profile-navigation-empty">暂无配置</li>}
             </ul>
-            <div ref={setNavigationTarget} hidden />
             <div className="sidebar-footer">
               <Button type="button" size="icon-sm" variant="ghost" aria-label="打开设置" disabled={locked || !config}
                 onClick={(event) => { dialogReturnFocus.current = event.currentTarget; setMode({ kind: "settings" }); }}><Icon name="settings" /></Button>
@@ -206,7 +204,7 @@ function Shell() {
             </div>
           </nav>
           <div className="workspace">
-            <header className="workspace-toolbar">
+            <header className="workspace-toolbar" data-tauri-drag-region="deep">
               <span className="workspace-title">{current?.name ?? "Git 离线同步"}</span>
               {current && <span className="workspace-role">{current.role === "internal" ? "内网端" : "外网端"}</span>}
               <Button type="button" size="icon-sm" variant="ghost" aria-label="编辑当前配置" disabled={locked || !current}
@@ -223,8 +221,8 @@ function Shell() {
                 </div> : !config ? <Feedback kind="progress" text="正在读取配置…" /> : <>
                   {env && "Err" in env.git && <Feedback kind="error" text={`找不到可用的 git\n${env.git.Err}。请安装 Git，或在设置中指定 git 可执行文件路径。`} />}
                   {current ? (current.role === "internal"
-                    ? <InternalView key={current.id} profile={current} navigationTarget={navigationTarget} onNavigate={closeNavigation} refreshVersion={refreshVersion} />
-                    : <ExternalView key={current.id} profile={current} navigationTarget={navigationTarget} onNavigate={closeNavigation} refreshVersion={refreshVersion} />)
+                    ? <InternalView key={current.id} profile={current} refreshVersion={refreshVersion} />
+                    : <ExternalView key={current.id} profile={current} refreshVersion={refreshVersion} />)
                     : <div className="welcome-page">
                       <AppGlyph className="welcome-glyph" />
                       <h1>添加同步项目</h1>

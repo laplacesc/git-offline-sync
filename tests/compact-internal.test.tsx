@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { api, type Profile, type PushPlan, type RepoStatus, type ReturnPackageInfo } from "../src/api";
+import { api, type Profile, type PushPlan, type RepoStatus, type PackageInfo } from "../src/api";
 import { InternalView } from "../src/InternalView";
 import { OperationStatus, RunnerProvider } from "../src/runner";
 
@@ -18,16 +18,15 @@ const profile: Profile = {
 const success = { ok: true, conflict: false, files: [], message: "完成", worktree: null };
 function status(path: string): RepoStatus {
   return {
-    path, exists: true, isRepo: true, isBare: path === "/mirror", isMirror: path === "/mirror",
-    currentBranch: "main", worktrees: [], dirtyTrees: [], inProgress: null, inProgressTrees: [], remoteUrl: null,
+    isRepo: true, isBare: path === "/mirror",
+    dirtyTrees: [], inProgress: null, inProgressTrees: [],
     branches: [{ name: "feature/one", sha: "preview-oid", base: "main", baseInferred: false,
       ahead: 1, behind: 0, current: false, worktree: null }],
   };
 }
-function returnPackage(received = false): ReturnPackageInfo {
+function returnPackage(): PackageInfo {
   return {
-    payloadPath: "/usb/back.bundle", manifestPath: "/usb/back.json", payloadExists: true,
-    received, receiptKey: "receipt-one",
+    payloadPath: "/usb/back.bundle", payloadExists: true,
     manifest: { format: 1, kind: "back", repoName: "project", repoId: "project-id", seq: 3, createdAt: 1,
       payload: "back.bundle", baseBranch: "main", toolVersion: "2.0.9",
       refs: [{ name: "refs/heads/feature/returned", sha: "returned-oid", base: "main" }] },
@@ -55,7 +54,7 @@ beforeEach(() => {
     switch (command) {
       case "repo_status": return status((args as { path: string }).path);
       case "sync_state": return { repoId: "project-id", outSeq: 4, lastHeads: [], lastExportAt: null };
-      case "list_return_packages": return [];
+      case "list_packages": return [];
       case "prepare_push": return frozenPlan();
       case "execute_push": return success;
       case "export_out": return { status: "nothingToSync", message: "没有新更新" };
@@ -66,6 +65,28 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.mocked(invoke).mockReset(); vi.unstubAllGlobals(); });
 
 describe("内网同步与分支工作流", () => {
+  it.each(["main", "release/1.0"])("导入完成后不保留隐藏基准分支 %s 的选择", async (local) => {
+    vi.spyOn(api, "listPackages").mockResolvedValue([returnPackage()]);
+    vi.spyOn(api, "repoStatus").mockImplementation(async (path) => {
+      const value = status(path);
+      value.branches.push({ ...value.branches[0], name: local });
+      return value;
+    });
+    vi.spyOn(api, "importReturn").mockResolvedValue({
+      branches: [local],
+      warnings: [],
+    });
+    render(view());
+    const button = await screen.findByRole<HTMLButtonElement>("button", { name: "导入回传" });
+    await waitFor(() => expect(button.disabled).toBe(false));
+    fireEvent.click(button);
+    await screen.findByText("已导入本地分支");
+    const operations = screen.getByRole("region", { name: "分支操作" });
+    await waitFor(() => expect(within(operations).getByText("已选 0 个")).toBeTruthy());
+    expect(screen.queryByRole("row", { name: local })).toBeNull();
+    expect(screen.getByRole("row", { name: "feature/one" }).getAttribute("aria-selected")).toBe("false");
+  });
+
   it("内网共享分支表单支持创建独立 worktree", async () => {
     const create = vi.spyOn(api, "createBranch").mockResolvedValue(null);
     render(view());
@@ -95,7 +116,6 @@ describe("内网同步与分支工作流", () => {
     const local = "review/receipt-one/feature/returned";
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({
       ...status(path), branches: [{ ...status(path).branches[0], name: local, worktree: null }],
-      reviewSources: { [local]: "feature/returned" },
     }));
     const imported = vi.spyOn(api, "importReturn");
     const rebased = vi.spyOn(api, "rebaseOnto").mockResolvedValue(success);
@@ -111,31 +131,35 @@ describe("内网同步与分支工作流", () => {
     await waitFor(() => expect(rebased).toHaveBeenCalledExactlyOnceWith("/work", local, "release/1.0", true));
     expect(imported).not.toHaveBeenCalled();
   });
-  it("损坏补丁仅禁用自身导入，正常回传包可直接导入", async () => {
+  it("刷新不检查补丁内容，导入时才报告错误且不影响其他包", async () => {
     const healthy = returnPackage();
-    const broken: ReturnPackageInfo = {
-      ...returnPackage(), payloadPath: "/usb/incomplete", received: false, receiptKey: null,
-      error: "目录里没有 .patch 文件",
+    const broken: PackageInfo = {
+      ...returnPackage(), payloadPath: "/usb/incomplete",
       manifest: { ...returnPackage().manifest!, kind: "patch", seq: 4 },
     };
-    vi.spyOn(api, "listReturnPackages").mockResolvedValue([healthy, broken]);
+    vi.spyOn(api, "listPackages").mockResolvedValue([healthy, broken]);
+    const importPatch = vi.spyOn(api, "importPatches").mockRejectedValue(new Error("目录里没有 .patch 文件"));
     render(view());
     await screen.findByRole("list", { name: "回传包列表" });
-    expect(screen.getByText(/包内容无法读取，请检查后重新复制/)).toBeTruthy();
-    expect(within(screen.getByRole("listitem", { name: "incomplete" })).getByRole<HTMLButtonElement>("button", { name: "导入回传" }).disabled).toBe(true);
+    expect(importPatch).not.toHaveBeenCalled();
+    const importButton = within(screen.getByRole("listitem", { name: "incomplete" })).getByRole<HTMLButtonElement>("button", { name: "导入回传" });
+    await waitFor(() => expect(importButton.disabled).toBe(false));
+    fireEvent.click(importButton);
+    expect(await screen.findByText(/目录里没有 .patch 文件/)).toBeTruthy();
     expect(screen.queryByText(/无法读取传输目录/)).toBeNull();
     await waitFor(() => expect(within(screen.getByRole("listitem", { name: "back.bundle" })).getByRole<HTMLButtonElement>("button", { name: "导入回传" }).disabled).toBe(false));
   });
 
-  it("通过 listReturnPackages 查询接收记录，导出更新沿用当前项目契约", async () => {
+  it("两端共用轻量包列表查询，导出更新沿用当前项目契约", async () => {
     render(view());
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["同步与回传"]);
+    expect(screen.getByRole("heading", { name: "同步与回传", level: 1 })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "同步与回传" })).toBeNull();
     expect(screen.getByRole("region", { name: "导出更新" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "导入回传" })).toBeTruthy();
     const exportButton = await screen.findByRole<HTMLButtonElement>("button", { name: "导出更新" });
     await waitFor(() => expect(exportButton.disabled).toBe(false));
-    expect(invoke).toHaveBeenCalledWith("list_return_packages", { workDir: "/work", dir: "/usb" });
-    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "list_packages")).toBe(false);
+    expect(invoke).toHaveBeenCalledWith("list_packages", { dir: "/usb" });
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "list_return_packages")).toBe(false);
     fireEvent.click(exportButton);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_out", {
       mirrorDir: "/mirror", transferDir: "/usb", repoName: "project", baseBranch: "main", fetchUpstream: true, forceFull: false,
@@ -155,7 +179,7 @@ describe("内网同步与分支工作流", () => {
     await act(async () => pending.resolve({ repoId: "project-id", outSeq: 4, lastHeads: [], lastExportAt: null }));
     await waitFor(() => expect(exportButton.disabled).toBe(false));
     state.mockRejectedValueOnce(new Error("state disk unavailable"));
-    fireEvent.click(screen.getByRole("button", { name: "刷新同步状态" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新", exact: true }));
     const error = await screen.findByText(/无法读取同步记录，请检查后重试/);
     expect(error.textContent).toContain("Error: state disk unavailable");
     expect(error.closest(".operation-popups")).toBeNull();
@@ -163,7 +187,7 @@ describe("内网同步与分支工作流", () => {
     expect(exportButton.disabled).toBe(true);
     fireEvent.click(exportButton);
     expect(exported).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "刷新同步状态" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新", exact: true }));
     await waitFor(() => expect(exportButton.disabled).toBe(false));
     expect(screen.queryByText(/Error: state disk unavailable/)).toBeNull();
     fireEvent.click(exportButton);
@@ -171,7 +195,7 @@ describe("内网同步与分支工作流", () => {
   });
 
   it("传输目录读取失败显示错误而非误报没有待处理回传", async () => {
-    vi.spyOn(api, "listReturnPackages").mockRejectedValue(new Error("USB unavailable"));
+    vi.spyOn(api, "listPackages").mockRejectedValue(new Error("USB unavailable"));
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({ ...status(path), branches: [] }));
     render(view());
     const error = await screen.findByText(/无法读取传输目录，请检查连接后刷新/);
@@ -184,7 +208,7 @@ describe("内网同步与分支工作流", () => {
   it("importReturn 按原名接收并选中行内分支，不自动执行整理或推送", async () => {
     let received = false;
     const local = "feature/returned";
-    vi.spyOn(api, "listReturnPackages").mockImplementation(async () => [returnPackage(received)]);
+    vi.spyOn(api, "listPackages").mockImplementation(async () => [returnPackage()]);
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => {
       const value = status(path);
       if (received && path === "/work") {
@@ -197,8 +221,8 @@ describe("内网同步与分支工作流", () => {
     vi.mocked(invoke).mockImplementation(async (command, args) => {
       if (command !== "import_return") return original(command, args);
       received = true;
-      return { branches: [{ source: "feature/returned", local, sha: "returned-oid", base: "main", commits: [] }],
-        warnings: [], outcomes: [] };
+      return { branches: [local],
+        warnings: [] };
     });
     render(view());
     const button = await screen.findByRole<HTMLButtonElement>("button", { name: "导入回传" });
@@ -223,7 +247,7 @@ describe("内网同步与分支工作流", () => {
     const pkg = returnPackage();
     pkg.payloadPath = "/usb/patches";
     pkg.manifest = { ...pkg.manifest!, kind: "patch", payload: "patches" };
-    vi.spyOn(api, "listReturnPackages").mockResolvedValue([pkg]);
+    vi.spyOn(api, "listPackages").mockResolvedValue([pkg]);
     const original = vi.mocked(invoke).getMockImplementation()!;
     vi.mocked(invoke).mockImplementation(async (command, args) => command === "import_patches" ? success : original(command, args));
     render(view());
@@ -250,7 +274,7 @@ describe("内网同步与分支工作流", () => {
     const pkg = returnPackage();
     pkg.payloadPath = "/usb/patches";
     pkg.manifest = { ...pkg.manifest!, kind: "patch" };
-    vi.spyOn(api, "listReturnPackages").mockResolvedValue([pkg]);
+    vi.spyOn(api, "listPackages").mockResolvedValue([pkg]);
     vi.spyOn(api, "exportOut").mockResolvedValue({ status: "exported", seq: 5, payload: "/usb/old-export.bundle", warnings: [] });
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({ ...status(path), branches: [
       ...status(path).branches, { ...status(path).branches[0], name: "feature/old-patch" },
@@ -280,10 +304,10 @@ describe("内网同步与分支工作流", () => {
   });
 
   it("回传包不区分接收状态，已导入包仍可直接重复导入", async () => {
-    vi.spyOn(api, "listReturnPackages").mockResolvedValue([returnPackage(true)]);
-    const imported = vi.spyOn(api, "importReturn").mockResolvedValue({ branches: [], outcomes: [], warnings: [] });
+    vi.spyOn(api, "listPackages").mockResolvedValue([returnPackage()]);
+    const imported = vi.spyOn(api, "importReturn").mockResolvedValue({ branches: [], warnings: [] });
     render(view());
-    expect(screen.getByRole("tab", { name: "同步与回传" }).textContent).toBe("同步与回传");
+    expect(screen.getByRole("heading", { name: "同步与回传", level: 1 })).toBeTruthy();
     const button = await screen.findByRole<HTMLButtonElement>("button", { name: "导入回传" });
     await waitFor(() => expect(button.disabled).toBe(false));
     fireEvent.click(button);
@@ -296,12 +320,8 @@ describe("内网同步与分支工作流", () => {
     expect(screen.getByRole("grid", { name: "本地分支" })).toBeTruthy();
   });
 
-  it("已推送分支仍保留在统一表格并可再次检查推送", async () => {
-    vi.spyOn(api, "listReturnPackages").mockResolvedValue([]);
-    vi.spyOn(api, "repoStatus").mockImplementation(async (path) => {
-      const value = status(path);
-      return { ...value, pushedBranches: value.branches.map((branch) => branch.name) };
-    });
+  it("普通分支不依赖历史推送信息即可检查推送", async () => {
+    vi.spyOn(api, "listPackages").mockResolvedValue([]);
     render(view());
     expect(await screen.findByText("没有回传包。")).toBeTruthy();
     const operations = screen.getByRole("region", { name: "分支操作" });
@@ -313,8 +333,8 @@ describe("内网同步与分支工作流", () => {
     const valid = { ...returnPackage(), payloadPath: "/usb/valid.bundle" };
     const blocked = { ...returnPackage(), payloadPath: "/usb/blocked.bundle", payloadExists: problem !== "missing",
       manifest: { ...returnPackage().manifest!, seq: 4, repoId: problem === "foreign" ? "other-project" : "project-id" } };
-    vi.spyOn(api, "listReturnPackages").mockResolvedValue([valid, blocked]);
-    const imported = vi.spyOn(api, "importReturn").mockResolvedValue({ branches: [], outcomes: [], warnings: [] });
+    vi.spyOn(api, "listPackages").mockResolvedValue([valid, blocked]);
+    const imported = vi.spyOn(api, "importReturn").mockResolvedValue({ branches: [], warnings: [] });
     render(view());
     const blockedRow = await screen.findByRole("listitem", { name: "blocked.bundle" });
     const button = within(blockedRow).getByRole<HTMLButtonElement>("button", { name: "导入回传" });
@@ -330,15 +350,14 @@ describe("内网同步与分支工作流", () => {
 
   it("空仓库没有可推送分支，缺失工作仓库时不能接收回传", async () => {
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({ ...status(path), branches: [] }));
-    const packages = vi.spyOn(api, "listReturnPackages").mockResolvedValue([]);
+    const packages = vi.spyOn(api, "listPackages").mockResolvedValue([]);
     const repo = vi.mocked(api.repoStatus);
     render(view());
     expect(await screen.findByText("没有回传包。")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^检查并推送 / })).toBeNull();
     packages.mockResolvedValue([returnPackage()]);
     repo.mockImplementation(async (path) => ({ ...status(path), branches: [], isRepo: path === "/mirror", exists: path === "/mirror" }));
-    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
-    fireEvent.click(screen.getByRole("button", { name: "刷新传输目录" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新", exact: true }));
     const button = await screen.findByRole<HTMLButtonElement>("button", { name: "导入回传" });
     expect(button.disabled).toBe(true);
     fireEvent.click(button);

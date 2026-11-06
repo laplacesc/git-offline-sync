@@ -7,7 +7,7 @@ import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Checkbox } from "./components/ui/checkbox";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
-import { api, BranchInfo, InProgressOp, OpOutcome, RepoStatus, Worktree, shortSha } from "./api";
+import { api, BranchInfo, InProgressOp, OpOutcome, PackageInfo, RepoStatus, Worktree, shortSha } from "./api";
 import { useRunner } from "./runner";
 import { Icon } from "./icons";
 import { ActionButton, ActionIconButton, Code, Empty, TextInput } from "./ui";
@@ -63,8 +63,28 @@ export function useRequestGeneration(key: string) {
   }, [key]);
 }
 
-/** Read status for this exact input; a view can own refreshes with autoLoad=false. */
-export function useRepoStatus(path: string | undefined, baseBranch: string, releaseBranches: string[], autoLoad = true) {
+/** Keep package scans independent from local status, and discard stale results. */
+export function usePackages(key: string, dir: string) {
+  const beginRequest = useRequestGeneration(key);
+  const [snapshot, setSnapshot] = useState<{
+    key: string; loading: boolean; packages: PackageInfo[]; packageError: string | null;
+  } | null>(null);
+  const reload = useCallback(async () => {
+    const isCurrent = beginRequest();
+    if (!isCurrent()) return;
+    setSnapshot((previous) => previous?.key === key ? { ...previous, loading: true } : null);
+    const result = await api.listPackages(dir).then(
+      (packages) => ({ packages, packageError: null }),
+      (error) => ({ packages: [] as PackageInfo[], packageError: String(error) }),
+    );
+    if (isCurrent()) setSnapshot({ key, loading: false, ...result });
+  }, [beginRequest, key, dir]);
+  const current = snapshot?.key === key ? snapshot : null;
+  return { current, loading: !current || current.loading, reload };
+}
+
+/** Read status for this exact input; the page owns when to refresh. */
+export function useRepoStatus(path: string | undefined, baseBranch: string, releaseBranches: string[]) {
   const releasesKey = JSON.stringify(releaseBranches);
   const key = JSON.stringify([path, baseBranch, releasesKey]);
   const beginRequest = useRequestGeneration(key);
@@ -89,9 +109,6 @@ export function useRepoStatus(path: string | undefined, baseBranch: string, rele
       return null;
     }
   }, [path, baseBranch, releasesKey, key, beginRequest]);
-  useEffect(() => {
-    if (autoLoad) void reload();
-  }, [reload, autoLoad]);
   const current = result?.key === key ? result : null;
   return { status: current?.status ?? null, loading: current?.loading ?? !!path, error: current?.error ?? null, reload };
 }
@@ -226,13 +243,6 @@ export function BranchTable({
       notify("error", "复制失败，请选择分支名手动复制");
     }
   };
-  // Table 不会替受控调用方清理已删除的 key；空表也必须同步清空选择。
-  useEffect(() => {
-    const available = new Set(branches.map((b) => b.name));
-    const remaining = selected.filter((name) => available.has(name));
-    if (remaining.length !== selected.length) onSelect(remaining);
-  }, [branches, selected, onSelect]);
-
   if (branches.length === 0) return <Empty>{emptyText}</Empty>;
 
   const visible = branches.filter((b) => b.name.toLowerCase().includes(query.trim().toLowerCase()));

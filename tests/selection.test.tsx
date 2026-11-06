@@ -42,9 +42,9 @@ describe("分支选择", () => {
     };
     const available = [branches[0], { ...branches[1], base: "release/1.0" }];
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({
-      path, exists: true, isRepo: true, isBare: path === "/mirror", isMirror: path === "/mirror",
-      currentBranch: "main", worktrees: [], dirtyTrees: [], inProgress: null,
-      inProgressTrees: [], branches: available, remoteUrl: null,
+      isRepo: true, isBare: path === "/mirror",
+      dirtyTrees: [], inProgress: null,
+      inProgressTrees: [], branches: available,
     } satisfies RepoStatus));
     vi.spyOn(api, "mirrorState").mockResolvedValue({ repoId: "matching", lastInSeq: 1, backSeq: 0, lastImportAt: null });
     vi.spyOn(api, "listPackages").mockResolvedValue([]);
@@ -175,29 +175,28 @@ describe("分支选择", () => {
     };
     let available = branches;
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({
-      path, exists: true, isRepo: true, isBare: path === "/mirror", isMirror: path === "/mirror",
-      currentBranch: "main", worktrees: [], dirtyTrees: [], inProgress: null,
-      inProgressTrees: [], branches: available, remoteUrl: null,
+      isRepo: true, isBare: path === "/mirror",
+      dirtyTrees: [], inProgress: null,
+      inProgressTrees: [], branches: available,
     } satisfies RepoStatus));
     vi.spyOn(api, "mirrorState").mockResolvedValue({ repoId: "matching", lastInSeq: 1, backSeq: 0, lastImportAt: null });
     vi.spyOn(api, "listPackages").mockResolvedValue([]);
     const exported = vi.spyOn(api, "exportBack").mockResolvedValue({ status: "nothingToSync", message: "没有新提交" });
     render(<ExternalView profile={profile} />);
-    fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /^选择 feature\/one/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: /^选择 feature\/two/ }));
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: /^选择 feature\/two/ }).getAttribute("aria-checked")).toBe("true");
 
     available = [branches[1]];
-    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新", exact: true }));
     await waitFor(() => expect(screen.queryByRole("checkbox", { name: /^选择 feature\/one/ })).toBeNull());
     expect((screen.getByRole("checkbox", { name: /^选择 feature\/two/ }) as HTMLInputElement).getAttribute("aria-checked")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "导出回传" }));
     await waitFor(() => expect(exported).toHaveBeenCalledWith(expect.objectContaining({ branches: ["feature/two"] })));
 
     available = [];
-    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新分支" }).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true }).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "刷新", exact: true }));
     await waitFor(() => expect(screen.queryByRole("checkbox", { name: /^选择 feature\/two/ })).toBeNull());
     expect(screen.queryByRole("checkbox", { name: /^选择 feature\/two/ })).toBeNull();
     expect(screen.getByText("还没有可回传的开发分支。")).toBeTruthy();
@@ -205,14 +204,12 @@ describe("分支选择", () => {
 
     // 仓库切换后即使存在同名分支，也不沿用前一个仓库的选择。
     available = branches;
-    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新", exact: true }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /^选择 feature\/one/ }));
     expect((screen.getByRole("checkbox", { name: /^选择 feature\/one/ }) as HTMLInputElement).getAttribute("aria-checked")).toBe("true");
-    fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));
 
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
     await waitFor(() => expect(api.repoStatus).toHaveBeenCalledWith("/dev-two", "main", []));
-    fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));
     expect((await screen.findByRole("checkbox", { name: /^选择 feature\/one/ }) as HTMLInputElement).getAttribute("aria-checked")).toBe("false");
     expect((screen.getByRole("button", { name: "导出回传" }) as HTMLButtonElement).disabled).toBe(true);
   });

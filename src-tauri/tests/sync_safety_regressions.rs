@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use git_offline_sync_lib::core::git::{Git, LogEvent, LogKind};
 use git_offline_sync_lib::core::manifest::Manifest;
-use git_offline_sync_lib::core::{repo, sync};
+use git_offline_sync_lib::core::{repo, review, sync};
 
 static ENV: Mutex<()> = Mutex::new(());
 
@@ -55,6 +55,47 @@ impl Fixture {
         let sha = git(&seed, &["rev-parse", "HEAD"]);
         git(&seed, &["update-ref", "refs/remotes/origin/main", &sha]);
         seed
+    }
+
+    fn bind_return_mirror(&self, seed: &Path) {
+        let log = |_: LogEvent| {};
+        let g = Git::new(None, &log);
+        let internal = self.path("return-internal");
+        let mirror = self.path("mirror");
+        sync::init_mirror(&g, seed.to_str().unwrap(), &internal).unwrap();
+        let full = exported(
+            sync::export_out(
+                &g,
+                &internal,
+                &self.path("bootstrap"),
+                "test",
+                "main",
+                false,
+                false,
+            )
+            .unwrap(),
+        );
+        support::import_confirmed(&g, &full, &mirror, false).unwrap();
+        git(seed, &["remote", "add", "origin", mirror.to_str().unwrap()]);
+    }
+
+    fn full_package(&self, seed: &Path) -> PathBuf {
+        let log = |_: LogEvent| {};
+        let g = Git::new(None, &log);
+        let internal = self.path("format-internal.git");
+        sync::init_mirror(&g, seed.to_str().unwrap(), &internal).unwrap();
+        exported(
+            sync::export_out(
+                &g,
+                &internal,
+                &self.path("format-usb"),
+                "test",
+                "main",
+                false,
+                false,
+            )
+            .unwrap(),
+        )
     }
 
     fn supports_sha256(&self) -> bool {
@@ -121,6 +162,7 @@ fn patches(
 fn merge_only_patch_is_rejected_without_publishing_or_advancing_sequence() {
     let f = Fixture::new();
     let seed = f.seed("sha1");
+    f.bind_return_mirror(&seed);
     let first = git(&seed, &["rev-parse", "HEAD"]);
     commit(&seed, "second", "second\n");
     let base = git(&seed, &["rev-parse", "HEAD"]);
@@ -168,6 +210,7 @@ fn merge_only_patch_is_rejected_without_publishing_or_advancing_sequence() {
 fn patch_range_and_manifest_keep_the_checked_tip_when_both_refs_move() {
     let f = Fixture::new();
     let seed = f.seed("sha1");
+    f.bind_return_mirror(&seed);
     let base = git(&seed, &["rev-parse", "HEAD"]);
     git(&seed, &["checkout", "-qb", "topic"]);
     commit(&seed, "topic-file", "checked snapshot\n");
@@ -504,7 +547,7 @@ fn cancelling_prepared_deletion_aborts_and_releases_locks() {
 }
 
 #[test]
-fn sha256_bundle_round_trip_with_manifest_and_manual_bundle() {
+fn sha256_bundle_round_trip_with_manifest() {
     let f = Fixture::new();
     if !f.supports_sha256() {
         return;
@@ -540,19 +583,16 @@ fn sha256_bundle_round_trip_with_manifest_and_manual_bundle() {
         )
         .unwrap(),
     );
-    sync::import_back(&g, &seed, &back, "main", &[]).unwrap();
+    git(&seed, &["update-ref", "refs/remotes/origin/main", "main"]);
+    review::import_return(&g, &seed, &back, "main", &[]).unwrap();
     assert_eq!(git(&seed, &["rev-parse", "topic"]), tip);
     assert_eq!(
         git(&seed, &["show", "topic:returned"]),
         "SHA-256 round trip"
     );
-    let manual = f.path("manual.bundle");
-    git(
-        &seed,
-        &["bundle", "create", manual.to_str().unwrap(), "--all"],
-    );
+    let full = f.full_package(&seed);
     let manual_mirror = f.path("manual.git");
-    sync::import_manual_bundle(&g, &manual, &manual_mirror).unwrap();
+    support::import_confirmed(&g, &full, &manual_mirror, false).unwrap();
     assert_eq!(git(&manual_mirror, &["rev-parse", "topic"]), tip);
     assert_eq!(
         git(&manual_mirror, &["config", "extensions.objectFormat"]),
@@ -567,16 +607,12 @@ fn sha1_bundle_overrides_sha256_local_default() {
         return;
     }
     let seed = f.seed("sha1");
-    let manual = f.path("manual.bundle");
-    git(
-        &seed,
-        &["bundle", "create", manual.to_str().unwrap(), "--all"],
-    );
+    let full = f.full_package(&seed);
     std::env::set_var("GIT_DEFAULT_HASH", "sha256");
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
     let external = f.path("external.git");
-    let result = sync::import_manual_bundle(&g, &manual, &external);
+    let result = support::import_confirmed(&g, &full, &external, false);
     std::env::remove_var("GIT_DEFAULT_HASH");
     result.unwrap();
     assert_eq!(
@@ -596,11 +632,7 @@ fn git_225_sha1_import_avoids_new_format_options_and_sha256_fails_before_init() 
 
     let f = Fixture::new();
     let seed = f.seed("sha1");
-    let manual = f.path("legacy.bundle");
-    git(
-        &seed,
-        &["bundle", "create", manual.to_str().unwrap(), "--all"],
-    );
+    let full = f.full_package(&seed);
     let wrapper = f.path("git-225");
     fs::write(
         &wrapper,
@@ -617,7 +649,7 @@ fn git_225_sha1_import_avoids_new_format_options_and_sha256_fails_before_init() 
     // Direct legacy SHA-1 import remains readable, but application operations
     // require 2.36 for lossless worktree path enumeration.
     let external = f.path("legacy.git");
-    sync::import_manual_bundle(&g, &manual, &external).unwrap();
+    support::import_confirmed(&g, &full, &external, false).unwrap();
     assert_eq!(
         git(&external, &["rev-parse", "main"]),
         git(&seed, &["rev-parse", "main"])
@@ -626,8 +658,15 @@ fn git_225_sha1_import_avoids_new_format_options_and_sha256_fails_before_init() 
     // The capability alone suffices to reject unsupported Git before creating a mirror.
     let sha256 = f.path("sha256.bundle");
     fs::write(&sha256, "# v3 git bundle\n@object-format=sha256\n\n").unwrap();
+    let mut manifest = Manifest::read_for(&full).unwrap().unwrap();
+    manifest.payload = "sha256.bundle".into();
+    manifest.repo_id = "a".repeat(64);
+    for item in &mut manifest.refs {
+        item.sha = "a".repeat(64);
+    }
+    manifest.write_for(&sha256).unwrap();
     let unsupported = f.path("unsupported.git");
-    let error = sync::import_manual_bundle(&g, &sha256, &unsupported)
+    let error = support::import_confirmed(&g, &sha256, &unsupported, false)
         .unwrap_err()
         .to_string();
     assert!(
@@ -644,11 +683,7 @@ fn mismatched_empty_mirror_keeps_unreferenced_objects_and_state() {
         return;
     }
     let seed = f.seed("sha256");
-    let manual = f.path("manual.bundle");
-    git(
-        &seed,
-        &["bundle", "create", manual.to_str().unwrap(), "--all"],
-    );
+    let full = f.full_package(&seed);
     let external = f.path("external.git");
     git(
         f.root.path(),
@@ -675,7 +710,7 @@ fn mismatched_empty_mirror_keeps_unreferenced_objects_and_state() {
     .unwrap();
     let config = fs::read(external.join("config")).unwrap();
     let state = fs::read(external.join("offline-sync/state.json")).unwrap();
-    let error = sync::import_manual_bundle(&g, &manual, &external)
+    let error = support::import_confirmed(&g, &full, &external, false)
         .unwrap_err()
         .to_string();
     assert!(
@@ -692,7 +727,7 @@ fn mismatched_empty_mirror_keeps_unreferenced_objects_and_state() {
         state
     );
     let recovered = f.path("recovered.git");
-    sync::import_manual_bundle(&g, &manual, &recovered).unwrap();
+    support::import_confirmed(&g, &full, &recovered, false).unwrap();
     assert_eq!(
         git(&recovered, &["rev-parse", "main"]),
         git(&seed, &["rev-parse", "main"])

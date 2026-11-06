@@ -25,8 +25,8 @@ function status(path: string): RepoStatus & { refs: RefEntry[] } {
       { name: "refs/heads/feature/one", sha: "old-feature" },
       { name: "refs/tags/obsolete", sha: "old-tag" },
     ],
-    path, exists: true, isRepo: true, isBare: path === "/mirror", isMirror: path === "/mirror",
-    currentBranch: "main", worktrees: [], dirtyTrees: [], inProgress: null, inProgressTrees: [], remoteUrl: null,
+    isRepo: true, isBare: path === "/mirror",
+    dirtyTrees: [], inProgress: null, inProgressTrees: [],
     branches: ["main", "feature/one", "feature/two"].map((name) => ({
       name, sha: "abcdef123", base: "main", baseInferred: false, ahead: 1, behind: 0, current: name === "main", worktree: null,
     })),
@@ -34,7 +34,7 @@ function status(path: string): RepoStatus & { refs: RefEntry[] } {
 }
 function pkg(seq: number, kind: "full" | "incr" = "incr", repoId = "matching", payloadExists = true): PackageInfo {
   return {
-    payloadPath: `/usb/${repoId}-${seq}.bundle`, manifestPath: `/usb/${repoId}-${seq}.json`, payloadExists,
+    payloadPath: `/usb/${repoId}-${seq}.bundle`, payloadExists,
     manifest: {
       format: 1, kind, repoName: "project", repoId, seq, createdAt: 1, payload: `${repoId}-${seq}.bundle`,
       baseBranch: "main", refs: [{ name: "refs/heads/main", sha: "new-main" }], toolVersion: "2.0.9",
@@ -53,7 +53,7 @@ function view(value = profile) {
 async function loaded(value = profile) {
   const result = render(view(value));
   await waitFor(() => expect(screen.queryByText("正在读取仓库状态…")).toBeNull());
-  await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新传输目录" }).disabled).toBe(false));
+  await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true }).disabled).toBe(false));
   return result;
 }
 function managedCheckbox(name: string) { return within(screen.getByRole("row", { name, exact: true })).getByRole<HTMLInputElement>("checkbox"); }
@@ -68,23 +68,28 @@ beforeEach(() => {
   vi.mocked(api.devSyncStatus).mockResolvedValue([
     { path: "/dev-one", status: "upToDate", error: null }, { path: "/dev-two", status: "upToDate", error: null },
   ]);
-  vi.mocked(api.syncUpdates).mockResolvedValue({ imported: { created: false, seq: 3, changes: [] }, repositories: [] });
+  vi.mocked(api.syncUpdates).mockResolvedValue(null);
   vi.spyOn(api, "exportBack").mockResolvedValue({ status: "nothingToSync", message: "没有新提交" });
   vi.spyOn(api, "exportPatches").mockResolvedValue({ status: "nothingToSync", message: "没有新补丁" });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("精简外网同步", () => {
-  it("外网分支管理显示推送图标，但不能发起推送", async () => {
+  it("外网分支管理不提供推送入口", async () => {
     const prepare = vi.spyOn(api, "preparePush");
     await loaded();
     const operations = screen.getByRole("region", { name: "分支操作" });
-    const push = within(operations).getByRole<HTMLButtonElement>("button", { name: "检查并推送 feature/one" });
-    expect(push.disabled).toBe(true);
-    fireEvent.click(push);
+    expect(within(operations).queryByRole("button", { name: "检查并推送 feature/one" })).toBeNull();
     expect(prepare).not.toHaveBeenCalled();
   });
 
+  it("只有一个开发仓库时保留一个同步入口", async () => {
+    await loaded({ ...profile, devRepos: ["/dev-one"] });
+    expect(screen.getByRole("button", { name: "同步开发仓库", exact: true })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "同步仓库", exact: true })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "同步开发仓库", exact: true }));
+    await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({ devDirs: ["/dev-one"] })));
+  });
   it("同步、回传与行内分支操作同时可见，缺包和仓库提示不重复", async () => {
     vi.mocked(api.repoStatus).mockImplementation(async (path) => ({
       ...status(path), isRepo: path === "/mirror", branches: [],
@@ -112,7 +117,7 @@ describe("精简外网同步", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "同步仓库", exact: true })[0]);
     expect(screen.getByText("正在同步开发仓库，请稍候…").closest(".operation-popups")).toBeTruthy();
     expect(document.querySelector(".sync-workspace")?.textContent).not.toMatch(/正在检查更新|正在读取开发分支/);
-    await act(async () => sync.resolve({ imported: null, repositories: [] }));
+    await act(async () => sync.resolve(null));
     expect(screen.queryByText("已完成开发仓库同步")).toBeNull();
     expect(screen.queryByText("正在检查更新…")).toBeNull();
     expect(screen.queryByText("正在读取开发分支…")).toBeNull();
@@ -159,7 +164,8 @@ describe("精简外网同步", () => {
   it("默认选择本项目下一包，只向镜像导入并保持区块对应顺序", async () => {
     vi.mocked(api.listPackages).mockResolvedValue([pkg(5, "full"), pkg(3, "incr", "other"), pkg(2, "full"), pkg(3)]);
     await loaded();
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["同步与回传"]);
+    expect(screen.getByRole("heading", { name: "同步与回传", level: 1 })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "同步与回传" })).toBeNull();
     expect(screen.getByRole("region", { name: "导入更新" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "回传提交" })).toBeTruthy();
     expect(screen.getByText("本次更新 #3 · 增量")).toBeTruthy();
@@ -335,6 +341,26 @@ describe("精简外网同步", () => {
     expect(api.syncUpdates).not.toHaveBeenCalled();
   });
 
+  it("全量确认期间焦点刷新发现新包，旧确认失效且可以重新确认", async () => {
+    vi.mocked(api.listPackages).mockResolvedValue([pkg(5, "full")]);
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: "导入下一包", exact: true }));
+    const dialog = await screen.findByRole("alertdialog");
+    vi.mocked(api.listPackages).mockResolvedValue([pkg(7, "full")]);
+    vi.useFakeTimers();
+    act(() => focus.listener?.({ payload: true }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(301); });
+    vi.useRealTimers();
+    expect(api.listPackages).toHaveBeenCalledTimes(2);
+    fireEvent.click(within(dialog).getByRole("button", { name: "导入到 #5" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(api.syncUpdates).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "导入下一包", exact: true }));
+    const fresh = await screen.findByRole("alertdialog");
+    fireEvent.click(within(fresh).getByRole("button", { name: "导入到 #7" }));
+    await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({ bundle: "/usb/matching-7.bundle" })));
+  });
+
   it("开发仓库管理中的单库同步不顺带导入当前待同步包", async () => {
     await loaded();
     const row = screen.getByText("/dev-two", { exact: true }).closest(".sync-branch-row")!;
@@ -454,7 +480,7 @@ describe("精简外网同步", () => {
   it("刷新移除分支后清理选择并禁止空导出", async () => {
     await loaded(); selectBranch("feature/one");
     vi.mocked(api.repoStatus).mockImplementation(async (path) => ({ ...status(path), branches: [] }));
-    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新", exact: true }));
     await waitFor(() => expect(screen.queryByRole("checkbox", { name: /^选择 feature\/one/, exact: true })).toBeNull());
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "导出回传" }).disabled).toBe(true);
   });
@@ -515,7 +541,7 @@ describe("精简外网同步", () => {
 
   it("回传提交内仅有一张行内分支表，直接控制回传选择且没有独立入口", async () => {
     await loaded();
-    expect(screen.getAllByRole("tab")).toHaveLength(1);
+    expect(screen.queryByRole("tablist")).toBeNull();
     const returns = screen.getByRole("region", { name: "回传提交" });
     const operations = within(returns).getByRole("region", { name: "分支操作" });
     const grid = within(operations).getByRole("grid", { name: "本地分支" });

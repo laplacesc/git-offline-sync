@@ -53,7 +53,7 @@ it("取消查询的旧响应不会停止新启动的操作", async () => {
   await act(async () => nextTask.resolve(null));
 });
 
-it.each([{ ok: false, conflict: true }, { outcomes: [{ ok: false, conflict: false }] }])(
+it.each([{ ok: false, conflict: true }, { ok: false, conflict: false }])(
   "业务返回需要处理时不把操作记录为完成：%j", async (outcome) => {
     function OutcomeHarness() {
       const { run, operations } = useRunner();

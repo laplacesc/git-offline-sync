@@ -5,16 +5,16 @@ import { Empty } from "./components/ui/empty";
 import { Input } from "./components/ui/input";
 import { Label } from "./components/ui/label";
 import { Pagination, PaginationContent, PaginationItem } from "./components/ui/pagination";
-import { formatTime, type PackageInfo } from "./api";
+import { type PackageInfo } from "./api";
 
 const PAGE_SIZE = 20;
 const COLLAPSED_SIZE = 5;
 
 /** 默认显示最新五个包，展开后分页，搜索始终覆盖全部包。 */
-export function PackageInbox<T extends PackageInfo>({ packages, disabled, renderDetails, packageLabel = "回传包" }: {
-  packages: T[];
+export function PackageInbox({ packages, disabled, renderDetails, packageLabel = "回传包" }: {
+  packages: PackageInfo[];
   disabled: boolean;
-  renderDetails: (pkg: T) => ReactNode;
+  renderDetails: (pkg: PackageInfo) => ReactNode;
   packageLabel?: string;
 }) {
   const searchId = useId();
@@ -25,10 +25,11 @@ export function PackageInbox<T extends PackageInfo>({ packages, disabled, render
   const rows = useMemo(() => packages.map((pkg) => {
     const name = pkg.payloadPath.split(/[\\/]/).pop() || pkg.payloadPath;
     const branches = pkg.manifest?.refs.map((ref) => ref.name.replace(/^refs\/heads\//, "")) ?? [];
-    let title = branches[0] || name;
+    let title = branches[0] || "Bundle";
     if (branches.length > 1) title += ` 等 ${branches.length} 个分支`;
     if (pkg.manifest?.kind === "full") title = "全量更新";
     if (pkg.manifest?.kind === "incr") title = "增量更新";
+    if (pkg.manifest?.kind === "patch") title = `Patch · ${title}`;
     return { pkg, name, branches, title, search: [pkg.payloadPath, pkg.manifest?.seq, pkg.manifest?.repoName, ...branches].join(" ").toLowerCase() };
   }).sort((a, b) => (b.pkg.manifest?.createdAt ?? 0) - (a.pkg.manifest?.createdAt ?? 0)
     || (b.pkg.manifest?.seq ?? 0) - (a.pkg.manifest?.seq ?? 0)
@@ -58,7 +59,7 @@ export function PackageInbox<T extends PackageInfo>({ packages, disabled, render
             <div className="return-package-title"><span className="return-package-name" title={branches.join("、") || name}>
               {title}
             </span></div>
-            <div className="return-package-meta"><span title={name}>{name}</span>{pkg.manifest && <time>{formatTime(pkg.manifest.createdAt)}</time>}</div>
+            <div className="return-package-meta"><span title={pkg.payloadPath}>{name}</span></div>
           </div>
           {renderDetails(pkg)}
         </li>)}

@@ -2,19 +2,19 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Button } from "../src/components/ui/button";
 import { PackageInbox } from "../src/PackageInbox";
-import type { ReturnPackageInfo } from "../src/api";
+import type { PackageInfo } from "../src/api";
 
-function packages(count: number): ReturnPackageInfo[] {
+function packages(count: number): PackageInfo[] {
   return Array.from({ length: count }, (_, index) => {
     const seq = index + 1;
     const id = String(seq).padStart(4, "0");
-    return { payloadPath: `/usb/package-${id}.bundle`, manifestPath: `/usb/package-${id}.json`, payloadExists: true,
-      received: false, receiptKey: `receipt-${id}`, manifest: { format: 1, kind: "back", repoName: "project", repoId: "project-id",
+    return { payloadPath: `/usb/package-${id}.bundle`, payloadExists: true,
+      manifest: { format: 1, kind: "back", repoName: "project", repoId: "project-id",
         seq, createdAt: seq, payload: `package-${id}.bundle`, baseBranch: "main", toolVersion: "2.1.0",
         refs: [{ name: `refs/heads/feature/item-${id}`, sha: `sha-${id}`, base: "main" }] } };
   });
 }
-function view(items: ReturnPackageInfo[], imported = vi.fn()) {
+function view(items: PackageInfo[], imported = vi.fn()) {
   return <PackageInbox packages={items} disabled={false}
     renderDetails={(pkg) => <><h2>{pkg.payloadPath}</h2><Button onClick={() => imported(pkg.payloadPath)}>导入回传</Button></>} />;
 }
@@ -85,12 +85,22 @@ it("五个以内不显示折叠入口，包的刷新不会自动展开", () => {
 
 it("不按导入状态筛选，所有包都直接显示导入入口", () => {
   const items = packages(2);
-  items[1].received = true;
   render(view(items));
   expect(screen.getAllByRole("button", { name: "导入回传" })).toHaveLength(2);
   expect(screen.queryByRole("button", { name: /接收状态/ })).toBeNull();
   expect(screen.queryByText("已接收")).toBeNull();
   expect(screen.queryByText("待接收")).toBeNull();
+});
+
+it("包列表只展示序号、分支和文件名，不展示时间或技术详情", () => {
+  render(<PackageInbox packages={packages(1)} disabled={false} renderDetails={() => <Button>导入回传</Button>} />);
+  const row = screen.getByRole("listitem", { name: "package-0001.bundle" });
+  expect(within(row).getByText("#1")).toBeTruthy();
+  expect(within(row).getByText("feature/item-0001")).toBeTruthy();
+  expect(within(row).getByText("package-0001.bundle")).toBeTruthy();
+  expect(row.querySelector("time")).toBeNull();
+  expect(within(row).queryByText("project-id")).toBeNull();
+  expect(within(row).queryByText("receipt-0001")).toBeNull();
 });
 
 it("导入后包保留在原列表，刷新后可再次导入且不会自动执行", () => {
@@ -100,7 +110,7 @@ it("导入后包保留在原列表，刷新后可再次导入且不会自动执�
   const importSecond = () => fireEvent.click(within(screen.getByRole("listitem", { name: "package-0002.bundle" })).getByRole("button", { name: "导入回传" }));
   importSecond();
   expect(imported).toHaveBeenCalledExactlyOnceWith("/usb/package-0002.bundle");
-  rerender(view(items.map((pkg) => ({ ...pkg, received: true })), imported));
+  rerender(view(items.map((pkg) => ({ ...pkg })), imported));
   expect(screen.getAllByRole("listitem")).toHaveLength(2);
   expect(imported).toHaveBeenCalledTimes(1);
   importSecond();

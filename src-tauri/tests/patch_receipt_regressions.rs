@@ -5,7 +5,7 @@ use std::process::Command;
 
 use git_offline_sync_lib::core::git::{Git, LogEvent, LogKind};
 use git_offline_sync_lib::core::manifest::{BundleKind, Manifest, RefEntry, FORMAT};
-use git_offline_sync_lib::core::{repo, review, sync};
+use git_offline_sync_lib::core::{repo, sync};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -95,12 +95,9 @@ impl Fixture {
     }
 
     fn received(&self, g: &Git) -> bool {
-        review::list_return_packages(g, &self.work, &self.usb)
+        !repo::list_refs(g, &self.work, &["refs/offline-sync/patch-receipts"])
             .unwrap()
-            .into_iter()
-            .find(|p| Path::new(&p.package.payload_path) == self.patches)
-            .unwrap()
-            .received
+            .is_empty()
     }
 
     fn conflict(&self) {
@@ -114,6 +111,59 @@ impl Fixture {
 }
 
 #[test]
+fn patch_import_locks_existing_worktree_before_any_mutation() {
+    use git_offline_sync_lib::core::storage::OperationLock;
+
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    for fetch in [false, true] {
+        let f = Fixture::new();
+        let remote = f.root.path().join("remote.git");
+        git(&f.work, &["clone", "--bare", ".", remote.to_str().unwrap()]);
+        git(
+            &f.work,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        let wt = f.root.path().join("linked");
+        git(
+            &f.work,
+            &["worktree", "add", "--detach", wt.to_str().unwrap(), "main"],
+        );
+        let gd = repo::git_dir(&g, &wt).unwrap();
+        let snapshot = || {
+            serde_json::json!({
+                "head": fs::read(gd.join("HEAD")).unwrap(),
+                "refs": repo::list_refs(&g, &wt, &["refs"]).unwrap(),
+                "config": fs::read(f.work.join(".git/config")).unwrap(),
+                "index": fs::read(gd.join("index")).unwrap(),
+                "file": fs::read(wt.join("file")).unwrap(),
+                "gitFile": fs::read(wt.join(".git")).unwrap(),
+                "journal": fs::read(gd.join("offline-sync-patch.json")).ok(),
+                "fetchHead": fs::read(gd.join("FETCH_HEAD")).ok(),
+            })
+        };
+        let before = snapshot();
+        let held = OperationLock::acquire(&gd.join("offline-sync-operation")).unwrap();
+        let error = sync::import_patches(&g, &wt, &f.patches, "received", "main", fetch)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("锁"), "{error}");
+        assert_eq!(
+            snapshot(),
+            before,
+            "held linked-worktree lock, fetch={fetch}"
+        );
+        drop(held);
+        assert!(
+            sync::import_patches(&g, &wt, &f.patches, "received", "main", fetch)
+                .unwrap()
+                .ok
+        );
+        assert_eq!(fs::read_to_string(wt.join("file")).unwrap(), "returned\n");
+    }
+}
+
+#[test]
 fn successful_patch_receipt_survives_reload_copy_and_duplicate_import() {
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
@@ -121,14 +171,25 @@ fn successful_patch_receipt_survives_reload_copy_and_duplicate_import() {
         let f = Fixture::new();
         let wt = f.root.path().join("received");
         assert!(!f.received(&g));
+        if linked {
+            git(
+                &f.work,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    wt.to_str().unwrap(),
+                    "origin/main",
+                ],
+            );
+        }
         let result = sync::import_patches(
             &g,
-            &f.work,
+            if linked { &wt } else { &f.work },
             &f.patches,
             "received",
             "main",
             false,
-            linked.then_some(wt.as_path()),
         )
         .unwrap();
         assert!(result.ok);
@@ -154,23 +215,10 @@ fn successful_patch_receipt_survives_reload_copy_and_duplicate_import() {
         let mut manifest = Manifest::read_for(&f.patches).unwrap().unwrap();
         manifest.payload = "renamed".into();
         manifest.write_for(&copy).unwrap();
-        assert!(review::list_return_packages(&g, &f.work, &f.usb)
-            .unwrap()
-            .iter()
-            .all(|p| p.received));
-        let unused = f.root.path().join("must-not-create");
-        let repeat = sync::import_patches(
-            &g,
-            &f.work,
-            &copy,
-            "different-branch",
-            "main",
-            false,
-            Some(&unused),
-        )
-        .unwrap();
+        let repeat =
+            sync::import_patches(&g, target, &copy, "different-branch", "main", false).unwrap();
         assert!(repeat.ok);
-        assert!(!unused.exists());
+        assert!(!repo::rev_exists(&g, target, "refs/heads/different-branch"));
         assert_eq!(repo::list_refs(&g, &f.work, &["refs"]).unwrap(), refs);
         assert_eq!(git(target, &["rev-parse", "HEAD"]), tip);
     }
@@ -183,16 +231,17 @@ fn patch_conflict_is_received_only_after_continue_and_abort_stays_pending() {
     let f = Fixture::new();
     f.conflict();
     let aborted = f.root.path().join("aborted");
-    let first = sync::import_patches(
-        &g,
+    git(
         &f.work,
-        &f.patches,
-        "aborted",
-        "main",
-        false,
-        Some(&aborted),
-    )
-    .unwrap();
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            aborted.to_str().unwrap(),
+            "origin/main",
+        ],
+    );
+    let first = sync::import_patches(&g, &aborted, &f.patches, "aborted", "main", false).unwrap();
     assert!(!first.ok);
     assert!(!f.received(&g));
     assert!(sync::abort(&g, &aborted).unwrap().ok);
@@ -203,36 +252,33 @@ fn patch_conflict_is_received_only_after_continue_and_abort_stays_pending() {
         .exists());
 
     let resolved = f.root.path().join("resolved");
-    let second = sync::import_patches(
-        &g,
+    git(
         &f.work,
-        &f.patches,
-        "resolved",
-        "main",
-        false,
-        Some(&resolved),
-    )
-    .unwrap();
-    assert!(!second.ok);
-    let unused = f.root.path().join("unused");
-    let duplicate = sync::import_patches(
-        &g,
-        &f.work,
-        &f.patches,
-        "unused",
-        "main",
-        false,
-        Some(&unused),
-    )
-    .unwrap();
-    assert!(!duplicate.ok);
-    assert_eq!(
-        Path::new(duplicate.worktree.as_deref().unwrap())
-            .canonicalize()
-            .unwrap(),
-        resolved.canonicalize().unwrap()
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            resolved.to_str().unwrap(),
+            "origin/main",
+        ],
     );
-    assert!(!unused.exists());
+    let second =
+        sync::import_patches(&g, &resolved, &f.patches, "resolved", "main", false).unwrap();
+    assert!(!second.ok);
+    // Both the original linked worktree and another worktree find the same
+    // pending journal, without trying to reacquire a lock already held.
+    for work in [&resolved, &f.work] {
+        let duplicate =
+            sync::import_patches(&g, work, &f.patches, "unused", "main", false).unwrap();
+        assert!(!duplicate.ok);
+        assert_eq!(
+            Path::new(duplicate.worktree.as_deref().unwrap())
+                .canonicalize()
+                .unwrap(),
+            resolved.canonicalize().unwrap()
+        );
+        assert!(!repo::rev_exists(&g, work, "refs/heads/unused"));
+    }
     fs::write(resolved.join("file"), "resolved\n").unwrap();
     git(&resolved, &["add", "file"]);
     assert!(sync::continue_op(&g, &resolved).unwrap().ok);
@@ -249,9 +295,7 @@ fn patch_import_in_existing_worktree_protects_changes_and_can_continue_conflicts
     for tracked in [false, true] {
         let dirty = f.work.join(if tracked { "file" } else { "new-file" });
         fs::write(&dirty, "local edits\n").unwrap();
-        assert!(
-            sync::import_patches(&g, &f.work, &f.patches, "received", "main", false, None).is_err()
-        );
+        assert!(sync::import_patches(&g, &f.work, &f.patches, "received", "main", false).is_err());
         assert_eq!(fs::read_to_string(&dirty).unwrap(), "local edits\n");
         assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), initial);
         assert!(!repo::rev_exists(&g, &f.work, "refs/heads/received"));
@@ -264,8 +308,7 @@ fn patch_import_in_existing_worktree_protects_changes_and_can_continue_conflicts
     }
     f.conflict();
     let main = git(&f.work, &["rev-parse", "main"]);
-    let result =
-        sync::import_patches(&g, &f.work, &f.patches, "received", "main", false, None).unwrap();
+    let result = sync::import_patches(&g, &f.work, &f.patches, "received", "main", false).unwrap();
     assert!(!result.ok);
     assert_eq!(repo::list_worktrees(&g, &f.work).unwrap().len(), 1);
     assert_eq!(git(&f.work, &["branch", "--show-current"]), "received");
@@ -284,7 +327,7 @@ fn external_am_completion_is_recovered_but_aborted_unrelated_commits_are_not_rec
         let f = Fixture::new();
         f.conflict();
         assert!(
-            !sync::import_patches(&g, &f.work, &f.patches, "received", "main", false, None)
+            !sync::import_patches(&g, &f.work, &f.patches, "received", "main", false)
                 .unwrap()
                 .ok
         );
@@ -342,7 +385,7 @@ fn external_partial_am_never_marks_the_entire_package_received() {
             git(&f.work, &["switch", "main"]);
             f.conflict();
             assert!(
-                !sync::import_patches(&g, &f.work, &f.patches, "received", "main", false, None)
+                !sync::import_patches(&g, &f.work, &f.patches, "received", "main", false)
                     .unwrap()
                     .ok
             );
@@ -366,10 +409,9 @@ fn external_partial_am_never_marks_the_entire_package_received() {
                 let head = git(&f.work, &["rev-parse", "HEAD"]);
                 let index = fs::read(gd.join("index")).unwrap();
                 assert!(sync::continue_op(&g, &f.work).is_err());
-                assert!(sync::import_patches(
-                    &g, &f.work, &f.patches, "retry", "main", false, None
-                )
-                .is_err());
+                assert!(
+                    sync::import_patches(&g, &f.work, &f.patches, "retry", "main", false).is_err()
+                );
                 assert!(!f.received(&g));
                 assert!(gd.join("offline-sync-patch.json").exists());
                 assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), head);
@@ -387,7 +429,7 @@ fn legacy_patch_journal_cannot_infer_external_completion() {
     let g = Git::new(None, &log);
     f.conflict();
     assert!(
-        !sync::import_patches(&g, &f.work, &f.patches, "received", "main", false, None)
+        !sync::import_patches(&g, &f.work, &f.patches, "received", "main", false)
             .unwrap()
             .ok
     );
@@ -414,7 +456,7 @@ fn invalid_patch_packages_do_not_hide_healthy_packages() {
         let f = Fixture::new();
         if received {
             assert!(
-                sync::import_patches(&g, &f.work, &f.patches, "received", "main", false, None)
+                sync::import_patches(&g, &f.work, &f.patches, "received", "main", false)
                     .unwrap()
                     .ok
             );
@@ -430,28 +472,18 @@ fn invalid_patch_packages_do_not_hide_healthy_packages() {
             manifest.payload = name.into();
             manifest.write_for(&dir).unwrap();
         }
-        let packages = review::list_return_packages(&g, &f.work, &f.usb).unwrap();
+        let packages = sync::list_packages(&f.usb).unwrap();
         assert_eq!(packages.len(), 3);
-        for package in packages {
-            if Path::new(&package.package.payload_path) == f.patches {
-                assert_eq!(package.received, received);
-                assert!(package.error.is_none());
-            } else {
-                assert!(!package.received);
-                assert!(package.error.is_some());
-                assert!(package.receipt_key.is_none());
-            }
+        assert!(packages.iter().all(|p| p.payload_exists));
+        assert_eq!(f.received(&g), received);
+        let refs = repo::list_refs(&g, &f.work, &["refs"]).unwrap();
+        for name in ["empty", "invalid"] {
+            assert!(
+                sync::import_patches(&g, &f.work, &f.usb.join(name), "invalid", "main", false)
+                    .is_err()
+            );
+            assert_eq!(repo::list_refs(&g, &f.work, &["refs"]).unwrap(), refs);
         }
-        assert!(sync::import_patches(
-            &g,
-            &f.work,
-            &f.usb.join("empty"),
-            "invalid",
-            "main",
-            false,
-            None
-        )
-        .is_err());
     }
 }
 
@@ -468,9 +500,7 @@ fn failed_patch_receipt_write_can_finish_without_reapplying_commits() {
             }
         };
         let g = Git::new(None, &log);
-        assert!(
-            sync::import_patches(&g, &f.work, &f.patches, "received", "main", false, None).is_err()
-        );
+        assert!(sync::import_patches(&g, &f.work, &f.patches, "received", "main", false).is_err());
         assert_eq!(
             fs::read_to_string(f.work.join("file")).unwrap(),
             "returned\n"
@@ -486,7 +516,7 @@ fn failed_patch_receipt_write_can_finish_without_reapplying_commits() {
             manifest.seq += 1;
             manifest.write_for(&f.patches).unwrap();
             assert!(
-                sync::import_patches(&retry, &f.work, &f.patches, "next", "main", false, None)
+                sync::import_patches(&retry, &f.work, &f.patches, "next", "main", false)
                     .unwrap()
                     .ok
             );
