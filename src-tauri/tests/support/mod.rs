@@ -5,7 +5,7 @@ use git_offline_sync_lib::core::{
     git::Git,
     manifest::Manifest,
     repo,
-    sync::{self, ImportConfirmation, ImportInResult},
+    sync::{self, ImportConfirmation},
 };
 
 /// Simulate a fresh UI scan. Stale-confirmation tests keep this value and mutate
@@ -31,12 +31,7 @@ pub fn confirmation(
     })
 }
 
-pub fn import_confirmed(
-    g: &Git,
-    bundle: &Path,
-    mirror: &Path,
-    allow_full_gap: bool,
-) -> Result<ImportInResult> {
+pub fn import_confirmed(g: &Git, bundle: &Path, mirror: &Path, allow_full_gap: bool) -> Result<()> {
     let confirmation = confirmation(g, bundle, mirror, allow_full_gap)?;
     sync::import_in(g, bundle, mirror, Some(&confirmation))
 }

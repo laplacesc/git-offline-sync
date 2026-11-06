@@ -1,6 +1,6 @@
 //! 同步流程。
 //!
-//! 内网端（能访问 GitLab）：init_mirror → export_out → import_back / import_patches → rebase_onto → push
+//! 内网端（能访问 GitLab）：init_mirror → export_out → review::import_return / import_patches → rebase_onto → review::prepare_push / execute_push
 //! 外网端（AI 开发）：import_in → create_branch → export_back / export_patches
 
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::error::{invalid, Result, SyncError};
 use super::git::Git;
 use super::manifest::{BundleKind, Manifest, RefEntry, FORMAT};
-use super::repo::{self, CommitInfo, InternalState, MirrorState};
+use super::repo::{self, InternalState, MirrorState};
 use super::storage::{atomic_write, OperationLock};
 use crate::args;
 
@@ -271,46 +271,8 @@ fn finish_export(state_dir: &Path, journal: ExportJournal) -> Result<ExportOutco
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RefChange {
-    pub name: String,
-    pub old: Option<String>,
-    pub new: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportInResult {
-    /// 本次导入新建了外网镜像（首次导入）
-    pub created: bool,
-    pub seq: Option<u32>,
-    pub changes: Vec<RefChange>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportedBranch {
-    /// 包里的分支名
-    pub source: String,
-    /// 实际写入的本地分支名（非快进时会改名）
-    pub local: String,
-    pub sha: String,
-    /// 该分支的基准分支（来自 manifest，缺失时按前缀推断）
-    pub base: String,
-    pub commits: Vec<CommitInfo>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportBackResult {
-    pub branches: Vec<ImportedBranch>,
-    pub warnings: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PackageInfo {
     pub manifest: Option<Manifest>,
-    pub manifest_path: Option<String>,
     pub payload_path: String,
     pub payload_exists: bool,
 }
@@ -366,21 +328,23 @@ fn validate_branch_name(g: &Git, repo: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// 列出传输目录里的包（按创建时间倒序）。没有 manifest 的 `.bundle` 也会列出。
+/// 列出传输目录里的包，展示排序由前端负责。没有 manifest 的 `.bundle` 也会列出。
 pub fn list_packages(dir: &Path) -> Result<Vec<PackageInfo>> {
     let mut out = Vec::new();
     if !dir.exists() {
         return Ok(out);
     }
+    let entries = fs::read_dir(dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
     let mut seen = std::collections::HashSet::new();
-    for entry in fs::read_dir(dir)? {
-        let p = entry?.path();
+    for p in &entries {
         let name = p
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         if let Some(stem) = name.strip_suffix(".manifest.json") {
-            let text = fs::read_to_string(&p)?;
+            let text = fs::read_to_string(p)?;
             let m: Manifest = match serde_json::from_str(&text) {
                 Ok(m) => m,
                 Err(_) => continue,
@@ -389,20 +353,18 @@ pub fn list_packages(dir: &Path) -> Result<Vec<PackageInfo>> {
             seen.insert(stem.to_string());
             if m.validate(&payload).is_err()
                 || pending_marker(&payload).exists()
-                || super::manifest::manifest_path_for(&payload) != p
+                || super::manifest::manifest_path_for(&payload) != *p
             {
                 continue;
             }
             out.push(PackageInfo {
                 payload_exists: payload.exists(),
                 payload_path: payload.to_string_lossy().into_owned(),
-                manifest_path: Some(p.to_string_lossy().into_owned()),
                 manifest: Some(m),
             });
         }
     }
-    for entry in fs::read_dir(dir)? {
-        let p = entry?.path();
+    for p in &entries {
         if p.extension().is_some_and(|e| e == "bundle") {
             let stem = p
                 .file_stem()
@@ -410,39 +372,29 @@ pub fn list_packages(dir: &Path) -> Result<Vec<PackageInfo>> {
                 .to_string_lossy()
                 .into_owned();
             if !seen.contains(&stem)
-                && !pending_marker(&p).exists()
-                && !super::manifest::manifest_path_for(&p).exists()
+                && !pending_marker(p).exists()
+                && !super::manifest::manifest_path_for(p).exists()
             {
                 out.push(PackageInfo {
                     manifest: None,
-                    manifest_path: None,
                     payload_exists: true,
                     payload_path: p.to_string_lossy().into_owned(),
                 });
             }
         }
     }
-    out.sort_by_key(|p| std::cmp::Reverse(p.manifest.as_ref().map(|m| m.created_at).unwrap_or(0)));
     Ok(out)
-}
-
-pub fn list_commits(g: &Git, repo: &Path, from: &str, to: &str) -> Result<Vec<CommitInfo>> {
-    repo::commits_between(g, repo, from, to)
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RebaseJournal {
     branch: String,
-    old_base: Option<String>,
     new_base: String,
     old_head: String,
     target: String,
     #[serde(default)]
     completed: bool,
-    /// Freeze the completed commit so a marker-write retry cannot mark later edits ready.
-    #[serde(default)]
-    completed_head: Option<String>,
 }
 
 fn rebase_journal(git_dir: &Path) -> PathBuf {
@@ -467,22 +419,9 @@ fn clear_rebase_journal(git_dir: &Path) -> Result<()> {
 
 fn finish_rebase(g: &Git, work: &Path, gd: &Path) -> Result<()> {
     if let Some(mut journal) = read_rebase_journal(gd)? {
-        if journal.completed_head.is_none() {
-            journal.completed_head = Some(repo::rev_parse(
-                g,
-                work,
-                &format!("refs/heads/{}", journal.branch),
-            )?);
-        }
         journal.completed = true;
         atomic_write(&rebase_journal(gd), &serde_json::to_vec(&journal)?)?;
         repo::set_sync_base(g, work, &journal.branch, &journal.new_base)?;
-        super::review::mark_review_ready(
-            g,
-            work,
-            &journal.branch,
-            journal.completed_head.as_deref().unwrap(),
-        )?;
         clear_rebase_journal(gd)?;
     }
     Ok(())
@@ -1025,7 +964,6 @@ fn replace_refs(
     work: &Path,
     before: &BTreeMap<String, String>,
     wanted: &BTreeMap<String, String>,
-    prune: bool,
 ) -> Result<()> {
     let mut script = String::new();
     for (name, sha) in wanted {
@@ -1034,176 +972,16 @@ fn replace_refs(
             None => script.push_str(&format!("create {name} {sha}\n")),
         }
     }
-    if prune {
-        for (name, old) in before {
-            if !wanted.contains_key(name) {
-                script.push_str(&format!("delete {name} {old}\n"));
-            }
+    for (name, old) in before {
+        if !wanted.contains_key(name) {
+            script.push_str(&format!("delete {name} {old}\n"));
         }
     }
     g.query_stdin(work, args!["update-ref", "--no-deref", "--stdin"], &script)?;
     Ok(())
 }
 
-/// 外网 → 内网：把回传 bundle 中的分支导入工作仓库。
-/// 分支已存在且无法快进时，导入为 `<分支>-import-<序号>`，不覆盖本地提交。
-pub fn import_back(
-    g: &Git,
-    work: &Path,
-    bundle: &Path,
-    base_branch: &str,
-    releases: &[String],
-) -> Result<ImportBackResult> {
-    let common = g.query(work, args!["rev-parse", "--git-common-dir"])?;
-    let _lock = OperationLock::acquire(&work.join(common.trim()).join("offline-sync-operation"))?;
-    if repo::is_bare(g, work)? || repo::is_mirror(g, work) {
-        return invalid("请在工作仓库（非镜像）中导入回传包");
-    }
-    let manifest = Manifest::read_for(bundle)?;
-    let mut warnings = Vec::new();
-    let base_ref = format!("refs/remotes/origin/{base_branch}");
-    if let Some(m) = &manifest {
-        if !matches!(m.kind, BundleKind::Back) {
-            return invalid("这不是回传包（back），请检查所选文件");
-        }
-        if repo::rev_exists(g, work, &base_ref) && repo::repo_id(g, work, &base_ref)? != m.repo_id {
-            return invalid("回传包与当前仓库不是同一个项目（根提交不同）");
-        }
-    } else {
-        warnings.push("未找到 manifest，跳过仓库身份检查".into());
-    }
-
-    let before: BTreeMap<String, String> = repo::list_refs(g, work, &["refs/heads"])?
-        .into_iter()
-        .collect();
-    let heads = unpack_snapshot(g, work, bundle, manifest.as_ref())?;
-    // 分支名 → 检出它的工作树路径。不能只看主工作树的 HEAD：
-    // 被 linked worktree 占用的分支同样 fetch 不进去，git 会报
-    // "refusing to fetch into branch ... checked out at ..."，
-    // 那条消息不含 non-fast-forward/rejected，会被当成未知错误抛出，
-    // 而此时循环里前面的分支已经导入了，留下一次半完成的导入。
-    let checked_out: std::collections::HashMap<String, String> = repo::list_worktrees(g, work)?
-        .into_iter()
-        .filter(|w| !w.bare)
-        .filter_map(|w| w.branch.clone().map(|b| (b, w.path)))
-        .collect();
-    let seq_tag = manifest
-        .as_ref()
-        .map(|m| format!("{:04}", m.seq))
-        .unwrap_or_else(|| now_secs().to_string());
-
-    // 先把所有被检出的分支一次查清再动手：中途失败会留下一次半完成的导入
-    let blocked: Vec<String> = heads
-        .keys()
-        .filter_map(|name| name.strip_prefix("refs/heads/"))
-        .filter_map(|b| checked_out.get(b).map(|w| (b, w)))
-        .map(|(b, w)| format!("{b}（在 {w}）"))
-        .collect();
-    if !blocked.is_empty() {
-        return invalid(format!(
-            "这些分支已被检出，无法直接导入，请先在对应工作树切换到其他分支：{}",
-            blocked.join("、")
-        ));
-    }
-
-    let mut branches = Vec::new();
-    let mut updates = BTreeMap::new();
-    for (name, sha) in heads {
-        let Some(branch) = name.strip_prefix("refs/heads/") else {
-            continue;
-        };
-        let mut local = branch.to_string();
-        if let Some(old) = before.get(&name) {
-            let check = g.exec(
-                Some(work),
-                &args!["merge-base", "--is-ancestor", old, &sha],
-                None,
-                false,
-            )?;
-            if check.code == 1 {
-                local = format!("{branch}-import-{seq_tag}");
-                let alias = format!("refs/heads/{local}");
-                if checked_out.contains_key(&local) {
-                    return invalid(format!("导入目标分支 {local} 已被检出"));
-                }
-                if let Some(existing) = before.get(&alias) {
-                    if existing != &sha {
-                        return invalid(format!("导入目标分支 {local} 已存在且内容不同，不会覆盖"));
-                    }
-                }
-                warnings.push(format!(
-                    "本地 {branch} 与回传内容已分叉（可能在内网 rebase 过），已导入为 {local}"
-                ));
-            } else if !check.ok() {
-                return Err(SyncError::Git {
-                    cmd: "git merge-base --is-ancestor".into(),
-                    code: check.code,
-                    stderr: super::git::redact(check.stderr.trim()),
-                });
-            }
-        }
-        let target = format!("refs/heads/{local}");
-        if updates.insert(target.clone(), sha.clone()).is_some() {
-            return invalid(format!("多个分支映射到同一个导入目标：{target}"));
-        }
-        let recorded = manifest
-            .as_ref()
-            .and_then(|m| m.refs.iter().find(|r| r.name == name))
-            .and_then(|r| r.base.clone());
-        let base = match recorded {
-            Some(b) => b,
-            None => {
-                let mut best = None;
-                if branch.starts_with("hotfix/") {
-                    for release in releases {
-                        let base_ref = format!("refs/remotes/origin/{release}");
-                        if repo::rev_exists(g, work, &base_ref) {
-                            let count: u64 = g
-                                .query(
-                                    work,
-                                    args!["rev-list", "--count", format!("{base_ref}..{sha}")],
-                                )?
-                                .trim()
-                                .parse()
-                                .unwrap_or(u64::MAX);
-                            if best.as_ref().is_none_or(|(n, _)| count < *n) {
-                                best = Some((count, release.clone()));
-                            }
-                        }
-                    }
-                }
-                best.map(|(_, b)| b).unwrap_or_else(|| base_branch.into())
-            }
-        };
-        let origin_base = format!("refs/remotes/origin/{base}");
-        let commits = if repo::rev_exists(g, work, &origin_base) {
-            repo::commits_between(g, work, &origin_base, &sha)?
-        } else {
-            warnings.push(format!(
-                "{local} 的基准分支 origin/{base} 不存在，请先 fetch origin"
-            ));
-            vec![]
-        };
-        branches.push(ImportedBranch {
-            source: branch.to_string(),
-            local,
-            sha,
-            base,
-            commits,
-        });
-    }
-    if branches.is_empty() {
-        return invalid("回传包里没有分支");
-    }
-    replace_refs(g, work, &before, &updates, false)?;
-    for branch in &branches {
-        repo::set_sync_base(g, work, &branch.local, &branch.base)?;
-    }
-    Ok(ImportBackResult { branches, warnings })
-}
-
 /// 外网 → 内网：以 patch 目录方式导入（`git am --3way`）。
-#[allow(clippy::too_many_arguments)]
 pub fn import_patches(
     g: &Git,
     work: &Path,
@@ -1211,7 +989,6 @@ pub fn import_patches(
     branch: &str,
     base_branch: &str,
     fetch_upstream: bool,
-    worktree_path: Option<&Path>,
 ) -> Result<OpOutcome> {
     let manifest = Manifest::read_for(patch_dir)?;
     if let Some(manifest) = &manifest {
@@ -1223,8 +1000,14 @@ pub fn import_patches(
             return invalid("补丁包与当前仓库不是同一个项目（根提交不同）");
         }
     }
-    let common = super::review::common_dir(g, work)?;
+    let common = super::review::common_dir(g, work)?.canonicalize()?;
     let _lock = OperationLock::acquire(&common.join("offline-sync-operation"))?;
+    let gd = repo::git_dir(g, work)?.canonicalize()?;
+    let _work_lock = if gd != common {
+        Some(OperationLock::acquire(&gd.join("offline-sync-operation"))?)
+    } else {
+        None
+    };
     // Hash exactly the bytes passed to git am, even if transfer media changes.
     let frozen = tempfile::tempdir()?;
     let mut patches = Vec::new();
@@ -1251,14 +1034,16 @@ pub fn import_patches(
         if !target.exists() {
             continue;
         }
-        let gd = repo::git_dir(g, target)?;
-        if read_patch_journal(&gd)?.is_some_and(|j| j.receipt.key == key) {
-            let _target_lock = if gd.canonicalize()? != common.canonicalize()? {
-                Some(OperationLock::acquire(&gd.join("offline-sync-operation"))?)
+        let target_gd = repo::git_dir(g, target)?.canonicalize()?;
+        if read_patch_journal(&target_gd)?.is_some_and(|j| j.receipt.key == key) {
+            let _target_lock = if target_gd != common && target_gd != gd {
+                Some(OperationLock::acquire(
+                    &target_gd.join("offline-sync-operation"),
+                )?)
             } else {
                 None
             };
-            if repo::in_progress(&gd).is_some() {
+            if repo::in_progress(&target_gd).is_some() {
                 return Ok(OpOutcome {
                     ok: false,
                     conflict: true,
@@ -1267,7 +1052,7 @@ pub fn import_patches(
                     worktree: Some(tree.path),
                 });
             }
-            recover_patch(g, target, &gd)?;
+            recover_patch(g, target, &target_gd)?;
         }
     }
     if let Some(receipt) = super::review::patch_receipts(g, work)?
@@ -1279,14 +1064,8 @@ pub fn import_patches(
                 .at(Some(receipt.worktree)),
         );
     }
-    // 建成独立 worktree 时不碰主工作树，也就不要求它干净；
-    // 只有要在主工作树上 switch 时才需要它干净。
-    if worktree_path.is_none() {
-        recover_patch(g, work, &repo::git_dir(g, work)?)?;
-        ensure_worktree_clean(g, work)?;
-    } else if repo::is_bare(g, work)? {
-        return invalid("这是裸仓库（镜像），请选择工作仓库");
-    }
+    recover_patch(g, work, &gd)?;
+    ensure_worktree_clean(g, work)?;
     validate_branch_name(g, work, branch)?;
     if repo::rev_exists(g, work, &format!("refs/heads/{branch}")) {
         return invalid(format!("分支 {branch} 已存在，请换一个名字"));
@@ -1295,37 +1074,14 @@ pub fn import_patches(
         g.run(work, args!["fetch", "origin", "--prune"])?;
     }
     let base = format!("origin/{base_branch}");
-    // 补丁应用到哪个目录：给了 worktree 就在那里建分支并 am，
-    // 不抢主工作树（内网工作仓库可能正开着别的分支）。
-    let target: PathBuf = match worktree_path {
-        Some(wt) => {
-            if repo::is_nonempty_dir(wt) {
-                return invalid(format!("worktree 目录非空：{}", wt.display()));
-            }
-            if let Some(parent) = wt.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            g.run(work, args!["worktree", "add", wt, "-b", branch, &base])?;
-            wt.to_path_buf()
-        }
-        None => {
-            g.run(work, args!["switch", "-c", branch, &base])?;
-            work.to_path_buf()
-        }
-    };
+    g.run(work, args!["switch", "-c", branch, &base])?;
     repo::set_sync_base(g, work, branch, base_branch)?;
-    let gd = repo::git_dir(g, &target)?;
-    let _target_lock = if gd.canonicalize()? != common.canonicalize()? {
-        Some(OperationLock::acquire(&gd.join("offline-sync-operation"))?)
-    } else {
-        None
-    };
-    let old_head = repo::rev_parse(g, &target, "HEAD")?;
+    let old_head = repo::rev_parse(g, work, "HEAD")?;
     let journal = PatchJournal {
         receipt: super::review::PatchReceipt {
             key,
             branch: branch.into(),
-            worktree: std::path::absolute(&target)?.to_string_lossy().into_owned(),
+            worktree: std::path::absolute(work)?.to_string_lossy().into_owned(),
             head: old_head.clone(),
         },
         old_head,
@@ -1333,15 +1089,15 @@ pub fn import_patches(
         completed: false,
     };
     atomic_write(&patch_journal(&gd), &serde_json::to_vec(&journal)?)?;
-    let wt_out = worktree_path.map(|p| p.to_string_lossy().into_owned());
+    let wt_out = Some(std::path::absolute(work)?.to_string_lossy().into_owned());
     let mut a = args!["am", "--3way"];
     a.extend(patches.iter().map(Into::into));
-    let out = g.exec(Some(&target), &a, None, true)?;
+    let out = g.exec(Some(work), &a, None, true)?;
     if out.ok() {
-        finish_patch(g, &target, &gd)?;
+        finish_patch(g, work, &gd)?;
         Ok(OpOutcome::done(format!("已应用 {} 个补丁到 {branch}", patches.len())).at(wt_out))
     } else {
-        operation_failure(g, &target, out, wt_out, "git am --3way")
+        operation_failure(g, work, out, wt_out, "git am --3way")
     }
 }
 
@@ -1390,12 +1146,10 @@ pub fn rebase_onto(
     }
     let journal = RebaseJournal {
         branch: branch.into(),
-        old_base: repo::get_sync_base(g, repo, branch),
         new_base: onto.into(),
         old_head: repo::rev_parse(g, &work, "HEAD")?,
         target: repo::rev_parse(g, repo, &target)?,
         completed: false,
-        completed_head: None,
     };
     atomic_write(&rebase_journal(&gd), &serde_json::to_vec(&journal)?)?;
     let a = match &old {
@@ -1448,7 +1202,8 @@ pub(super) fn deletion_heads(g: &Git, work: &Path, branch: &str) -> Result<Vec<P
         }
         if occupied {
             return invalid(format!(
-                "分支 {branch} 正被工作树使用，请先结束操作或切换分支"
+                "分支 {branch} 正被工作树使用（{}），请先结束操作或切换分支",
+                tree.path
             ));
         }
         heads.push(gd);
@@ -1567,17 +1322,6 @@ pub fn delete_local_branch(
     })
 }
 
-/// 推送到内网远程。拒绝在镜像仓库执行（mirror 推送会覆盖/删除远程分支）。
-pub fn push_branch(
-    g: &Git,
-    work: &Path,
-    branch: &str,
-    force_with_lease: bool,
-) -> Result<OpOutcome> {
-    let plan = super::review::prepare_push(g, work, branch, force_with_lease)?;
-    super::review::execute_push(g, &plan.plan_id)
-}
-
 // ======================================================================
 // 外网端
 // ======================================================================
@@ -1590,8 +1334,8 @@ fn mirror_refs(g: &Git, repo: &Path) -> Result<BTreeMap<String, String>> {
         .collect())
 }
 
-/// The bundle header is authoritative even for manually created bundles without
-/// a manifest. Version 2 and version 3 without an object-format capability use SHA-1.
+/// The bundle header determines object format; version 2 and version 3 without
+/// an object-format capability use SHA-1.
 fn bundle_object_format(bundle: &Path) -> Result<String> {
     use std::io::{BufRead, BufReader};
 
@@ -1643,48 +1387,27 @@ pub fn import_in(
     bundle: &Path,
     mirror_dir: &Path,
     confirmation: Option<&ImportConfirmation>,
-) -> Result<ImportInResult> {
+) -> Result<()> {
     let confirmation =
         confirmation.ok_or_else(|| SyncError::Invalid("缺少导入确认，请刷新后重新导入".into()))?;
-    import_in_snapshot(g, bundle, mirror_dir, Some(confirmation))
-}
-
-/// Core-only compatibility for manually created bundles, never exposed by IPC.
-/// Tool packages must use import_in with a manifest and explicit confirmation.
-pub fn import_manual_bundle(g: &Git, bundle: &Path, mirror_dir: &Path) -> Result<ImportInResult> {
-    import_in_snapshot(g, bundle, mirror_dir, None)
-}
-
-fn import_in_snapshot(
-    g: &Git,
-    bundle: &Path,
-    mirror_dir: &Path,
-    confirmation: Option<&ImportConfirmation>,
-) -> Result<ImportInResult> {
     let _lock = OperationLock::acquire(mirror_dir)?;
     // Resolve shared state before reading the import cursor. If the transfer
     // medium is unavailable recovery fails explicitly and import does not start.
     recover_export(mirror_dir)?;
-    let manifest = Manifest::read_for(bundle)?;
-    match (confirmation, &manifest) {
-        (Some(expected), Some(actual)) => {
-            // Ref order has no meaning; compare every manifest field otherwise.
-            let mut expected = expected.manifest.clone();
-            let mut actual = actual.clone();
-            expected.refs.sort_by(|a, b| a.name.cmp(&b.name));
-            actual.refs.sort_by(|a, b| a.name.cmp(&b.name));
-            if expected != actual {
-                return invalid("包清单已变化，请刷新后重新确认导入");
-            }
-        }
-        (Some(_), None) => return invalid("包清单已缺失，请刷新后重新确认导入"),
-        (None, Some(_)) => return invalid("工具生成的包必须提供导入确认"),
-        (None, None) => {}
+    let manifest = Manifest::read_for(bundle)?
+        .ok_or_else(|| SyncError::Invalid("包清单已缺失，请刷新后重新确认导入".into()))?;
+    // Compare every manifest field; ref order alone has no meaning.
+    let mut expected = confirmation.manifest.clone();
+    let mut actual = manifest.clone();
+    expected.refs.sort_by(|a, b| a.name.cmp(&b.name));
+    actual.refs.sort_by(|a, b| a.name.cmp(&b.name));
+    if expected != actual {
+        return invalid("包清单已变化，请刷新后重新确认导入");
     }
-    if let Some(m) = &manifest {
-        if matches!(m.kind, BundleKind::Back | BundleKind::Patch) {
-            return invalid("这是回传包，应在内网端导入");
-        }
+    let m = &manifest;
+
+    if matches!(m.kind, BundleKind::Back | BundleKind::Patch) {
+        return invalid("这是回传包，应在内网端导入");
     }
 
     // All subsequent verification and unbundling uses this private copy and the
@@ -1701,11 +1424,11 @@ fn import_in_snapshot(
     } else {
         mirror_refs(g, mirror_dir)?
     };
-    if let Some(expected) = confirmation {
-        if state.last_in_seq != expected.last_in_seq || before != expected.mirror_refs {
-            return invalid("镜像序号或引用已变化，请刷新后重新确认导入");
-        }
+
+    if state.last_in_seq != confirmation.last_in_seq || before != confirmation.mirror_refs {
+        return invalid("镜像序号或引用已变化，请刷新后重新确认导入");
     }
+
     if created {
         if repo::is_nonempty_dir(mirror_dir) {
             return invalid(format!(
@@ -1753,58 +1476,51 @@ fn import_in_snapshot(
     // 空镜像只能用全量包填。不能只看"这次新建了镜像"：
     // 首次导入的 fetch 失败会留下一个已标记但没有引用的镜像，
     // 那时再导增量包就会得到一个残缺的仓库。
-    if mirror_refs(g, mirror_dir)?.is_empty() {
-        if let Some(m) = &manifest {
-            if m.kind != BundleKind::Full {
-                return invalid("外网镜像还是空的，首次导入必须使用全量包（full）");
-            }
-        }
+    if mirror_refs(g, mirror_dir)?.is_empty() && m.kind != BundleKind::Full {
+        return invalid("外网镜像还是空的，首次导入必须使用全量包（full）");
     }
 
-    if let Some(m) = &manifest {
-        if let Some(rid) = &state.repo_id {
-            if rid != &m.repo_id {
-                return invalid("该包与当前镜像不是同一个项目（根提交不同）");
-            }
+    if let Some(rid) = &state.repo_id {
+        if rid != &m.repo_id {
+            return invalid("该包与当前镜像不是同一个项目（根提交不同）");
         }
-        if m.kind == BundleKind::Full && m.seq < state.last_in_seq {
-            g.info(format!(
-                "警告：正在用较旧的全量包 #{} 回退镜像（当前 #{}）；分支和标签将按该快照同步",
+    }
+    if m.kind == BundleKind::Full && m.seq < state.last_in_seq {
+        g.info(format!(
+            "警告：正在用较旧的全量包 #{} 回退镜像（当前 #{}）；分支和标签将按该快照同步",
+            m.seq, state.last_in_seq
+        ));
+    }
+    if m.kind == BundleKind::Full
+        && state.last_in_seq > 0
+        && m.seq > state.last_in_seq.saturating_add(1)
+        && !confirmation.allow_full_gap
+    {
+        return invalid("全量包跳号需要明确确认，请刷新后确认引用变化");
+    }
+    if m.kind == BundleKind::Incr && state.last_in_seq > 0 {
+        if m.seq <= state.last_in_seq {
+            return invalid(format!(
+                "包 #{} 已导入过（上次导入 #{}）",
                 m.seq, state.last_in_seq
             ));
         }
-        if m.kind == BundleKind::Full
-            && state.last_in_seq > 0
-            && m.seq > state.last_in_seq.saturating_add(1)
-            && !confirmation.is_some_and(|c| c.allow_full_gap)
-        {
-            return invalid("全量包跳号需要明确确认，请刷新后确认引用变化");
-        }
-        if m.kind == BundleKind::Incr && state.last_in_seq > 0 {
-            if m.seq <= state.last_in_seq {
-                return invalid(format!(
-                    "包 #{} 已导入过（上次导入 #{}）",
-                    m.seq, state.last_in_seq
-                ));
-            }
-            if m.seq != state.last_in_seq + 1 {
-                return invalid(format!(
-                    "序号不连续：上次导入 #{}，本包 #{}，中间的包可能遗漏",
-                    state.last_in_seq, m.seq
-                ));
-            }
+        if m.seq != state.last_in_seq + 1 {
+            return invalid(format!(
+                "序号不连续：上次导入 #{}，本包 #{}，中间的包可能遗漏",
+                state.last_in_seq, m.seq
+            ));
         }
     }
 
-    if let Some(m) = &manifest {
-        let baseline = if m.kind == BundleKind::Incr {
-            before.values().cloned().collect()
-        } else {
-            Vec::new()
-        };
-        validate_bundle_snapshot(g, mirror_dir, bundle, m, &baseline)?;
-    }
-    let wanted = unpack_snapshot(g, mirror_dir, bundle, manifest.as_ref())?;
+    let baseline = if m.kind == BundleKind::Incr {
+        before.values().cloned().collect()
+    } else {
+        Vec::new()
+    };
+    validate_bundle_snapshot(g, mirror_dir, bundle, m, &baseline)?;
+
+    let wanted = unpack_snapshot(g, mirror_dir, bundle, Some(&manifest))?;
     let current: MirrorState = repo::load_state(mirror_dir)?;
     if current.last_in_seq != state.last_in_seq
         || current.repo_id != state.repo_id
@@ -1813,14 +1529,14 @@ fn import_in_snapshot(
         return invalid("镜像序号或引用已变化，请刷新后重新确认导入");
     }
     // Format 1 full/incr manifests are complete mirror snapshots: prune tags as
-    // well as branches. A manual bundle without a manifest only adds/updates refs.
-    replace_refs(g, mirror_dir, &before, &wanted, manifest.is_some())?;
-    if let Some(m) = &manifest {
-        state.last_in_seq = m.seq;
-        if state.repo_id.is_none() {
-            state.repo_id = Some(m.repo_id.clone());
-        }
+    // well as branches.
+    replace_refs(g, mirror_dir, &before, &wanted)?;
+
+    state.last_in_seq = m.seq;
+    if state.repo_id.is_none() {
+        state.repo_id = Some(m.repo_id.clone());
     }
+
     state.last_import_at = Some(now_secs());
 
     let after = mirror_refs(g, mirror_dir)?;
@@ -1828,14 +1544,11 @@ fn import_in_snapshot(
     // 让镜像的 HEAD 指向一个真实存在的分支。`git init --bare` 的 HEAD 指向
     // `init.defaultBranch`（可能是 master 或任何名字），如果它不存在，
     // 从镜像 clone 出来的开发仓库不会检出任何分支。
-    // 优先用 manifest 的主线分支；没有 manifest（可以直接导入裸 bundle）
-    // 或该分支不存在时，退而取任意一个分支，总之不能让 HEAD 悬空。
+    // 优先用 manifest 的主线分支，否则退而取任意一个分支。
     let head_ok = repo::current_branch(g, mirror_dir)
         .is_some_and(|b| after.contains_key(&format!("refs/heads/{b}")));
     if !head_ok {
-        let wanted = manifest
-            .as_ref()
-            .map(|m| format!("refs/heads/{}", m.base_branch))
+        let wanted = Some(format!("refs/heads/{}", manifest.base_branch))
             .filter(|h| after.contains_key(h))
             .or_else(|| after.keys().find(|n| n.starts_with("refs/heads/")).cloned());
         if let Some(head) = wanted {
@@ -1846,31 +1559,7 @@ fn import_in_snapshot(
     // Persist the sequence last: a failed HEAD repair or state write leaves this
     // same package retryable; refs are already a validated idempotent snapshot.
     repo::save_state(mirror_dir, &state)?;
-    let mut changes = Vec::new();
-    for (name, new) in &after {
-        let old = before.get(name);
-        if old != Some(new) {
-            changes.push(RefChange {
-                name: name.clone(),
-                old: old.cloned(),
-                new: Some(new.clone()),
-            });
-        }
-    }
-    for (name, old) in &before {
-        if !after.contains_key(name) {
-            changes.push(RefChange {
-                name: name.clone(),
-                old: Some(old.clone()),
-                new: None,
-            });
-        }
-    }
-    Ok(ImportInResult {
-        created,
-        seq: manifest.map(|m| m.seq),
-        changes,
-    })
+    Ok(())
 }
 
 /// 在外网仓库设置提交身份和换行符策略。
@@ -1953,6 +1642,10 @@ fn validate_dev_origin(g: &Git, dev: &Path, mirror: &Path) -> Result<()> {
     if !repo::is_ext_mirror(g, mirror) {
         return invalid("所选目录不是外网镜像");
     }
+    validate_dev_repo_origin(g, dev, mirror)
+}
+
+fn validate_dev_repo_origin(g: &Git, dev: &Path, mirror: &Path) -> Result<()> {
     if repo::is_bare(g, dev)? {
         return invalid("开发仓库不能是裸仓库");
     }
@@ -1990,20 +1683,6 @@ fn can_clone_into(path: &Path) -> Result<bool> {
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncedRepository {
-    pub path: String,
-    pub status: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncUpdatesResult {
-    pub imported: Option<ImportInResult>,
-    pub repositories: Vec<SyncedRepository>,
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn sync_updates(
     g: &Git,
@@ -2013,31 +1692,21 @@ pub fn sync_updates(
     dev_dirs: &[String],
     name: &str,
     email: &str,
-) -> Result<SyncUpdatesResult> {
+) -> Result<()> {
     g.check_cancelled()?;
-    let imported = bundle
-        .map(|b| import_in(g, b, mirror, confirmation))
-        .transpose()?;
-    let mut repositories = Vec::new();
+    if let Some(bundle) = bundle {
+        import_in(g, bundle, mirror, confirmation)?;
+    }
     for path in dev_dirs {
         g.check_cancelled()?;
         let dev = Path::new(path);
-        let status = if can_clone_into(dev)? {
+        if can_clone_into(dev)? {
             create_dev_repo(g, mirror, dev, name, email)?;
-            "cloned"
         } else {
             sync_dev_repo(g, dev, mirror)?;
-            "fetched"
-        };
-        repositories.push(SyncedRepository {
-            path: path.clone(),
-            status: status.into(),
-        });
+        }
     }
-    Ok(SyncUpdatesResult {
-        imported,
-        repositories,
-    })
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -2049,6 +1718,8 @@ pub struct DevSyncStatus {
 }
 
 pub fn dev_sync_status(g: &Git, mirror: &Path, dev_dirs: &[String]) -> Vec<DevSyncStatus> {
+    // 同一轮查询共用镜像身份和引用快照，不随开发仓库数重复启动 Git。
+    let mut wanted = None;
     dev_dirs
         .iter()
         .map(|path| {
@@ -2057,8 +1728,13 @@ pub fn dev_sync_status(g: &Git, mirror: &Path, dev_dirs: &[String]) -> Vec<DevSy
                     return Ok("notCloned");
                 }
                 let dev = Path::new(path);
-                validate_dev_origin(g, dev, mirror)?;
-                let wanted = mirror_refs(g, mirror)?;
+                if wanted.is_none() {
+                    if !repo::is_ext_mirror(g, mirror) {
+                        return invalid("所选目录不是外网镜像");
+                    }
+                    wanted = Some(mirror_refs(g, mirror)?);
+                }
+                validate_dev_repo_origin(g, dev, mirror)?;
                 let actual: BTreeMap<_, _> =
                     repo::list_refs(g, dev, &["refs/remotes/origin", "refs/tags"])?
                         .into_iter()
@@ -2067,7 +1743,7 @@ pub fn dev_sync_status(g: &Git, mirror: &Path, dev_dirs: &[String]) -> Vec<DevSy
                             (name.replacen("refs/remotes/origin/", "refs/heads/", 1), oid)
                         })
                         .collect();
-                Ok(if actual == wanted {
+                Ok(if Some(&actual) == wanted.as_ref() {
                     "upToDate"
                 } else {
                     "needsFetch"
@@ -2139,6 +1815,24 @@ fn dirty_warning(g: &Git, repo: &Path) -> Option<String> {
         .then(|| format!("以下工作树有未提交的修改，不会被导出：{}", dirty.join("、")))
 }
 
+/// Bind the return package to both the selected mirror and the development history.
+/// Run before recovery/publication: even a pending export belongs to this project.
+fn return_source(
+    g: &Git,
+    dev: &Path,
+    mirror: &Path,
+    mainline: &str,
+) -> Result<(MirrorState, String)> {
+    validate_dev_origin(g, dev, mirror)?;
+    let state: MirrorState = repo::load_state(mirror)?;
+    let identity = repo::repo_id(g, mirror, &format!("refs/heads/{mainline}"))?;
+    let dev_identity = repo::repo_id(g, dev, &format!("refs/remotes/origin/{mainline}"))?;
+    if dev_identity != identity || state.repo_id.as_ref().is_some_and(|id| id != &identity) {
+        return invalid("开发仓库、镜像和同步状态的项目身份不一致，不能导出回传");
+    }
+    Ok((state, identity))
+}
+
 /// 外网 → 内网：打包内网还没有的提交（`<branches> --not --remotes=origin`）。
 #[allow(clippy::too_many_arguments)]
 pub fn export_back(
@@ -2152,6 +1846,7 @@ pub fn export_back(
     releases: &[String],
 ) -> Result<ExportOutcome> {
     let _lock = OperationLock::acquire(mirror_dir)?;
+    let (mut state, rid) = return_source(g, repo, mirror_dir, base_branch)?;
     if let Some(outcome) = recover_export(mirror_dir)? {
         return Ok(outcome);
     }
@@ -2163,11 +1858,6 @@ pub fn export_back(
         .prefix(".offline-sync-export-")
         .tempdir_in(transfer_dir)?;
     // 回传序号由镜像统一分配：多个开发仓库 / worktree 各自计数会撞号
-    let mut state: MirrorState = repo::load_state(mirror_dir)?;
-    let rid = match &state.repo_id {
-        Some(r) => r.clone(),
-        None => repo::repo_id(g, repo, &format!("refs/remotes/origin/{base_branch}"))?,
-    };
     let seq = state
         .back_seq
         .checked_add(1)
@@ -2239,14 +1929,10 @@ pub fn export_patches(
     releases: &[String],
 ) -> Result<ExportOutcome> {
     let _lock = OperationLock::acquire(mirror_dir)?;
+    let (mut state, rid) = return_source(g, repo, mirror_dir, base_branch)?;
     if let Some(outcome) = recover_export(mirror_dir)? {
         return Ok(outcome);
     }
-    let mut state: MirrorState = repo::load_state(mirror_dir)?;
-    let rid = match &state.repo_id {
-        Some(r) => r.clone(),
-        None => repo::repo_id(g, repo, &format!("refs/remotes/origin/{base_branch}"))?,
-    };
     let seq = state
         .back_seq
         .checked_add(1)

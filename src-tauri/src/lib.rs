@@ -121,7 +121,6 @@ pub fn run() {
             commands::active_operation,
             commands::sync_state,
             commands::list_packages,
-            commands::list_return_packages,
             commands::abort_op,
             commands::continue_op,
             commands::rebase_onto,

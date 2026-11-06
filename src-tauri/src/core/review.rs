@@ -9,19 +9,18 @@ use std::sync::{
     LazyLock, Mutex,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use super::error::{invalid, Result, SyncError};
 use super::git::{redact, Git};
 use super::manifest::{BundleKind, Manifest};
 use super::repo::{self, CommitInfo};
 use super::storage::OperationLock;
-use super::sync::{self, ImportedBranch, OpOutcome};
+use super::sync::{self, OpOutcome};
 use crate::args;
 
 const RECEIPTS: &str = "refs/offline-sync/return-receipts/";
 const PATCH_RECEIPTS: &str = "refs/offline-sync/patch-receipts/";
-const PUSHED: &str = "refs/offline-sync/review-pushed/";
 
 pub(super) fn common_dir(g: &Git, work: &Path) -> Result<PathBuf> {
     let common = g.query(work, args!["rev-parse", "--git-common-dir"])?;
@@ -70,16 +69,25 @@ struct Receipt {
 fn read_receipt(g: &Git, work: &Path, reference: &str) -> Result<Receipt> {
     let receipt: Receipt =
         serde_json::from_str(&g.query(work, args!["cat-file", "blob", reference])?)?;
+    validate_receipt(reference, receipt)
+}
+
+fn validate_receipt(reference: &str, receipt: Receipt) -> Result<Receipt> {
     if reference != format!("{RECEIPTS}{}", receipt.key) || receipt.items.is_empty() {
         return invalid(format!("回传接收记录损坏：{reference}"));
     }
     Ok(receipt)
 }
 
-fn read_receipts(g: &Git, work: &Path) -> Result<Vec<Receipt>> {
+/// 批量读取冻结的 blob OID，避免每条历史记录各启动一次 Git。
+fn read_json_refs<T: DeserializeOwned>(
+    g: &Git,
+    work: &Path,
+    prefix: &str,
+) -> Result<Vec<(String, T)>> {
     let refs = g.exec(
         Some(work),
-        &args!["for-each-ref", "--format=%(refname)", RECEIPTS],
+        &args!["for-each-ref", "--format=%(refname) %(objectname)", prefix],
         None,
         false,
     )?;
@@ -90,45 +98,54 @@ fn read_receipts(g: &Git, work: &Path) -> Result<Vec<Receipt>> {
             redact(refs.stderr.trim())
         ));
     }
-    refs.stdout
+    let entries = refs
+        .stdout
         .lines()
-        .map(|reference| read_receipt(g, work, reference))
+        .map(|line| {
+            line.split_once(' ')
+                .ok_or_else(|| SyncError::Invalid("接收记录引用无效".into()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = entries
+        .iter()
+        .map(|(_, oid)| *oid)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let output = g.query_stdin(work, args!["cat-file", "--batch"], &input)?;
+    let mut remaining = output.as_str();
+    let mut records = Vec::with_capacity(entries.len());
+    for (reference, oid) in entries {
+        let invalid_blob = || SyncError::Invalid(format!("接收记录对象损坏：{reference}"));
+        let (header, contents) = remaining.split_once('\n').ok_or_else(invalid_blob)?;
+        let size = header
+            .strip_prefix(&format!("{oid} blob "))
+            .and_then(|size| size.parse::<usize>().ok())
+            .ok_or_else(invalid_blob)?;
+        let json = contents.get(..size).ok_or_else(invalid_blob)?;
+        remaining = contents
+            .get(size..)
+            .and_then(|tail| tail.strip_prefix('\n'))
+            .ok_or_else(invalid_blob)?;
+        records.push((reference.to_string(), serde_json::from_str(json)?));
+    }
+    if !remaining.is_empty() {
+        return invalid("接收记录批量读取结果无效");
+    }
+    Ok(records)
+}
+
+fn read_receipts(g: &Git, work: &Path) -> Result<Vec<Receipt>> {
+    read_json_refs(g, work, RECEIPTS)?
+        .into_iter()
+        .map(|(reference, receipt)| validate_receipt(&reference, receipt))
         .collect()
 }
 
-pub fn review_sources(g: &Git, work: &Path) -> Result<HashMap<String, String>> {
-    let mut sources = HashMap::new();
-    for receipt in read_receipts(g, work)?.into_iter().filter(|r| !r.direct) {
-        for item in receipt.items {
-            if sources.insert(item.local, item.source).is_some() {
-                return invalid("回传接收记录含重复审查分支映射");
-            }
-        }
-    }
-    Ok(sources)
-}
-
-/// Historical verification of the current local commit; no remote query is needed.
-pub fn pushed_branches(g: &Git, work: &Path, branches: &[repo::BranchInfo]) -> Result<Vec<String>> {
-    let markers: HashMap<_, _> = repo::list_refs(g, work, &[PUSHED])?.into_iter().collect();
-    let heads: HashMap<_, _> = branches.iter().map(|b| (&b.name, &b.sha)).collect();
-    let mut pushed = Vec::new();
-    for receipt in read_receipts(g, work)? {
-        for item in receipt.items {
-            let reference = format!("{PUSHED}{}/{}", receipt.key, item.item_id);
-            if let (Some(marker), Some(head)) = (markers.get(&reference), heads.get(&item.local)) {
-                if marker == *head {
-                    pushed.push(item.local);
-                }
-            }
-        }
-    }
-    pushed.sort();
-    pushed.dedup();
-    Ok(pushed)
-}
-
-/// Use the same format-1 identity for reception and read-only package queries.
+/// Package identity is independent of its filename and mount point.
 fn return_key(g: &Git, work: &Path, bundle: &Path, manifest: Option<&Manifest>) -> Result<String> {
     let bundle = std::path::absolute(bundle)?;
     let payload_oid = g.query(work, args!["hash-object", "--no-filters", "--", &bundle])?;
@@ -201,20 +218,9 @@ pub(super) fn patch_key(
 }
 
 pub(super) fn patch_receipts(g: &Git, work: &Path) -> Result<Vec<PatchReceipt>> {
-    let refs = g.exec(
-        Some(work),
-        &args!["for-each-ref", "--format=%(refname)", PATCH_RECEIPTS],
-        None,
-        false,
-    )?;
-    if !refs.ok() || !refs.stderr.trim().is_empty() {
-        return invalid("无法完整读取补丁接收记录");
-    }
-    refs.stdout
-        .lines()
-        .map(|reference| {
-            let receipt: PatchReceipt =
-                serde_json::from_str(&g.query(work, args!["cat-file", "blob", reference])?)?;
+    read_json_refs::<PatchReceipt>(g, work, PATCH_RECEIPTS)?
+        .into_iter()
+        .map(|(reference, receipt)| {
             if reference != format!("{PATCH_RECEIPTS}{}", receipt.key)
                 || !super::manifest::valid_oid(&receipt.head)
                 || !super::manifest::valid_ref(&format!("refs/heads/{}", receipt.branch))
@@ -247,103 +253,25 @@ pub(super) fn record_patch_received(g: &Git, work: &Path, receipt: &PatchReceipt
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReturnPackageInfo {
-    #[serde(flatten)]
-    pub package: sync::PackageInfo,
-    pub received: bool,
-    pub receipt_key: Option<String>,
-    pub error: Option<String>,
-}
-
-pub fn list_return_packages(g: &Git, work: &Path, dir: &Path) -> Result<Vec<ReturnPackageInfo>> {
-    let packages = sync::list_packages(dir)?;
-    let mut received_keys = HashSet::new();
-    let mut patch_keys = HashSet::new();
-    // An uncreated work directory must not prevent browsing transfer media.
-    // A present but broken .git is an error, not an empty receipt collection.
-    let has_repo = if !work.try_exists()? {
-        false
-    } else {
-        match fs::symlink_metadata(work.join(".git")) {
-            Ok(_) => {
-                require_work_repo(g, work)?;
-                true
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(e.into()),
-        }
-    };
-    if has_repo {
-        patch_keys.extend(
-            patch_receipts(g, work)?
-                .into_iter()
-                .map(|receipt| receipt.key),
-        );
-        received_keys.extend(
-            read_receipts(g, work)?
-                .into_iter()
-                .map(|receipt| receipt.key),
-        );
-    }
-    packages
-        .into_iter()
-        .map(|package| {
-            let is_return = package
-                .manifest
-                .as_ref()
-                .is_none_or(|m| m.kind == BundleKind::Back);
-            let is_patch = package
-                .manifest
-                .as_ref()
-                .is_some_and(|m| m.kind == BundleKind::Patch);
-            let identity = (|| -> Result<Option<String>> {
-                if package.payload_exists && is_patch {
-                    let patches = patch_files(Path::new(&package.payload_path))?;
-                    if has_repo && !patch_keys.is_empty() {
-                        let key = patch_key(g, work, &patches, package.manifest.as_ref())?;
-                        return Ok(patch_keys.contains(&key).then_some(key));
-                    }
-                } else if has_repo
-                    && !received_keys.is_empty()
-                    && package.payload_exists
-                    && is_return
-                {
-                    let key = return_key(
-                        g,
-                        work,
-                        Path::new(&package.payload_path),
-                        package.manifest.as_ref(),
-                    )?;
-                    return Ok(received_keys.contains(&key).then_some(key));
-                }
-                Ok(None)
-            })();
-            let (receipt_key, error) = match identity {
-                Ok(key) => (key, None),
-                Err(error) => (None, Some(redact(&error.to_string()))),
-            };
-            Ok(ReturnPackageInfo {
-                package,
-                received: receipt_key.is_some(),
-                receipt_key,
-                error,
-            })
-        })
-        .collect()
-}
-
-fn review_item(g: &Git, work: &Path, branch: &str) -> Result<Option<(String, ReviewItem)>> {
+fn review_item<'a>(receipts: &'a [Receipt], branch: &str) -> Result<Option<&'a ReviewItem>> {
     let mut direct = false;
-    for receipt in read_receipts(g, work)? {
+    let mut legacy = None;
+    for receipt in receipts {
         if receipt.direct {
             direct |= receipt.items.iter().any(|i| i.local == branch);
             continue;
         }
-        if let Some(item) = receipt.items.into_iter().find(|i| i.local == branch) {
-            return Ok(Some((receipt.key, item)));
+        for item in receipt.items.iter().filter(|i| i.local == branch) {
+            if legacy.replace(item).is_some() {
+                return invalid("回传接收记录存在歧义，无法确定原始推送目标");
+            }
         }
+    }
+    if legacy.is_some() {
+        if direct {
+            return invalid("回传接收记录存在歧义，无法确定原始推送目标");
+        }
+        return Ok(legacy);
     }
     if branch.starts_with("review/") && !direct {
         return invalid("审查分支缺少接收记录，无法确定原始推送目标");
@@ -351,37 +279,11 @@ fn review_item(g: &Git, work: &Path, branch: &str) -> Result<Option<(String, Rev
     Ok(None)
 }
 
-/// Called by the rebase journal finalizer while holding the worktree operation lock.
-pub(super) fn mark_review_ready(g: &Git, work: &Path, branch: &str, oid: &str) -> Result<()> {
-    if !branch.starts_with("review/") {
-        return Ok(());
-    }
-    for receipt in read_receipts(g, work)?.into_iter().filter(|r| !r.direct) {
-        if let Some(item) = receipt.items.iter().find(|i| i.local == branch) {
-            g.run(
-                work,
-                args![
-                    "update-ref",
-                    "--no-deref",
-                    format!(
-                        "refs/offline-sync/review-ready/{}/{}",
-                        receipt.key, item.item_id
-                    ),
-                    oid
-                ],
-            )?;
-            break;
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportReturnResult {
-    pub branches: Vec<ImportedBranch>,
+    pub branches: Vec<String>,
     pub warnings: Vec<String>,
-    pub outcomes: Vec<OpOutcome>,
 }
 
 /// Receive all local branches, inbox refs and the receipt in one CAS transaction.
@@ -592,28 +494,15 @@ pub fn import_return(
             repo::set_sync_base(g, work, &item.local, &item.base)?;
         }
     }
-    let mut branches = Vec::new();
+    let mut branches = Vec::with_capacity(receipt.items.len());
     for item in receipt.items {
-        let sha = repo::rev_parse(g, work, &format!("refs/heads/{}", item.local))?;
-        let base = repo::get_sync_base(g, work, &item.local).unwrap_or(item.base);
-        let base_ref = format!("refs/remotes/origin/{base}");
-        let commits = if repo::rev_exists(g, work, &base_ref) {
-            repo::commits_between(g, work, &base_ref, &sha)?
-        } else {
-            Vec::new()
-        };
-        branches.push(ImportedBranch {
-            source: item.source,
-            local: item.local,
-            sha,
-            base,
-            commits,
-        });
+        // A stored receipt does not guarantee its local branch still exists.
+        repo::rev_parse(g, work, &format!("refs/heads/{}", item.local))?;
+        branches.push(item.local);
     }
     Ok(ImportReturnResult {
         branches,
         warnings: receipt.warnings,
-        outcomes: Vec::new(),
     })
 }
 
@@ -635,7 +524,6 @@ struct StoredPlan {
     work: PathBuf,
     common: PathBuf,
     source_ref: String,
-    pushed_ref: Option<String>,
     remote_url: String,
     configuration: String,
     force: bool,
@@ -794,26 +682,9 @@ pub fn prepare_push(
     if !super::manifest::valid_ref(&source_ref) {
         return invalid("推送分支名无效");
     }
-    let item = review_item(g, &work, branch)?;
-    // Direct receipts can share a local branch across packages. One stable
-    // receipt marker suffices: pushed_branches compares it with the current tip.
-    let pushed_ref = if let Some((key, i)) = &item {
-        Some(format!("{PUSHED}{key}/{}", i.item_id))
-    } else {
-        read_receipts(g, &work)?
-            .into_iter()
-            .filter(|r| r.direct)
-            .find_map(|r| {
-                r.items
-                    .iter()
-                    .find(|i| i.local == branch)
-                    .map(|i| format!("{PUSHED}{}/{}", r.key, i.item_id))
-            })
-    };
-    let target = item
-        .as_ref()
-        .map(|(_, i)| i.source.as_str())
-        .unwrap_or(branch);
+    let receipts = read_receipts(g, &work)?;
+    let item = review_item(&receipts, branch)?;
+    let target = item.as_ref().map(|i| i.source.as_str()).unwrap_or(branch);
     let target_ref = format!("refs/heads/{target}");
     if !super::manifest::valid_ref(&target_ref) {
         return invalid("原始推送目标无效");
@@ -842,7 +713,7 @@ pub fn prepare_push(
         Some(oid) => oid.clone(),
         None => {
             let base = repo::get_sync_base(g, &work, branch)
-                .or_else(|| item.as_ref().map(|(_, i)| i.base.clone()));
+                .or_else(|| item.as_ref().map(|i| i.base.clone()));
             let reference = match base {
                 Some(base) => format!("refs/remotes/origin/{base}"),
                 None => "refs/remotes/origin/HEAD".into(),
@@ -888,7 +759,6 @@ pub fn prepare_push(
                 work,
                 common,
                 source_ref,
-                pushed_ref,
                 remote_url: url,
                 configuration,
                 force: force_with_lease,
@@ -949,26 +819,11 @@ pub fn execute_push(g: &Git, plan_id: &str) -> Result<OpOutcome> {
     let verification = g.verification();
     let observed = remote_oid(&verification, work, &remote, &plan.target_ref);
     match observed {
-        Ok(Some(oid)) if oid == plan.source_oid => {
-            let mut message = format!("已核实推送 {}", plan.target_ref);
-            if let Some(reference) = &stored.pushed_ref {
-                if let Err(error) = verification.run(
-                    work,
-                    args!["update-ref", "--no-deref", reference, &plan.source_oid],
-                ) {
-                    message = format!(
-                        "已核实推送 {}，推送已完成但记录失败，请检查：{}",
-                        plan.target_ref,
-                        redact(&error.to_string())
-                    );
-                }
-            }
-            Ok(OpOutcome {
-                ok: true,
-                message,
-                ..Default::default()
-            })
-        }
+        Ok(Some(oid)) if oid == plan.source_oid => Ok(OpOutcome {
+            ok: true,
+            message: format!("已核实推送 {}", plan.target_ref),
+            ..Default::default()
+        }),
         Ok(actual) => {
             let detail = match pushed {
                 Ok(out) => redact(out.stderr.trim()),

@@ -2,10 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { api, type Profile } from "../src/api";
-import { useState } from "react";
 import userEvent from "@testing-library/user-event";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "../src/components/ui/tabs";
-import { WorkspaceNavigation } from "../src/ui";
 import { useRunner } from "../src/runner";
 
 const operation = vi.hoisted(() => ({ run: vi.fn<() => Promise<void>>() }));
@@ -218,37 +215,6 @@ it("首次使用可以选择内外网角色创建配置", async () => {
   fireEvent.click(screen.getByRole("button", { name: "新建内网端配置" }));
   await waitFor(() => expect((screen.getByRole("radio", { name: /内网端/ }) as HTMLInputElement).getAttribute("aria-checked")).toBe("true"));
   expect(screen.getByRole("textbox", { name: "GitLab 仓库地址" })).toBeTruthy();
-});
-
-function PortaledWorkspace() {
-  const [target, setTarget] = useState<HTMLDivElement | null>(null);
-  const [tab, setTab] = useState("import");
-  return <><nav aria-label="任务导航"><div ref={setTarget} /></nav>
-    <Tabs orientation="vertical" value={tab} onValueChange={setTab}>
-      <WorkspaceNavigation target={target}><TabsList aria-label="同步步骤">
-        <TabsTrigger value="import">导入内网包</TabsTrigger><TabsTrigger value="dev">开发仓库</TabsTrigger>
-      </TabsList></WorkspaceNavigation>
-      <TabsContent value="import" forceMount hidden={tab !== "import"}>
-        <input aria-label="包路径" defaultValue="/usb" />
-      </TabsContent>
-      <TabsContent value="dev" hidden={tab !== "dev"}>仓库内容</TabsContent>
-    </Tabs>
-  </>;
-}
-
-it("侧栏页签支持纵向键盘切换，隐藏面板保留输入且导航关联正确", async () => {
-  render(<PortaledWorkspace />);
-  const navigation = screen.getByRole("navigation", { name: "任务导航" });
-  const tabs = within(navigation).getAllByRole("tab");
-  fireEvent.change(screen.getByRole("textbox", { name: "包路径" }), { target: { value: "/changed" } });
-  act(() => tabs[0].focus());
-  await userEvent.keyboard("{ArrowDown}");
-  expect(document.activeElement).toBe(tabs[1]);
-  expect(tabs[1].getAttribute("aria-selected")).toBe("true");
-  expect(screen.getByRole("tabpanel").id).toBe(tabs[1].getAttribute("aria-controls"));
-  expect(screen.queryByRole("textbox", { name: "包路径" })).toBeNull();
-  await userEvent.keyboard("{Home}");
-  expect((screen.getByRole("textbox", { name: "包路径" }) as HTMLInputElement).value).toBe("/changed");
 });
 
 it("设置提供三种外观，保存 Git 路径后重新检测环境并刷新原工作区", async () => {

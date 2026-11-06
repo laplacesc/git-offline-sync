@@ -195,18 +195,6 @@ pub async fn list_packages(app: AppHandle, dir: String) -> CmdResult<Vec<Package
 }
 
 #[tauri::command]
-pub async fn list_return_packages(
-    app: AppHandle,
-    work_dir: String,
-    dir: String,
-) -> CmdResult<Vec<crate::core::review::ReturnPackageInfo>> {
-    blocking(app, move |g| {
-        crate::core::review::list_return_packages(g, &p(work_dir), &p(dir))
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn abort_op(app: AppHandle, repo: String) -> CmdResult<OpOutcome> {
     mutating(app, move |g| sync::abort(g, &p(repo))).await
 }
@@ -292,7 +280,6 @@ pub async fn import_patches(
             &branch,
             &base_branch,
             fetch_upstream,
-            None,
         )
     })
     .await
@@ -345,7 +332,7 @@ pub async fn sync_updates(
     dev_dirs: Vec<String>,
     name: String,
     email: String,
-) -> CmdResult<sync::SyncUpdatesResult> {
+) -> CmdResult<()> {
     mutating(app, move |g| {
         let bundle = bundle.map(p);
         sync::sync_updates(

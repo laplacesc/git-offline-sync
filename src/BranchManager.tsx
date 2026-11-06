@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api, baseCandidates, defaultBaseFor, prefixWarning, type BranchInfo, type OpOutcome, type Profile, type RepoStatus } from "./api";
 import { Feedback, OperationStatus, useRunner } from "./runner";
 import { BranchTable, useRequestGeneration } from "./repoBits";
-import { ActionButton, ActionIconButton, BaseSelect, Check, Code, CommitList, Fold, Notice, OutcomeView, RefreshButton, TextInput } from "./ui";
+import { ActionButton, ActionIconButton, BaseSelect, Check, Code, CommitList, Fold, Notice, OutcomeView, TextInput } from "./ui";
 import { Icon } from "./icons";
 
 export function BranchManager({ profile, repoPath, status, loading, error, onRefresh, selected, onSelect, multi = true, pushBlocked = false }: {
@@ -55,7 +55,9 @@ export function BranchManager({ profile, repoPath, status, loading, error, onRef
     const isCurrent = beginAction();
     setIdentitySaved(false);
     const result = await run("设置提交身份", () => api.configureRepo(repoPath, profile.userName ?? "", profile.userEmail ?? ""));
-    if (result !== undefined && isCurrent()) setIdentitySaved(true);
+    if (!isCurrent()) return;
+    if (result !== undefined) setIdentitySaved(true);
+    await onRefresh();
   }
   async function rebase() {
     if (!rebaseTarget || !rebaseInfo || !ready || unfinished) return;
@@ -97,7 +99,6 @@ export function BranchManager({ profile, repoPath, status, loading, error, onRef
   return <>
     <section className="inline-branch-tools" aria-label="分支操作" aria-busy={loading}>
       <div className="sync-location"><Icon name="folder" /><span className="min-w-0 flex-1 truncate" title={repoPath}>{repoPath || "未配置工作仓库"}</span>
-        <RefreshButton label="刷新分支" loading={loading} onClick={onRefresh} />
       </div>
       {error && <Feedback kind="error" text={`读取工作仓库失败\n${error}`} />}
       {!ready && !loading && !error && <Feedback kind="warn" text={internal ? "请先在项目设置中填写已克隆的内网工作仓库。" : "请先导入更新，再同步开发仓库。"} />}
@@ -110,8 +111,12 @@ export function BranchManager({ profile, repoPath, status, loading, error, onRef
             <TextInput className="min-w-0 flex-1" label="worktree 目录" value={worktreePath} onChange={setWorktreePath} placeholder="输入或选择目录" />
             <ActionIconButton icon="folder" label="浏览目录" onClick={async () => {
               const isCurrent = beginAction();
-              const path = await open({ directory: true, multiple: false });
-              if (typeof path === "string" && isCurrent()) setWorktreePath(path);
+              try {
+                const path = await open({ directory: true, multiple: false });
+                if (typeof path === "string" && isCurrent()) setWorktreePath(path);
+              } catch (error) {
+                if (isCurrent()) notify("error", `打开目录选择器失败：${String(error)}`);
+              }
             }} />
           </div>}
           {newBranchWarning && <Notice tone="warning" title={newBranchWarning} />}
@@ -125,7 +130,7 @@ export function BranchManager({ profile, repoPath, status, loading, error, onRef
         {internal && <Fold className="sync-details" title="推送选项"><Check checked={forceLease} onChange={setForceLease}>允许非快进更新（推送前再次确认覆盖）</Check></Fold>}
         {loading && !status ? <Feedback kind="progress" text="正在读取本地分支…" /> : <BranchTable branches={branches} dirtyTrees={status?.dirtyTrees} selected={selected} onSelect={onSelect} multi={multi} isSelectionDisabled={!!busy || !ready}
         emptyText={internal ? "还没有本地开发分支。" : "还没有可回传的开发分支。"}
-          onRebase={(b) => setRebaseTarget({ name: b.name, onto: b.base })} showPush onPush={internal ? push : undefined} pushDisabled={pushBlocked}
+          onRebase={(b) => setRebaseTarget({ name: b.name, onto: b.base })} showPush={internal} onPush={internal ? push : undefined} pushDisabled={pushBlocked}
           actionsDisabled={!ready || unfinished} repoPath={repoPath} onDeleted={onRefresh} />}
       </div>
       {outcome && !outcome.ok && <OutcomeView outcome={outcome} />}

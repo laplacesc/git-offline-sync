@@ -81,14 +81,8 @@ export interface InProgressOp {
 }
 
 export interface RepoStatus {
-  path: string;
-  exists: boolean;
   isRepo: boolean;
   isBare: boolean;
-  isMirror: boolean;
-  currentBranch: string | null;
-  /** 所有工作树，包括 detached HEAD */
-  worktrees: Worktree[];
   /** 有未提交修改的工作树（含主工作树） */
   dirtyTrees: Worktree[];
   /** 主工作树上未完成的操作 */
@@ -96,10 +90,7 @@ export interface RepoStatus {
   /** 所有工作树（含主工作树）上未完成的操作 */
   inProgressTrees: InProgressOp[];
   branches: BranchInfo[];
-  remoteUrl: string | null;
   refs?: RefEntry[];
-  reviewSources?: Record<string, string>;
-  pushedBranches?: string[];
 }
 
 export type BundleKind = "full" | "incr" | "back" | "patch";
@@ -126,15 +117,8 @@ export interface Manifest {
 
 export interface PackageInfo {
   manifest: Manifest | null;
-  manifestPath: string | null;
   payloadPath: string;
   payloadExists: boolean;
-}
-
-export interface ReturnPackageInfo extends PackageInfo {
-  received: boolean;
-  receiptKey?: string | null;
-  error?: string | null;
 }
 
 export type ExportOutcome =
@@ -162,31 +146,9 @@ export interface OpOutcome {
   worktree: string | null;
 }
 
-export interface RefChange {
-  name: string;
-  old: string | null;
-  new: string | null;
-}
-
-export interface ImportInResult {
-  /** 本次导入新建了外网镜像（首次导入） */
-  created: boolean;
-  seq: number | null;
-  changes: RefChange[];
-}
-
-export interface ImportedBranch {
-  source: string;
-  local: string;
-  sha: string;
-  base: string;
-  commits: CommitInfo[];
-}
-
 export interface ReturnImportResult {
-  branches: ImportedBranch[];
+  branches: string[];
   warnings: string[];
-  outcomes: OpOutcome[];
 }
 
 export interface PushPlan {
@@ -204,11 +166,6 @@ export interface DevSyncStatus {
   path: string;
   status: "upToDate" | "needsFetch" | "notCloned" | "unknown";
   error: string | null;
-}
-
-export interface SyncUpdatesResult {
-  imported: ImportInResult | null;
-  repositories: { path: string; status: "fetched" | "cloned" }[];
 }
 
 export interface ImportConfirmation {
@@ -288,7 +245,6 @@ export const api = {
   mirrorState: (mirrorDir: string) =>
     readOnce<MirrorState>("sync_state", { path: mirrorDir, external: true }),
   listPackages: (dir: string) => readOnce<PackageInfo[]>("list_packages", { dir }),
-  listReturnPackages: (workDir: string, dir: string) => readOnce<ReturnPackageInfo[]>("list_return_packages", { workDir, dir }),
   abortOp: (repo: string) => mutate<OpOutcome>("abort_op", { repo }),
   continueOp: (repo: string) => mutate<OpOutcome>("continue_op", { repo }),
   rebaseOnto: (repo: string, branch: string, baseBranch: string, fetchUpstream: boolean) =>
@@ -323,7 +279,7 @@ export const api = {
   devSyncStatus: (mirrorDir: string, devDirs: string[]) =>
     readOnce<DevSyncStatus[]>("dev_sync_status", { mirrorDir, devDirs }),
   syncUpdates: (a: { bundle: string | null; confirmation?: ImportConfirmation; mirrorDir: string; devDirs: string[]; name: string; email: string }) =>
-    mutate<SyncUpdatesResult>("sync_updates", a),
+    mutate<null>("sync_updates", a),
   configureRepo: (repo: string, name: string, email: string) =>
     mutate<null>("configure_repo", { repo, name, email }),
   createBranch: (repo: string, name: string, baseBranch: string, worktreePath?: string) =>
@@ -352,13 +308,6 @@ export const api = {
 
 export function shortSha(sha: string | null | undefined): string {
   return sha ? sha.slice(0, 8) : "—";
-}
-
-export function formatTime(secs: number | null | undefined): string {
-  if (!secs) return "—";
-  const d = new Date(secs * 1000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 export function newId(): string {

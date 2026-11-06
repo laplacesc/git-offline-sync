@@ -46,6 +46,29 @@ fn setup() -> (tempfile::TempDir, PathBuf) {
     (root, seed)
 }
 
+// Build a real exported/imported mirror before exercising return publication races.
+fn bind_return_mirror(root: &Path, seed: &Path) {
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let internal = root.join("return-internal");
+    let mirror = root.join("mirror");
+    sync::init_mirror(&g, seed.to_str().unwrap(), &internal).unwrap();
+    let full = payload(
+        sync::export_out(
+            &g,
+            &internal,
+            &root.join("bootstrap"),
+            "test",
+            "main",
+            false,
+            false,
+        )
+        .unwrap(),
+    );
+    support::import_confirmed(&g, &full, &mirror, false).unwrap();
+    git(seed, &["remote", "add", "origin", mirror.to_str().unwrap()]);
+}
+
 fn payload(outcome: sync::ExportOutcome) -> PathBuf {
     match outcome {
         sync::ExportOutcome::Exported { payload, .. } => payload.into(),
@@ -198,6 +221,7 @@ fn outgoing_snapshot_races_never_publish_or_advance_full_incremental_or_fallback
 fn return_snapshot_races_reject_changed_and_missing_advertisements() {
     for omit in [false, true] {
         let (root, seed) = setup();
+        bind_return_mirror(root.path(), &seed);
         let base = git(&seed, &["rev-parse", "main"]);
         git(&seed, &["switch", "-c", "topic"]);
         commit(&seed, "one");
@@ -244,6 +268,7 @@ fn return_snapshot_races_reject_changed_and_missing_advertisements() {
 #[test]
 fn return_exclusions_are_frozen_and_covered_refs_may_be_omitted() {
     let (root, seed) = setup();
+    bind_return_mirror(root.path(), &seed);
     let receiver = root.path().join("receiver");
     git(
         root.path(),
@@ -339,6 +364,7 @@ fn merge_continue_finishes_only_after_resolution_in_linked_worktree() {
 fn patch_rejects_empty_only_and_mixed_ranges_without_publication() {
     for mixed in [false, true] {
         let (root, seed) = setup();
+        bind_return_mirror(root.path(), &seed);
         git(&seed, &["switch", "-c", "topic"]);
         if mixed {
             commit(&seed, "normal");
@@ -505,9 +531,13 @@ fn full_gap_requires_explicit_approval_and_manifest_comparison_is_semantic() {
     let first_target = fixture.root.path().join("fresh");
     let mut first = support::confirmation(&g, &fixture.second, &first_target, false).unwrap();
     first.manifest.refs.reverse();
-    let result = sync::import_in(&g, &fixture.second, &first_target, Some(&first)).unwrap();
-    assert!(result.created);
-    assert_eq!(result.seq, Some(2));
+    sync::import_in(&g, &fixture.second, &first_target, Some(&first)).unwrap();
+    assert_eq!(
+        repo::load_state::<repo::MirrorState>(&first_target)
+            .unwrap()
+            .last_in_seq,
+        2
+    );
     assert_eq!(refs(&g, &first_target), old_refs);
 }
 
@@ -598,8 +628,7 @@ fn import_uses_frozen_bundle_and_manifest_after_transfer_path_replacement() {
         }
     };
     let g = Git::new(None, &log);
-    let result = sync::import_in(&g, &fixture.second, &fixture.external, Some(&expected)).unwrap();
-    assert_eq!(result.seq, Some(2));
+    sync::import_in(&g, &fixture.second, &fixture.external, Some(&expected)).unwrap();
     assert_eq!(refs(&setup, &fixture.external), expected.mirror_refs);
     assert_eq!(
         repo::load_state::<repo::MirrorState>(&fixture.external)
@@ -611,20 +640,16 @@ fn import_uses_frozen_bundle_and_manifest_after_transfer_path_replacement() {
 }
 
 #[test]
-fn manual_core_compatibility_cannot_be_used_through_sync_updates() {
-    let (root, seed) = setup();
-    let bundle = root.path().join("manual.bundle");
-    git(
-        &seed,
-        &["bundle", "create", bundle.to_str().unwrap(), "--branches"],
-    );
+fn external_import_requires_manifest_and_confirmation() {
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
-    let mirror = root.path().join("external");
-    assert!(sync::sync_updates(&g, &mirror, Some(&bundle), None, &[], "", "").is_err());
-    assert!(!mirror.exists());
-    sync::import_manual_bundle(&g, &bundle, &mirror).unwrap();
-    assert_eq!(refs(&g, &mirror), refs(&g, &seed));
     let fixture = ImportFixture::new(&g);
-    assert!(sync::import_manual_bundle(&g, &fixture.second, &mirror).is_err());
+    let mirror = fixture.root.path().join("fresh");
+    let expected = support::confirmation(&g, &fixture.second, &mirror, false).unwrap();
+    assert!(sync::sync_updates(&g, &mirror, Some(&fixture.second), None, &[], "", "").is_err());
+    assert!(sync::import_in(&g, &fixture.second, &mirror, None).is_err());
+    assert!(!mirror.exists());
+    fs::remove_file(manifest_path_for(&fixture.second)).unwrap();
+    assert!(sync::import_in(&g, &fixture.second, &mirror, Some(&expected)).is_err());
+    assert!(!mirror.exists());
 }

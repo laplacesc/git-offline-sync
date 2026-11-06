@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use git_offline_sync_lib::core::git::{Git, LogEvent};
-use git_offline_sync_lib::core::repo;
+use git_offline_sync_lib::core::{repo, review, sync};
 
 fn git_output(dir: &Path, args: &[&str]) -> Output {
     Command::new("git")
@@ -205,18 +205,31 @@ fn check_linked_conflict(name: &str) {
     assert!(gd.join("MERGE_HEAD").is_file());
     assert_ne!(gd, repo::git_dir(&g, &f.main).unwrap());
     assert!(repo::in_progress(&repo::git_dir(&g, &f.main).unwrap()).is_none());
-    let operations = repo::in_progress_all(&g, &f.main);
+    let operations = repo::status(&g, &f.main, "main", &[])
+        .unwrap()
+        .in_progress_trees;
     assert_eq!(operations.len(), 1);
     assert_path(&operations[0].path, &linked);
     assert_eq!(operations[0].op, "merge");
     assert_eq!(operations[0].branch.as_deref(), Some("topic"));
     assert!(!operations[0].main);
+    // Both entry paths must preserve the current and linked worktree conflict states.
+    for (path, current_op) in [(&f.main, None), (&linked, Some("merge"))] {
+        let status = repo::status(&g, path, "main", &[]).unwrap();
+        assert_eq!(status.in_progress.as_deref(), current_op);
+        assert_eq!(status.in_progress_trees.len(), 1);
+        assert_path(&status.in_progress_trees[0].path, &linked);
+        assert_eq!(status.in_progress_trees[0].op, "merge");
+    }
     let dirty = repo::dirty_worktrees(&g, &f.main);
     assert_eq!(dirty.len(), 1);
     assert_path(&dirty[0].path, &linked);
     // The returned lookup directory must also be the correct merge-abort target.
     git(Path::new(&found.path), &["merge", "--abort"]);
-    assert!(repo::in_progress_all(&g, &f.main).is_empty());
+    assert!(repo::status(&g, &f.main, "main", &[])
+        .unwrap()
+        .in_progress_trees
+        .is_empty());
     assert!(repo::dirty_worktrees(&g, &f.main).is_empty());
 }
 
@@ -229,4 +242,139 @@ fn conflict_and_linked_lookup_target_the_correct_directory() {
 #[test]
 fn conflict_and_linked_lookup_preserve_unix_path_whitespace() {
     check_linked_conflict("冲突\n制表\t工作树  ");
+}
+
+#[test]
+fn refreshing_ignores_historical_receipts_but_explicit_checks_still_reject_corruption() {
+    let f = Fixture::new("main");
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let receipt = f.main.join(".git/refs/offline-sync/return-receipts");
+    fs::create_dir_all(&receipt).unwrap();
+    // An invalid historical receipt must not turn a local branch refresh into an audit.
+    fs::write(receipt.join("broken"), "not-an-object-id\n").unwrap();
+    let status = repo::status(&g, &f.main, "main", &[]).unwrap();
+    assert!(status.is_repo);
+    assert!(status.branches.iter().any(|branch| branch.name == "main"));
+    let serialized = serde_json::to_value(status).unwrap();
+    assert!(serialized.get("reviewSources").is_none());
+    assert!(serialized.get("pushedBranches").is_none());
+    assert!(serialized.get("isMirror").is_none());
+    assert!(serialized.get("remoteUrl").is_none());
+    git(
+        &f.main,
+        &["remote", "add", "origin", f.main.to_str().unwrap()],
+    );
+    let error = review::prepare_push(&g, &f.main, "main", false).unwrap_err();
+    assert!(
+        error.to_string().contains("无法完整读取回传接收记录"),
+        "{error}"
+    );
+}
+
+#[test]
+fn package_refresh_reads_manifests_without_opening_bundle_or_patch_contents() {
+    use git_offline_sync_lib::core::manifest::{BundleKind, Manifest, RefEntry, FORMAT};
+
+    let f = Fixture::new("main");
+    let transfer = f.root.join("transfer");
+    fs::create_dir(&transfer).unwrap();
+    let sha = String::from_utf8(git_output(&f.main, &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    for (index, (name, kind)) in [
+        ("unreadable.bundle", BundleKind::Back),
+        ("patches", BundleKind::Patch),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let payload = transfer.join(name);
+        // A directory cannot be hashed as a bundle; a .patch directory is not an applicable patch.
+        fs::create_dir(&payload).unwrap();
+        fs::create_dir(payload.join("invalid.patch")).unwrap();
+        Manifest {
+            format: FORMAT,
+            kind,
+            repo_name: "test".into(),
+            repo_id: sha.clone(),
+            seq: index as u32 + 1,
+            created_at: 1,
+            payload: name.into(),
+            base_branch: "main".into(),
+            refs: vec![RefEntry {
+                name: "refs/heads/main".into(),
+                sha: sha.clone(),
+                base: None,
+            }],
+            tool_version: "test".into(),
+        }
+        .write_for(&payload)
+        .unwrap();
+    }
+    let packages = sync::list_packages(&transfer).unwrap();
+    assert_eq!(packages.len(), 2);
+    for package in packages {
+        assert!(package.payload_exists);
+        let value = serde_json::to_value(package).unwrap();
+        let fields = value.as_object().unwrap();
+        assert_eq!(fields.len(), 3);
+        assert!(fields.contains_key("manifest"));
+        assert!(fields.contains_key("payloadPath"));
+        assert!(fields.contains_key("payloadExists"));
+    }
+}
+
+#[test]
+fn batched_receipts_preserve_multibyte_json_and_reject_non_blob_objects() {
+    use git_offline_sync_lib::args;
+
+    let f = Fixture::new("main");
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    for index in 1..=3 {
+        let key = format!("{index:040x}");
+        let branch = format!("feature/中文-{index}");
+        let receipt = serde_json::json!({
+            "key": key, "items": [{"source": branch, "local": branch, "original": branch,
+                "base": "main", "itemId": index.to_string()}], "warnings": ["包含中文\n与换行"]
+        });
+        let oid = g
+            .query_stdin(
+                &f.main,
+                args!["hash-object", "-w", "--stdin"],
+                &serde_json::to_string_pretty(&receipt).unwrap(),
+            )
+            .unwrap();
+        git(
+            &f.main,
+            &[
+                "update-ref",
+                &format!("refs/offline-sync/return-receipts/{key}"),
+                oid.trim(),
+            ],
+        );
+    }
+    git(
+        &f.main,
+        &["remote", "add", "origin", f.main.to_str().unwrap()],
+    );
+    git(&f.main, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    for index in 1..=3 {
+        let branch = format!("feature/中文-{index}");
+        git(&f.main, &["branch", &branch]);
+        let plan = review::prepare_push(&g, &f.main, &branch, false).unwrap();
+        assert_eq!(plan.target_ref, format!("refs/heads/{branch}"));
+    }
+    git(
+        &f.main,
+        &[
+            "update-ref",
+            "refs/offline-sync/return-receipts/wrong-type",
+            "HEAD",
+        ],
+    );
+    let error = review::prepare_push(&g, &f.main, "feature/中文-2", false).unwrap_err();
+    assert!(error.to_string().contains("接收记录对象损坏"), "{error}");
 }

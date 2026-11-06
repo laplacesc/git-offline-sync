@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useId, useRef, useState } from "react";
 import { RadioGroup, RadioGroupItem } from "./components/ui/radio-group";
 import { Label } from "./components/ui/label";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { BranchManager } from "./BranchManager";
 import { PackageInbox } from "./PackageInbox";
 import {
@@ -12,12 +11,12 @@ import { Feedback, useRunner } from "./runner";
 import { Icon } from "./icons";
 import {
   InProgressBanners,
-  useRefreshOnFocus, useRepoStatus, useRequestGeneration,
+  usePackages, useRefreshOnFocus, useRepoStatus, useRequestGeneration,
 } from "./repoBits";
-import { ActionButton, Code, Fold, OutcomeView, RefreshButton, WorkspaceNavigation } from "./ui";
+import { ActionButton, Code, Fold, OutcomeView, RefreshButton } from "./ui";
 
-export function ExternalView({ profile, navigationTarget, onNavigate, refreshVersion = 0 }: {
-  profile: Profile; navigationTarget?: HTMLElement | null; onNavigate?: () => void; refreshVersion?: number;
+export function ExternalView({ profile, refreshVersion = 0 }: {
+  profile: Profile; refreshVersion?: number;
 }) {
   const { run, notify, confirm, busy } = useRunner();
   const base = profile.baseBranch;
@@ -28,26 +27,21 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
   const devReposKey = JSON.stringify(devRepos);
   const [devPicked, setDevPicked] = useState("");
   const devDir = devRepos.includes(devPicked) ? devPicked : devRepos[0] ?? "";
-  const mirror = useRepoStatus(mirrorDir, base, releases, false);
-  const repo = useRepoStatus(devDir, base, releases, false);
+  const mirror = useRepoStatus(mirrorDir, base, releases);
+  const repo = useRepoStatus(devDir, base, releases);
   const refreshKey = JSON.stringify([
     profile.id, profile.repoName, mirrorDir, base, releases, profile.transferDir,
     devRepos, profile.userName, profile.userEmail,
   ]);
   const actionKey = JSON.stringify([refreshKey, devDir]);
   const beginRefresh = useRequestGeneration(refreshKey);
-  const beginPackageRefresh = useRequestGeneration(refreshKey);
   const beginAction = useRequestGeneration(actionKey);
   const revision = useRef(0);
   const [snapshot, setSnapshot] = useState<{
     key: string; loading: boolean; state: MirrorState | null; stateError: string | null;
     devs: Awaited<ReturnType<typeof api.devSyncStatus>>; devError: string | null;
   } | null>(null);
-  const [packageSnapshot, setPackageSnapshot] = useState<{
-    key: string; loading: boolean; packages: PackageInfo[]; packageError: string | null;
-  } | null>(null);
-  const currentPackages = packageSnapshot?.key === refreshKey ? packageSnapshot : null;
-  const packagesLoading = !currentPackages || currentPackages.loading;
+  const { current: currentPackages, loading: packagesLoading, reload: refreshPackages } = usePackages(refreshKey, profile.transferDir);
   const current = snapshot?.key === refreshKey ? snapshot : null;
   const state = current?.state;
   const lastIn = state?.lastInSeq ?? 0;
@@ -76,17 +70,10 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
     ]);
     if (isCurrent()) setSnapshot({ key: refreshKey, loading: false, ...stateResult, ...devResult });
   }, [beginRefresh, refreshKey, mirrorDir, devReposKey, mirror.reload]);
-  const reloadPackages = useCallback(async () => {
-    const isCurrent = beginPackageRefresh();
-    if (!isCurrent()) return;
+  const reloadPackages = useCallback(() => {
     revision.current += 1;
-    setPackageSnapshot((previous) => previous?.key === refreshKey ? { ...previous, loading: true } : null);
-    const result = await api.listPackages(profile.transferDir).then(
-      (packages) => ({ packages, packageError: null }),
-      (error) => ({ packages: [] as PackageInfo[], packageError: String(error) }),
-    );
-    if (isCurrent()) setPackageSnapshot({ key: refreshKey, loading: false, ...result });
-  }, [beginPackageRefresh, refreshKey, profile.transferDir]);
+    return refreshPackages();
+  }, [refreshPackages]);
   const reloadLocal = useCallback(async () => {
     await Promise.all([reloadShared(), repo.reload()]);
   }, [reloadShared, repo.reload]);
@@ -98,15 +85,15 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
   useEffect(() => { void reloadShared(); }, [reloadShared, refreshVersion]);
   useEffect(() => { void repo.reload(); }, [repo.reload, refreshVersion]);
   useEffect(() => { void reloadPackages(); }, [reloadPackages, refreshVersion]);
-  useRefreshOnFocus(reloadLocal);
+  useRefreshOnFocus(reloadAll);
 
-  const updatePackages = (currentPackages?.packages ?? []).filter((p) => {
+  const updatePackages = useMemo(() => (currentPackages?.packages ?? []).filter((p) => {
     const m = p.manifest;
     return m && (m.kind === "full" || m.kind === "incr")
       && (state?.repoId ? m.repoId === state.repoId : m.repoName === profile.repoName && m.baseBranch === base);
-  });
-  const packages = updatePackages.filter((p) => p.manifest!.seq > lastIn)
-    .sort((a, b) => a.manifest!.seq - b.manifest!.seq);
+  }), [currentPackages?.packages, state?.repoId, profile.repoName, base]);
+  const packages = useMemo(() => updatePackages.filter((p) => p.manifest!.seq > lastIn)
+    .sort((a, b) => a.manifest!.seq - b.manifest!.seq), [updatePackages, lastIn]);
   const usable = (p: PackageInfo) => p.payloadExists && !!p.manifest && p.manifest.seq > lastIn
     && (needsFull ? p.manifest.kind === "full" : p.manifest.seq === lastIn + 1 || p.manifest.kind === "full");
   const chosen = packages.find((p) => usable(p) && (needsFull || p.manifest!.seq === lastIn + 1))
@@ -162,7 +149,7 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
       name: profile.userName ?? "", email: profile.userEmail ?? "",
     }));
     if (!isCurrent()) return;
-    await reloadLocal();
+    await reloadAll();
   };
 
   const [selected, setSelected] = useState<string[]>([]);
@@ -170,8 +157,6 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
   const [mode, setMode] = useState<"bundle" | "patch">("bundle");
   const [exportRes, setExportRes] = useState<ExportOutcome | null>(null);
   const [opRes, setOpRes] = useState<OpOutcome | null>(null);
-  const branches = (repo.status?.branches ?? []).filter((b) => !candidates.includes(b.name));
-  const selectedBranches = selected.filter((name) => branches.some((b) => b.name === name));
 
   useEffect(() => {
     setSelected([]);
@@ -179,12 +164,15 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
     setOpRes(null);
   }, [actionKey]);
   useEffect(() => {
-    if (repo.loading) return;
-    setSelected((previous) => previous.filter((name) => repo.status?.branches.some((b) => b.name === name && !candidates.includes(name))));
-  }, [repo.status, repo.loading, base, JSON.stringify(releases)]);
+    if (repo.loading || !selected.length) return;
+    setSelected((previous) => {
+      const remaining = previous.filter((name) => !candidates.includes(name) && repo.status?.branches.some((b) => b.name === name));
+      return remaining.length === previous.length ? previous : remaining;
+    });
+  }, [repo.status, repo.loading, selected, base, JSON.stringify(releases)]);
 
   const doExport = async () => {
-    if (!ready || !devReady || !mirrorReady || !selectedBranches.length || mode === "patch" && selectedBranches.length !== 1) return;
+    if (!ready || !devReady || !mirrorReady || !selected.length || mode === "patch" && selected.length !== 1) return;
     const isCurrent = beginAction();
     const common = {
       repo: devDir, mirrorDir, transferDir: profile.transferDir,
@@ -192,8 +180,8 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
     };
     setExportRes(null);
     const outcome = mode === "bundle"
-      ? await run("导出回传", () => api.exportBack({ ...common, branches: selectedBranches }))
-      : await run("导出补丁", () => api.exportPatches({ ...common, branch: selectedBranches[0] }));
+      ? await run("导出回传", () => api.exportBack({ ...common, branches: selected }))
+      : await run("导出补丁", () => api.exportPatches({ ...common, branch: selected[0] }));
     if (!isCurrent()) return;
     if (outcome) {
       setExportRes(outcome);
@@ -208,34 +196,29 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
   if (needsFull) summary = "请将本项目的全量包放入传输目录后导入。";
   if (chosen) summary = `本次更新 #${chosen.manifest!.seq} · ${chosen.manifest!.kind === "full" ? "全量" : "增量"}`;
   if (packagesLoading) summary = "正在读取传输目录…";
-  else if (currentPackages.packageError) summary = "暂时无法检查新包。";
+  else if (currentPackages?.packageError) summary = "暂时无法检查新包。";
   if (!current) summary = "正在检查同步状态…";
   else if (current.stateError || mirror.error) summary = "暂时无法检查同步状态，请刷新重试。";
   return <>
     {!current && <Feedback kind="progress" text="正在读取仓库状态…" />}
-    <Tabs className="sync-workspace" orientation={navigationTarget ? "vertical" : "horizontal"}
-      value="sync" onValueChange={() => onNavigate?.()}>
-    <WorkspaceNavigation target={navigationTarget}><TabsList className="sync-tabs" aria-label="外网同步">
-      <TabsTrigger value="sync" onClick={() => onNavigate?.()}><Icon name="copy" />同步与回传</TabsTrigger>
-    </TabsList></WorkspaceNavigation>
+    <div className="sync-workspace">
     <div className="sync-location">
       <Icon name="folder" /><span className="sync-location-label">传输目录</span>
       <span className="min-w-0 flex-1 truncate" title={profile.transferDir}>
         {profile.transferDir}</span>
-      <RefreshButton label="刷新传输目录" loading={packagesLoading} onClick={reloadPackages} />
+      <RefreshButton loading={!current || current.loading || mirror.loading || repo.loading || packagesLoading} onClick={reloadAll} />
     </div>
     {!mirrorDir.trim() && <Feedback kind="warn" text="请在项目设置中填写外网镜像目录。" />}
     {!devRepos.length && <Feedback kind="warn" text="请在项目设置中添加开发仓库目录。" />}
     {current?.stateError && <Feedback kind="error" text={`无法读取同步记录，请检查后刷新。\n${current.stateError}`} />}
     {mirror.error && <Feedback kind="error" text={`无法读取外网镜像。\n${mirror.error}`} />}
     {mirror.status?.isRepo && !mirror.status.isBare && <Feedback kind="error" text="镜像目录必须是裸仓库，请检查项目设置。" />}
-    <TabsContent className="sync-panel" value="sync" forceMount hidden={false}>
+    <div className="sync-panel">
       <header className="internal-page-heading"><div><h1>同步与回传</h1></div></header>
       <section className="sync-workflow-section" aria-label="同步开发仓库" aria-busy={!current || current.loading || mirror.loading}>
         <header className="internal-page-heading">
           <div><h2>同步开发仓库</h2><p>从镜像获取最新引用，保留本地工作分支和未提交修改。</p></div>
           <div className="sync-button-group">
-            <RefreshButton label="刷新同步状态" loading={!current || current.loading || mirror.loading} onClick={reloadLocal} />
             <ActionButton variant="default" onClick={() => syncDevelopmentRepos()} disabled={!canSyncDevs}>同步开发仓库</ActionButton>
           </div>
         </header>
@@ -252,8 +235,8 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
               </div>
               <div className="sync-button-group">
                 {path !== devDir && <ActionButton size="sm" variant="secondary" onClick={() => setDevPicked(path)}>切换</ActionButton>}
-                <ActionButton size="sm" variant="outline" onClick={() => syncDevelopmentRepos([path])}
-                  disabled={!canSyncDevs}>{status?.status === "notCloned" ? "从镜像克隆" : "同步仓库"}</ActionButton>
+                {devRepos.length > 1 && <ActionButton size="sm" variant="outline" onClick={() => syncDevelopmentRepos([path])}
+                  disabled={!canSyncDevs}>{status?.status === "notCloned" ? "从镜像克隆" : "同步仓库"}</ActionButton>}
               </div>
             </div>;
           })}
@@ -302,24 +285,24 @@ export function ExternalView({ profile, navigationTarget, onNavigate, refreshVer
             </div>)}
           </RadioGroup>
           <ActionButton variant="default" onClick={doExport}
-            disabled={!ready || !devReady || !mirrorReady || !selectedBranches.length || mode === "patch" && selectedBranches.length !== 1}>
+            disabled={!ready || !devReady || !mirrorReady || !selected.length || mode === "patch" && selected.length !== 1}>
             导出回传
           </ActionButton>
         </div>
       </header>
       <InProgressBanners status={repo.status} onDone={(outcome) => {
         if (outcome) setOpRes(outcome);
-        void reloadLocal();
+        void reloadAll();
       }} />
       <BranchManager key={actionKey} profile={profile} repoPath={devDir} status={repo.status} loading={repo.loading} error={repo.error}
-        onRefresh={repo.reload} selected={selectedBranches} onSelect={setSelected} multi={mode === "bundle"} />
+        onRefresh={reloadAll} selected={selected} onSelect={setSelected} multi={mode === "bundle"} />
 
       {opRes && !opRes.ok && <OutcomeView outcome={opRes} />}
       {exportRes?.status === "exported" && <Fold className="sync-details" title={`查看回传 #${exportRes.seq} 文件`}>
         <Code>{exportRes.payload}</Code>
       </Fold>}
       </section>
-    </TabsContent>
-    </Tabs>
+    </div>
+    </div>
   </>;
 }

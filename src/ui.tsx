@@ -1,5 +1,4 @@
 import { type ComponentProps, type ReactNode, useId } from "react";
-import { createPortal } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ChevronRight } from "lucide-react";
 import { Button } from "./components/ui/button";
@@ -20,11 +19,6 @@ import { Icon, type IconName } from "./icons";
 export { Notice, type Tone } from "./Notice";
 
 type ButtonProps = ComponentProps<typeof Button>;
-
-/** Keep tab state in the workspace while placing its navigation in the app sidebar. */
-export function WorkspaceNavigation({ target, children }: { target?: HTMLElement | null; children: ReactNode }) {
-  return target ? createPortal(children, target) : <>{children}</>;
-}
 
 /** 操作进行中时，统一禁用会修改仓库的按钮。 */
 export function ActionButton({ disabled, type = "button", ...props }: ButtonProps) {
@@ -101,12 +95,17 @@ export function BaseSelect({ label, value, options, onChange, mainline, classNam
 export function PathInput({ label, value, onChange, directory = true, placeholder, description, id, error }: {
   label: string; value: string; onChange: (v: string) => void; directory?: boolean; placeholder?: string; description?: string; id?: string; error?: string;
 }) {
+  const { notify } = useRunner();
   const generatedId = useId();
   const inputId = id ?? generatedId;
   const describedBy = [description && `${inputId}-description`, error && `${inputId}-error`].filter(Boolean).join(" ") || undefined;
   const browse = async () => {
-    const picked = await open({ directory, multiple: false, defaultPath: value || undefined });
-    if (typeof picked === "string") onChange(picked);
+    try {
+      const picked = await open({ directory, multiple: false, defaultPath: value || undefined });
+      if (typeof picked === "string") onChange(picked);
+    } catch (error) {
+      notify("error", `打开路径选择器失败：${String(error)}`);
+    }
   };
   return <Field data-invalid={!!error}>
     <FieldLabel htmlFor={inputId}>{label}</FieldLabel>
@@ -140,7 +139,7 @@ export function Empty({ children }: { children: ReactNode }) {
   return <EmptyState className="empty-state border-0 px-0 py-1"><EmptyDescription>{children}</EmptyDescription></EmptyState>;
 }
 
-export function ListSurface({ children }: { children: ReactNode[] }) {
+function ListSurface({ children }: { children: ReactNode[] }) {
   return <div className="list-surface overflow-hidden rounded-lg border">
     {children.map((child, index) => <div key={index}>{index > 0 && <Separator />}{child}</div>)}
   </div>;

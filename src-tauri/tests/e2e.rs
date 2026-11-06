@@ -116,14 +116,15 @@ fn manually_created_worktrees_are_visible_in_status() {
     let log = |_: LogEvent| {};
     let g = Git::new(None, &log);
     let st = repo::status(&g, &work, "main", &[]).unwrap();
-    let json = serde_json::to_value(&st).unwrap();
-    let trees = json["worktrees"]
-        .as_array()
-        .expect("状态必须包含干净的 detached worktree，界面才能展示");
+    let trees = repo::list_worktrees(&g, &work).unwrap();
     assert_eq!(trees.len(), 3);
-    let tree = trees.iter().find(|w| w["branch"].is_null()).unwrap();
-    assert_same_path(tree["path"].as_str(), &detached);
-    assert_eq!(tree["main"], false);
+    let tree = trees.iter().find(|w| w.branch.is_none()).unwrap();
+    assert_same_path(Some(&tree.path), &detached);
+    assert!(!tree.main);
+    let json = serde_json::to_value(&st).unwrap();
+    for field in ["path", "exists", "currentBranch", "worktrees"] {
+        assert!(json.get(field).is_none(), "unused field: {field}");
+    }
     assert!(st.dirty_trees.is_empty());
     let branch = st
         .branches
@@ -184,8 +185,7 @@ fn full_round_trip() {
     // ---------- 外网端：首次导入到镜像 ----------
     let extm = root.join("external/mirror.git");
     let ext = root.join("external/proj");
-    let r = support::import_confirmed(&g, &full, &extm, false).unwrap();
-    assert!(r.created);
+    support::import_confirmed(&g, &full, &extm, false).unwrap();
     assert!(repo::is_ext_mirror(&g, &extm));
     assert!(repo::is_bare(&g, &extm).unwrap());
     // 内网分支落在镜像的 refs/heads，state.json 在镜像目录里
@@ -221,16 +221,12 @@ fn full_round_trip() {
         .to_string();
     assert!(err.contains("必须使用全量包"), "{err}");
 
-    // 回归：没有 manifest 的裸 bundle 也能导入，镜像 HEAD 不能悬空。
-    // 悬空时从镜像克隆出的开发仓库不会检出任何分支（旧实现只在有 manifest 时设 HEAD）。
-    let bare_bundle = root.join("nomanifest.bundle");
-    fs::copy(&full, &bare_bundle).unwrap();
-    let m2 = root.join("external/nomanifest.git");
+    // 合法全量导入修复空镜像的悬空 HEAD，确保克隆时检出工作树。
+    let m2 = root.join("external/repaired-head.git");
     fs::create_dir_all(&m2).unwrap();
-    // 故意让初始 HEAD 指向一个包里没有的分支
     sh(&m2, &["init", "-q", "--bare", "-b", "not-a-real-branch"]);
     sh(&m2, &["config", "offlinesync.role", "mirror"]);
-    sync::import_manual_bundle(&g, &bare_bundle, &m2).unwrap();
+    support::import_confirmed(&g, &full, &m2, false).unwrap();
     let head = sh(&m2, &["symbolic-ref", "HEAD"]);
     assert!(
         repo::rev_exists(&g, &m2, &head),
@@ -257,8 +253,7 @@ fn full_round_trip() {
         .success());
 
     // 重复导入全量包到已存在的镜像：允许（当作重新同步），不报错
-    let r = support::import_confirmed(&g, &full, &extm, false).unwrap();
-    assert!(!r.created);
+    support::import_confirmed(&g, &full, &extm, false).unwrap();
 
     // ---------- 外网端：开发并回传 ----------
     sync::create_branch(&g, &ext, "feature/ai", "main", None).unwrap();
@@ -304,19 +299,21 @@ fn full_round_trip() {
     // 回传包不能在外网端导入
     assert!(support::import_confirmed(&g, &back.2, &extm, false).is_err());
 
-    let ib = sync::import_back(&g, &work, &back.2, "main", &[]).unwrap();
+    let ib = review::import_return(&g, &work, &back.2, "main", &[]).unwrap();
     assert_eq!(ib.branches.len(), 1);
-    assert_eq!(ib.branches[0].local, "feature/ai");
-    assert_eq!(ib.branches[0].commits.len(), 1);
-    assert_eq!(ib.branches[0].commits[0].email, "dev@corp.example");
+    assert_eq!(ib.branches[0], "feature/ai");
+    let commits = repo::commits_between(&g, &work, "origin/main", &ib.branches[0]).unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].email, "dev@corp.example");
 
     let rb = sync::rebase_onto(&g, &work, "feature/ai", "main", true).unwrap();
     assert!(rb.ok, "{:?}", rb);
-    sync::push_branch(&g, &work, "feature/ai", false).unwrap();
+    let plan = review::prepare_push(&g, &work, "feature/ai", false).unwrap();
+    review::execute_push(&g, &plan.plan_id).unwrap();
     assert!(!sh(&upstream, &["rev-parse", "refs/heads/feature/ai"]).is_empty());
 
     // 镜像仓库禁止推送
-    assert!(sync::push_branch(&g, &mirror, "main", false).is_err());
+    assert!(review::prepare_push(&g, &mirror, "main", false).is_err());
 
     // ---------- 增量：含指向旧提交的新分支 ----------
     sh(
@@ -332,9 +329,8 @@ fn full_round_trip() {
         exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false).unwrap());
     assert_eq!((kind, seq), (BundleKind::Incr, 2));
 
-    let r = support::import_confirmed(&g, &incr, &extm, false).unwrap();
-    assert!(!r.created);
-    assert!(r.changes.iter().any(|c| c.name == "refs/heads/release"));
+    support::import_confirmed(&g, &incr, &extm, false).unwrap();
+    assert_eq!(sh(&extm, &["rev-parse", "refs/heads/release"]), first);
     sync::sync_dev_repo(&g, &ext, &extm).unwrap();
     assert_eq!(
         sh(&ext, &["rev-parse", "origin/main"]),
@@ -493,10 +489,10 @@ fn full_round_trip() {
     assert_eq!(fs::read_dir(&pdir).unwrap().count(), 2);
 
     sh(&work, &["switch", "-q", "main"]);
-    let ip = sync::import_patches(&g, &work, &pdir, "feature/patch", "main", true, None).unwrap();
+    let ip = sync::import_patches(&g, &work, &pdir, "feature/patch", "main", true).unwrap();
     assert!(ip.ok, "{:?}", ip);
     assert_eq!(
-        sync::list_commits(&g, &work, "origin/main", "feature/patch")
+        repo::commits_between(&g, &work, "origin/main", "feature/patch")
             .unwrap()
             .len(),
         2
@@ -507,16 +503,17 @@ fn full_round_trip() {
     fs::write(work.join("dirty.txt"), "uncommitted\n").unwrap();
     sh(&work, &["add", "dirty.txt"]);
     let pwt = root.join("internal/wt-patch");
-    let ip = sync::import_patches(
-        &g,
+    sh(
         &work,
-        &pdir,
-        "feature/patch-wt",
-        "main",
-        false,
-        Some(&pwt),
-    )
-    .unwrap();
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            pwt.to_str().unwrap(),
+            "origin/main",
+        ],
+    );
+    let ip = sync::import_patches(&g, &pwt, &pdir, "feature/patch-wt", "main", false).unwrap();
     assert!(ip.ok, "{:?}", ip);
     assert_same_path(ip.worktree.as_deref(), &work);
     assert_eq!(
@@ -524,7 +521,13 @@ fn full_round_trip() {
         before_head,
         "主工作树的当前分支不该被换掉"
     );
-    assert!(!pwt.exists(), "同包重导不应创建额外工作树");
+    assert!(
+        git_offline_sync_lib::core::repo::status(&g, &pwt, "main", &[])
+            .unwrap()
+            .dirty_trees
+            .iter()
+            .any(|t| same_path(Path::new(&t.path), &work))
+    );
     assert!(work.join("e.txt").exists(), "已应用补丁保留在原工作仓库");
     assert!(!repo::rev_exists(&g, &work, "refs/heads/feature/patch-wt"));
     assert_eq!(
@@ -562,7 +565,7 @@ fn full_round_trip() {
     sh(&seed, &["push", "-q", "origin", "main"]);
 
     sh(&work, &["switch", "-q", "main"]);
-    sync::import_back(&g, &work, &cb, "main", &[]).unwrap();
+    review::import_return(&g, &work, &cb, "main", &[]).unwrap();
     let rb = sync::rebase_onto(&g, &work, "feature/conflict", "main", true).unwrap();
     assert!(!rb.ok && rb.conflict);
     assert_eq!(rb.files, vec!["a.txt".to_string()]);
@@ -576,11 +579,17 @@ fn full_round_trip() {
         None
     );
 
+    // 已接收包重导不触碰后来修改；新的回传身份仍须检查占用。
+    review::import_return(&g, &work, &cb, "main", &[]).unwrap();
+    let mut next_return = Manifest::read_for(&cb).unwrap().unwrap();
+    next_return.seq += 1;
+    next_return.write_for(&cb).unwrap();
+
     // 已检出分支不能直接导入（主工作树）
-    let err = sync::import_back(&g, &work, &cb, "main", &[])
+    let err = review::import_return(&g, &work, &cb, "main", &[])
         .unwrap_err()
         .to_string();
-    assert!(err.contains("已被检出"), "{err}");
+    assert!(err.contains("工作树") || err.contains("检出"), "{err}");
 
     // 回归：被 linked worktree 占用的分支同样要在动手前就拦住。
     // 漏掉时 git 报 "refusing to fetch into branch ... checked out at ..."，
@@ -593,10 +602,10 @@ fn full_round_trip() {
         &work,
         &["worktree", "add", iwt.to_str().unwrap(), "feature/conflict"],
     );
-    let err = sync::import_back(&g, &work, &cb, "main", &[])
+    let err = review::import_return(&g, &work, &cb, "main", &[])
         .unwrap_err()
         .to_string();
-    assert!(err.contains("已被检出"), "{err}");
+    assert!(err.contains("工作树") || err.contains("检出"), "{err}");
     assert!(
         err.contains("wt-conflict"),
         "错误里要指出分支在哪个工作树：{err}"
@@ -606,8 +615,8 @@ fn full_round_trip() {
     // 分叉的分支导入为新名字，不覆盖本地
     sh(&work, &["switch", "-q", "main"]);
     sh(&work, &["branch", "-f", "feature/conflict", "origin/main"]);
-    let ib = sync::import_back(&g, &work, &cb, "main", &[]).unwrap();
-    assert!(ib.branches[0].local.starts_with("feature/conflict-import-"));
+    let ib = review::import_return(&g, &work, &cb, "main", &[]).unwrap();
+    assert!(ib.branches[0].starts_with("feature/conflict-import-"));
     assert!(!ib.warnings.is_empty());
 
     // 更高 format 版本的包被明确拒绝，而不是按旧语义静默解读
@@ -737,13 +746,13 @@ fn release_hotfix_round_trip() {
     sh(&seed, &["push", "-q", "origin", "release/1.0"]);
 
     sh(&work, &["fetch", "-q", "origin"]);
-    let ib = sync::import_back(&g, &work, &back, "main", &releases).unwrap();
-    assert_eq!(ib.branches[0].base, "release/1.0");
+    let ib = review::import_return(&g, &work, &back, "main", &releases).unwrap();
+    assert_eq!(ib.branches[0], "hotfix/login");
     assert_eq!(
-        ib.branches[0].commits.len(),
-        1,
-        "{:?}",
-        ib.branches[0].commits
+        repo::commits_between(&g, &work, "origin/release/1.0", &ib.branches[0])
+            .unwrap()
+            .len(),
+        1
     );
     assert_eq!(
         repo::get_sync_base(&g, &work, "hotfix/login").as_deref(),
@@ -761,7 +770,8 @@ fn release_hotfix_round_trip() {
     assert_eq!((hb.ahead, hb.behind), (1, 0));
     // 没有带上 main 的提交
     assert!(!work.join("m.txt").exists());
-    sync::push_branch(&g, &work, "hotfix/login", false).unwrap();
+    let plan = review::prepare_push(&g, &work, "hotfix/login", false).unwrap();
+    review::execute_push(&g, &plan.plan_id).unwrap();
     assert!(!sh(&upstream, &["rev-parse", "refs/heads/hotfix/login"]).is_empty());
 
     // ---------- 没有记录时按前缀推断 ----------
@@ -788,7 +798,7 @@ fn release_hotfix_round_trip() {
     let rb = sync::rebase_onto(&g, &work, "hotfix/login", "main", false).unwrap();
     assert!(rb.ok, "{:?}", rb);
     assert_eq!(
-        sync::list_commits(&g, &work, "origin/main", "hotfix/login")
+        repo::commits_between(&g, &work, "origin/main", "hotfix/login")
             .unwrap()
             .len(),
         1
@@ -815,7 +825,7 @@ fn release_hotfix_round_trip() {
         "不能把主线独有的提交带到发布分支"
     );
     assert_eq!(
-        sync::list_commits(&g, &ext, "origin/release/1.0", "feature/to-release")
+        repo::commits_between(&g, &ext, "origin/release/1.0", "feature/to-release")
             .unwrap()
             .len(),
         1
@@ -861,7 +871,7 @@ fn rebase_journal_preserves_bases_through_abort_continue_and_recovery() {
         .join("offline-sync-rebase.json")
         .exists());
     let context: serde_json::Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
-    assert_eq!(context["oldBase"], "release");
+    assert!(context.get("oldBase").is_none());
     assert_eq!(context["newBase"], "main");
     assert_eq!(
         repo::get_sync_base(&g, &work, "topic").as_deref(),
@@ -1016,7 +1026,7 @@ fn snapshot_fixture(root: &Path, g: &Git) -> (PathBuf, PathBuf, PathBuf, PathBuf
 }
 
 #[test]
-fn review_push_records_only_verified_current_commits() {
+fn review_push_verifies_remote_without_writing_legacy_markers() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let root = test_root(&tmp);
@@ -1057,99 +1067,40 @@ fn review_push_records_only_verified_current_commits() {
     )
     .2;
     let accepted = review::import_return(&g, &work, &bundle, "main", &[]).unwrap();
-    assert!(accepted.outcomes.is_empty());
-    let local = &accepted.branches[0].local;
-    let wt = &work;
+    let local = &accepted.branches[0];
     sh(&work, &["switch", local]);
-    let receipt_ref = sh(
-        &work,
-        &[
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/offline-sync/return-receipts",
-        ],
-    );
-    let receipt: serde_json::Value =
-        serde_json::from_str(&sh(&work, &["cat-file", "blob", &receipt_ref])).unwrap();
-    let marker = format!(
-        "refs/offline-sync/review-pushed/{}/{}",
-        receipt["key"].as_str().unwrap(),
-        receipt["items"][0]["itemId"].as_str().unwrap()
-    );
-    assert!(repo::status(&g, &work, "main", &[])
-        .unwrap()
-        .pushed_branches
-        .is_empty());
     let plan = review::prepare_push(&g, &work, local, false).unwrap();
     let outcome = review::execute_push(&g, &plan.plan_id).unwrap();
     assert!(outcome.ok, "{}", outcome.message);
-    assert_eq!(sh(&work, &["rev-parse", &marker]), plan.source_oid);
-    assert_eq!(
-        sh(&remote, &["rev-parse", "feature/return"]),
-        plan.source_oid
-    );
-
-    // A fresh client and an unreachable origin still recover the persisted result.
-    let restarted = Git::new(None, &log);
-    sh(
-        &work,
-        &["remote", "set-url", "origin", "missing-remote.git"],
-    );
-    let status = repo::status(&restarted, &work, "main", &[]).unwrap();
-    assert_eq!(status.pushed_branches, vec![local.clone()]);
-    assert_eq!(
-        serde_json::to_value(&status).unwrap()["pushedBranches"],
-        serde_json::json!([local])
-    );
-    assert_eq!(
-        repo::status(&restarted, wt, "main", &[])
+    assert_eq!(sh(&remote, &["rev-parse", local]), plan.source_oid);
+    assert!(
+        repo::list_refs(&g, &work, &["refs/offline-sync/review-pushed"])
             .unwrap()
-            .pushed_branches,
-        vec![local.clone()]
-    );
-    assert!(repo::status(&restarted, &remote, "main", &[])
-        .unwrap()
-        .pushed_branches
-        .is_empty());
-
-    commit(wt, "next", "next\n", "new local commit");
-    assert!(repo::status(&restarted, &work, "main", &[])
-        .unwrap()
-        .pushed_branches
-        .is_empty());
-    sh(
-        &work,
-        &["remote", "set-url", "origin", remote.to_str().unwrap()],
+            .is_empty()
     );
 
-    // Ref-lock failure after a verified push must preserve success and explain it.
+    // Old versions may leave a marker (or a stale lock); neither is needed to push.
+    let marker = "refs/offline-sync/review-pushed/legacy";
+    sh(&work, &["update-ref", marker, &plan.source_oid]);
     let marker_lock = repo::git_dir(&g, &work)
         .unwrap()
         .join(format!("{marker}.lock"));
     fs::write(&marker_lock, "fault injection").unwrap();
-    let plan = review::prepare_push(&g, &work, local, false).unwrap();
-    let outcome = review::execute_push(&g, &plan.plan_id).unwrap();
+    commit(&work, "next", "next\n", "new local commit");
+    let next = review::prepare_push(&g, &work, local, false).unwrap();
+    let outcome = review::execute_push(&g, &next.plan_id).unwrap();
     assert!(outcome.ok, "{}", outcome.message);
-    assert!(outcome.message.contains("推送已完成但记录失败，请检查"));
+    assert_eq!(outcome.message, format!("已核实推送 refs/heads/{local}"));
+    assert_eq!(sh(&remote, &["rev-parse", local]), next.source_oid);
+    assert_eq!(sh(&work, &["rev-parse", marker]), plan.source_oid);
     assert_eq!(
-        sh(&remote, &["rev-parse", "feature/return"]),
-        plan.source_oid
-    );
-    assert!(repo::status(&g, &work, "main", &[])
-        .unwrap()
-        .pushed_branches
-        .is_empty());
-    fs::remove_file(marker_lock).unwrap();
-    let retry = review::prepare_push(&g, &work, local, false).unwrap();
-    assert!(review::execute_push(&g, &retry.plan_id).unwrap().ok);
-    assert_eq!(
-        repo::status(&g, &work, "main", &[])
+        repo::list_refs(&g, &work, &["refs/offline-sync/review-pushed"])
             .unwrap()
-            .pushed_branches,
-        vec![local.clone()]
+            .len(),
+        1
     );
 
-    // Unmanaged branches and orphan markers must not appear as pushed branches.
+    // Orphan markers cannot authorize pushing unmanaged or deleted branches.
     sh(&work, &["branch", "review/unmanaged", &plan.source_oid]);
     sh(
         &work,
@@ -1160,10 +1111,10 @@ fn review_push_records_only_verified_current_commits() {
         ],
     );
     sh(&work, &["update-ref", "-d", &format!("refs/heads/{local}")]);
-    assert!(repo::status(&g, &work, "main", &[])
-        .unwrap()
-        .pushed_branches
-        .is_empty());
+    assert!(review::prepare_push(&g, &work, "review/unmanaged", false).is_err());
+    assert!(review::prepare_push(&g, &work, local, false).is_err());
+    // Returning just names must still reject a receipt whose local branch was removed.
+    assert!(review::import_return(&g, &work, &bundle, "main", &[]).is_err());
 }
 
 #[test]

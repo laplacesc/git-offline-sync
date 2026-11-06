@@ -1,14 +1,17 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { api, type CommitInfo, type DevSyncStatus, type PackageInfo, type Profile, type PushPlan, type RepoStatus, type ReturnPackageInfo } from "../src/api";
+import * as dialog from "@tauri-apps/plugin-dialog";
+import { api, type CommitInfo, type DevSyncStatus, type PackageInfo, type Profile, type PushPlan, type RepoStatus } from "../src/api";
 import { ExternalView } from "../src/ExternalView";
 import { InternalView } from "../src/InternalView";
 import { useRepoStatus } from "../src/repoBits";
 import { OperationStatus, RunnerProvider } from "../src/runner";
+import { PathInput } from "../src/ui";
 
 const focus = vi.hoisted(() => ({ listener: undefined as undefined | ((event: { payload: boolean }) => void) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onFocusChanged: async (listener: typeof focus.listener) => { focus.listener = listener; return () => {}; } }),
 }));
@@ -25,8 +28,8 @@ const profile: Profile = {
 };
 function status(path: string): RepoStatus {
   return {
-    path, exists: true, isRepo: true, isBare: path === "/mirror", isMirror: path === "/mirror",
-    currentBranch: "main", worktrees: [], dirtyTrees: [], inProgress: null, inProgressTrees: [], remoteUrl: null,
+    isRepo: true, isBare: path === "/mirror",
+    dirtyTrees: [], inProgress: null, inProgressTrees: [],
     refs: [],
     branches: ["feature/one", "feature/two"].map((name) => ({
       name, sha: "abcdef123", base: "main", baseInferred: false, ahead: 1, behind: 0, current: false, worktree: null,
@@ -36,9 +39,8 @@ function status(path: string): RepoStatus {
 function commit(subject: string): CommitInfo {
   return { sha: subject, subject, author: "author", email: "author@example.com", date: "2026-01-01" };
 }
-function pkg(payload: string, kind: "full" | "back" = "full"): ReturnPackageInfo {
-  return { payloadPath: payload, payloadExists: true, manifestPath: payload + ".json", received: false,
-    manifest: { format: 1, kind, repoName: "test", repoId: "matching", seq: 10, createdAt: 1,
+function pkg(payload: string, kind: "full" | "back" = "full"): PackageInfo {
+  return { payloadPath: payload, payloadExists: true, manifest: { format: 1, kind, repoName: "test", repoId: "matching", seq: 10, createdAt: 1,
       payload, baseBranch: "main", refs: [{ name: "refs/heads/feature/returned", sha: "returned-sha", base: "main" }], toolVersion: "2.0.9" } };
 }
 function plan(branch: string, commits = [commit("frozen-commit")]): PushPlan {
@@ -49,10 +51,9 @@ function ipc(command: string, args?: Record<string, unknown>): unknown {
   switch (command) {
     case "repo_status": return status(String(args?.path));
     case "sync_state": return { repoId: "matching", outSeq: 1, lastHeads: [], lastExportAt: null, lastInSeq: 1, backSeq: 0, lastImportAt: null };
-    case "list_packages":
-    case "list_return_packages": return [];
+    case "list_packages": return [];
     case "dev_sync_status": return (args?.devDirs as string[]).map((path) => ({ path, status: "upToDate", error: null }));
-    case "sync_updates": return { imported: null, repositories: (args?.devDirs as string[]).map((path) => ({ path, status: "fetched" })) };
+    case "sync_updates": return null;
     case "prepare_push": return plan(String(args?.branch));
     case "execute_push": return { ok: true, conflict: false, files: [], message: "pushed", worktree: null };
     // Rust unit serializes to JSON null, not JavaScript undefined.
@@ -76,6 +77,29 @@ beforeEach(() => {
   vi.mocked(invoke).mockImplementation(async (command, args) => ipc(command, args as Record<string, unknown>));
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.mocked(invoke).mockReset(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+it("路径选择器失败显示错误并保留输入", async () => {
+  vi.spyOn(dialog, "open").mockRejectedValue(new Error("dialog unavailable"));
+  const change = vi.fn();
+  render(<RunnerProvider><PathInput label="测试目录" value="/unchanged" onChange={change} /><OperationStatus /></RunnerProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "浏览测试目录" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("打开路径选择器失败");
+  expect(change).not.toHaveBeenCalled();
+});
+
+it.each(["worktree", "bundle"])("%s 文件对话框失败显示错误且不触发仓库操作", async (kind) => {
+  vi.spyOn(dialog, "open").mockRejectedValue(new Error("dialog unavailable"));
+  renderView(kind === "worktree" ? "external" : "internal");
+  await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true }).disabled).toBe(false));
+  if (kind === "worktree") {
+    fireEvent.click(screen.getByRole("checkbox", { name: "创建为独立 worktree" }));
+    fireEvent.click(screen.getByRole("button", { name: "浏览目录" }));
+  } else {
+    fireEvent.click(screen.getByRole("button", { name: "选择其他文件…" }));
+  }
+  expect((await screen.findByRole("alert")).textContent).toContain("选择器失败");
+  expect(vi.mocked(invoke).mock.calls.some(([name]) => name === "create_branch" || name === "import_return")).toBe(false);
+});
 
 describe("仓库查询", () => {
   it("同路径同参数的并发查询只发送一次 IPC，完成和失败后不缓存", async () => {
@@ -118,7 +142,7 @@ describe("仓库查询", () => {
       mutation.reject(new Error("sync failed"));
       await expect(sync).rejects.toThrow("sync failed");
     } else {
-      const result = { imported: null, repositories: [] };
+      const result = null;
       mutation.resolve(result);
       await expect(sync).resolves.toEqual(result);
     }
@@ -138,6 +162,8 @@ describe("仓库查询", () => {
     const latest = deferred<RepoStatus>();
     vi.spyOn(api, "repoStatus").mockReturnValueOnce(old.promise).mockReturnValueOnce(latest.promise);
     const { result, rerender } = renderHook(({ path }) => useRepoStatus(path, "main", []), { initialProps: { path: "/one" } });
+    expect(invoke).not.toHaveBeenCalled();
+    act(() => { void result.current.reload(); });
     act(() => { void result.current.reload(); });
     await act(async () => old.resolve(status("/one")));
     expect(result.current.loading).toBe(true);
@@ -150,8 +176,10 @@ describe("仓库查询", () => {
     rerender({ path: "/two" });
     expect(result.current.error).toBeNull();
     expect(result.current.loading).toBe(true);
-    await act(async () => switched.resolve(status("/two")));
-    expect(result.current.status?.path).toBe("/two");
+    act(() => { void result.current.reload(); });
+    const switchedStatus = status("/two");
+    await act(async () => switched.resolve(switchedStatus));
+    expect(result.current.status).toBe(switchedStatus);
   });
 
   it("较慢的同步状态查询不能覆盖最新开发库列表", async () => {
@@ -181,73 +209,101 @@ describe("仓库查询", () => {
   });
 });
 
-describe.each(["external", "internal"] as const)("%s 独立刷新", (role) => {
-  it.each([false, true])("刷新分支不扫描目录或阻塞包浏览（同时获得焦点=%s）", async (withFocus) => {
-    const packages = Array.from({ length: 25 }, (_, index) => {
-      const value = pkg(`package-${index + 1}.bundle`, role === "internal" ? "back" : "full");
-      value.manifest!.seq = index + 1;
-      return value;
-    });
-    const scan = vi.spyOn(api, role === "external" ? "listPackages" : "listReturnPackages").mockResolvedValue(packages);
+describe.each(["external", "internal"] as const)("%s 统一刷新", (role) => {
+  it("返回窗口时自动刷新并发现新复制的包", async () => {
+    const scan = vi.spyOn(api, "listPackages").mockResolvedValue([]);
     renderView(role);
-    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新同步状态" }).disabled).toBe(false));
-    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新传输目录" }).disabled).toBe(false));
-    const label = role === "internal" ? "回传包" : "更新包";
-    fireEvent.click(screen.getByRole("button", { name: `展开其余 20 个${label}` }));
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true }).disabled).toBe(false));
+    scan.mockResolvedValue([pkg("new-copy.bundle", role === "internal" ? "back" : "full")]);
+    vi.useFakeTimers();
+    act(() => focus.listener?.({ payload: true }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(301); });
+    vi.useRealTimers();
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("listitem", { name: "new-copy.bundle" })).toBeTruthy();
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status")).toHaveLength(4);
+  });
+
+  it.each([false, true])("写入提交身份后自动刷新全部数据（失败=%s）", async (fail) => {
+    const configure = vi.spyOn(api, "configureRepo");
+    if (fail) configure.mockRejectedValue(new Error("identity write failed"));
+    renderView(role, { ...profile, userName: "author", userEmail: "author@example.com" });
+    const refresh = screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true });
+    await waitFor(() => expect(refresh.disabled).toBe(false));
+    vi.mocked(invoke).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "写入提交身份" }));
+    await waitFor(() => expect(configure).toHaveBeenCalledOnce());
+    await waitFor(() => expect(refresh.disabled).toBe(false));
+    const calls = vi.mocked(invoke).mock.calls;
+    expect(calls.filter(([command]) => command === "repo_status")).toHaveLength(2);
+    expect(calls.filter(([command]) => command === "sync_state")).toHaveLength(1);
+    expect(calls.filter(([command]) => command === "list_packages")).toHaveLength(1);
+    expect(screen.queryByText("已写入提交身份") !== null).toBe(!fail);
+  });
+
+  it.each(["继续", "中止"] as const)("%s 冲突处理后自动刷新包列表和本地状态", async (action) => {
+    const repoPath = role === "external" ? "/dev-one" : "/work";
+    let finished = false;
+    vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({
+      ...status(path),
+      inProgressTrees: path === repoPath && !finished
+        ? [{ path, branch: "feature/one", main: true, op: "rebase" as const }] : [],
+    }));
+    const operation = vi.spyOn(api, action === "继续" ? "continueOp" : "abortOp").mockImplementation(async () => {
+      finished = true;
+      return { ok: true, conflict: false, files: [], message: "完成", worktree: null };
+    });
+    renderView(role);
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true }).disabled).toBe(false));
+    vi.mocked(invoke).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: action, exact: true }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: action, exact: true })).toBeNull());
+    expect(operation).toHaveBeenCalledExactlyOnceWith(repoPath);
+    const calls = vi.mocked(invoke).mock.calls;
+    expect(calls.filter(([command]) => command === "sync_state")).toHaveLength(1);
+    expect(calls.filter(([command]) => command === "list_packages")).toHaveLength(1);
+  });
+
+  it("唯一刷新入口同时读取包列表、同步状态和仓库，并保留表单与选择", async () => {
+    const scan = vi.spyOn(api, "listPackages").mockResolvedValue([]);
+    renderView(role);
+    const refresh = screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true });
+    await waitFor(() => expect(refresh.disabled).toBe(false));
+    expect(screen.getAllByRole("button", { name: /刷新/ })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("row", { name: "feature/one" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "新分支" }), { target: { value: "feature/draft" } });
     const pending = deferred<RepoStatus>();
     const repoPath = role === "internal" ? "/work" : "/dev-one";
-    const stateValue = { repoId: "matching", outSeq: 1, lastHeads: [], lastExportAt: null, lastInSeq: 1, backSeq: 0, lastImportAt: null };
-    const pendingState = deferred<typeof stateValue>();
-    vi.spyOn(api, role === "internal" ? "internalState" : "mirrorState").mockReturnValue(pendingState.promise);
     vi.mocked(invoke).mockClear();
     vi.mocked(invoke).mockImplementation(async (command, args) => {
       if (command === "repo_status" && (args as { path: string }).path === repoPath) return pending.promise;
       return ipc(command, args as Record<string, unknown>);
     });
-    if (withFocus) {
-      vi.useFakeTimers();
-      act(() => focus.listener?.({ payload: true }));
-    }
-    fireEvent.click(screen.getByRole("button", { name: "刷新分支" }));
-    expect(invoke).toHaveBeenCalledExactlyOnceWith("repo_status", { path: repoPath, baseBranch: "main", releaseBranches: [] });
-    if (withFocus) await act(async () => { await vi.advanceTimersByTimeAsync(301); });
-    expect(scan).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新传输目录" }).disabled).toBe(false);
-    expect(screen.queryByText("正在读取传输目录…")).toBeNull();
-    expect(screen.queryByText("正在检查同步状态…")).toBeNull();
-    expect(screen.getByRole("region", { name: "分支操作", exact: true }).getAttribute("aria-busy")).toBe("true");
-    const search = screen.getByRole<HTMLInputElement>("textbox", { name: `搜索${label}` });
-    expect(search.disabled).toBe(false);
-    const next = screen.getByRole<HTMLButtonElement>("button", { name: "下一页" });
-    expect(next.disabled).toBe(false);
-    fireEvent.click(next);
-    expect(screen.getByText("21–25 / 25")).toBeTruthy();
-    fireEvent.change(search, { target: { value: "package-1.bundle" } });
-    expect(screen.getByRole("listitem", { name: "package-1.bundle" })).toBeTruthy();
-    if (role === "internal") {
-      expect(screen.getByRole<HTMLButtonElement>("button", { name: "导入回传", exact: true }).disabled).toBe(true);
-    } else {
-      expect(screen.getByText("本次更新 #2 · 全量")).toBeTruthy();
-      expect(screen.getByRole<HTMLButtonElement>("button", { name: "导入下一包" }).disabled).toBe(withFocus);
-    }
-    await act(async () => {
-      pending.resolve(status(repoPath));
-      pendingState.resolve(stateValue);
-    });
-    expect(scan).toHaveBeenCalledTimes(1);
-    expect(search.value).toBe("package-1.bundle");
+    fireEvent.click(refresh);
+    fireEvent.click(refresh);
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(refresh.getAttribute("aria-busy")).toBe("true");
+    expect(refresh.disabled).toBe(true);
+    const calls = vi.mocked(invoke).mock.calls;
+    expect(calls.filter(([command]) => command === "repo_status").map(([, args]) => (args as { path: string }).path).sort())
+      .toEqual([repoPath, "/mirror"].sort());
+    expect(calls.filter(([command]) => command === "sync_state")).toHaveLength(1);
+    expect(calls.filter(([command]) => command === "dev_sync_status")).toHaveLength(role === "external" ? 1 : 0);
+    await act(async () => pending.resolve(status(repoPath)));
+    await waitFor(() => expect(refresh.disabled).toBe(false));
+    expect(screen.getByRole("row", { name: "feature/one" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole<HTMLInputElement>("textbox", { name: "新分支" }).value).toBe("feature/draft");
   });
 
   it("较晚完成的旧刷新不覆盖最新包列表和状态", async () => {
-    const old = deferred<ReturnPackageInfo[]>();
-    const latest = deferred<ReturnPackageInfo[]>();
-    vi.spyOn(api, role === "external" ? "listPackages" : "listReturnPackages").mockReturnValueOnce(old.promise).mockReturnValueOnce(latest.promise);
+    const old = deferred<PackageInfo[]>();
+    const latest = deferred<PackageInfo[]>();
+    vi.spyOn(api, "listPackages").mockReturnValueOnce(old.promise).mockReturnValueOnce(latest.promise);
     const stateValue = { repoId: "matching", outSeq: 9, lastHeads: [], lastExportAt: null, lastInSeq: 9, backSeq: 0, lastImportAt: null };
     const oldState = deferred<typeof stateValue>();
     const stateApi = role === "external" ? "mirrorState" : "internalState";
     vi.spyOn(api, stateApi).mockReturnValueOnce(oldState.promise).mockResolvedValueOnce(stateValue);
     const { rerender } = renderView(role);
-    if (role === "internal") fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));
 
     rerender(<RunnerProvider>{role === "external"
       ? <ExternalView profile={profile} refreshVersion={1} />
@@ -263,17 +319,15 @@ describe.each(["external", "internal"] as const)("%s 独立刷新", (role) => {
     expect(screen.queryByText(/old\.bundle/)).toBeNull();
     if (role === "external") expect(screen.getByText("本次更新 #10 · 全量")).toBeTruthy();
     else {
-      fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));
       expect(screen.getByText(/最近已导出 #9 ·/)).toBeTruthy();
     }
   });
 
   it("旧传输目录的迟到错误不会污染新配置，即使 profile id 未变", async () => {
-    const old = deferred<ReturnPackageInfo[]>();
+    const old = deferred<PackageInfo[]>();
     vi.spyOn(api, "mirrorState").mockResolvedValue({ repoId: "matching", lastInSeq: 9, backSeq: 0, lastImportAt: null });
-    vi.spyOn(api, role === "external" ? "listPackages" : "listReturnPackages").mockReturnValueOnce(old.promise).mockResolvedValue([pkg("new-dir.bundle", role === "internal" ? "back" : "full")]);
+    vi.spyOn(api, "listPackages").mockReturnValueOnce(old.promise).mockResolvedValue([pkg("new-dir.bundle", role === "internal" ? "back" : "full")]);
     const { rerender } = renderView(role);
-    if (role === "internal") fireEvent.click(screen.getByRole("tab", { name: "同步与回传" }));
 
     const updated = { ...profile, transferDir: "/new-usb" };
     rerender(<RunnerProvider>{role === "external" ? <ExternalView profile={updated} /> : <InternalView profile={{ ...updated, role: "internal" }} />}</RunnerProvider>);
@@ -284,15 +338,15 @@ describe.each(["external", "internal"] as const)("%s 独立刷新", (role) => {
     expect(screen.getAllByText(latestText)).not.toHaveLength(0);
   });
 
-  it("首次扫描远程传输目录未完成时，本地分支可选择、新建和刷新", async () => {
-    const pending = deferred<ReturnPackageInfo[]>();
-    const packages = vi.spyOn(api, role === "external" ? "listPackages" : "listReturnPackages").mockReturnValue(pending.promise);
+  it("首次扫描远程传输目录未完成时，本地分支仍可操作并自动刷新", async () => {
+    const pending = deferred<PackageInfo[]>();
+    const packages = vi.spyOn(api, "listPackages").mockReturnValue(pending.promise);
     const create = vi.spyOn(api, "createBranch").mockResolvedValue(undefined);
     renderView(role);
     const row = await screen.findByRole("row", { name: "feature/one" });
     fireEvent.click(row);
     expect(row.getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新传输目录" }).disabled).toBe(true);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true }).disabled).toBe(true);
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Rebase feature/one" }).disabled).toBe(false);
     if (role === "internal") {
       await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "检查并推送 feature/one" }).disabled).toBe(false));
@@ -302,33 +356,31 @@ describe.each(["external", "internal"] as const)("%s 独立刷新", (role) => {
     fireEvent.change(screen.getByRole("textbox", { name: "新分支" }), { target: { value: "feature/new" } });
     fireEvent.click(screen.getByRole("button", { name: "新建并切换" }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    const refresh = screen.getByRole<HTMLButtonElement>("button", { name: "刷新分支" });
-    await waitFor(() => expect(refresh.disabled).toBe(false));
-    const reads = vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status").length;
-    fireEvent.click(refresh);
-    await waitFor(() => expect(refresh.disabled).toBe(false));
-    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status").length).toBeGreaterThan(reads);
-    expect(packages).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(packages).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "Rebase feature/one" }).disabled).toBe(false));
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status")).toHaveLength(4);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true }).disabled).toBe(true);
     await act(async () => pending.resolve([]));
   });
 
-  it("手动扫描传输目录不刷新仓库、不锁定本地操作，目录失败也不影响分支", async () => {
-    const packages = vi.spyOn(api, role === "external" ? "listPackages" : "listReturnPackages").mockResolvedValue([]);
+  it("统一刷新时慢目录不锁定本地操作，目录失败后可以重试", async () => {
+    const packages = vi.spyOn(api, "listPackages").mockResolvedValue([]);
     renderView(role);
-    const refresh = await screen.findByRole<HTMLButtonElement>("button", { name: "刷新传输目录" });
+    const refresh = await screen.findByRole<HTMLButtonElement>("button", { name: "刷新", exact: true });
     await waitFor(() => expect(refresh.disabled).toBe(false));
     fireEvent.click(screen.getByRole("row", { name: "feature/one" }));
-    const pending = deferred<ReturnPackageInfo[]>();
+    const pending = deferred<PackageInfo[]>();
     packages.mockReturnValueOnce(pending.promise);
     vi.mocked(invoke).mockClear();
     fireEvent.click(refresh);
     fireEvent.click(refresh);
     expect(packages).toHaveBeenCalledTimes(2);
     expect(refresh.getAttribute("aria-busy")).toBe("true");
-    expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新分支" }).disabled).toBe(false);
-    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Rebase feature/one" }).disabled).toBe(false);
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "Rebase feature/one" }).disabled).toBe(false));
+    expect(refresh.disabled).toBe(true);
     expect(screen.getByRole("row", { name: "feature/one" }).getAttribute("aria-selected")).toBe("true");
-    expect(vi.mocked(invoke).mock.calls.some(([command]) => ["repo_status", "sync_state", "dev_sync_status"].includes(command))).toBe(false);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status")).toHaveLength(2);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "sync_state")).toHaveLength(1);
     await act(async () => pending.reject(new Error("remote directory unavailable")));
     expect(await screen.findByText(/remote directory unavailable/)).toBeTruthy();
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Rebase feature/one" }).disabled).toBe(false);
@@ -337,9 +389,9 @@ describe.each(["external", "internal"] as const)("%s 独立刷新", (role) => {
   });
 
   it("导入完成后立即刷新本地状态，不等待传输目录重新扫描", async () => {
-    const pending = deferred<ReturnPackageInfo[]>();
+    const pending = deferred<PackageInfo[]>();
     const packageValue = pkg("import.bundle", role === "internal" ? "back" : "full");
-    vi.spyOn(api, role === "external" ? "listPackages" : "listReturnPackages")
+    vi.spyOn(api, "listPackages")
       .mockResolvedValueOnce([packageValue]).mockReturnValue(pending.promise);
     let imported = false;
     vi.spyOn(api, "mirrorState").mockImplementation(async () => ({
@@ -348,13 +400,13 @@ describe.each(["external", "internal"] as const)("%s 独立刷新", (role) => {
     vi.spyOn(api, "importReturn").mockImplementation(async () => {
       imported = true;
       return {
-        branches: [{ source: "feature/returned", local: "feature/returned", sha: "returned-sha", base: "main", commits: [] }],
-        warnings: [], outcomes: [],
+        branches: ["feature/returned"],
+        warnings: [],
       };
     });
     vi.spyOn(api, "syncUpdates").mockImplementation(async () => {
       imported = true;
-      return { imported: { created: false, seq: 10, changes: [] }, repositories: [] };
+      return null;
     });
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => {
       const value = status(path);
@@ -366,8 +418,8 @@ describe.each(["external", "internal"] as const)("%s 独立刷新", (role) => {
     await waitFor(() => expect(button.disabled).toBe(false));
     fireEvent.click(button);
     await waitFor(() => expect(imported).toBe(true));
-    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新分支" }).disabled).toBe(false));
-    expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新传输目录" }).disabled).toBe(true);
+    await waitFor(() => expect(screen.getByRole("region", { name: "分支操作", exact: true }).getAttribute("aria-busy")).toBe("false"));
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true }).disabled).toBe(true);
     if (role === "internal") {
       expect(await screen.findByText("已导入本地分支")).toBeTruthy();
       await waitFor(() => expect(screen.getByRole("row", { name: "feature/returned" }).getAttribute("aria-selected")).toBe("true"));
@@ -402,7 +454,7 @@ it.each(["external", "internal"] as const)("%s 重新检测 Git 后重新读取�
     ? <ExternalView profile={value} refreshVersion={version} />
     : <InternalView profile={value} refreshVersion={version} />}</RunnerProvider>;
   const { rerender } = render(workspace(0));
-  await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新同步状态" }).disabled).toBe(false));
+  await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true }).disabled).toBe(false));
   fireEvent.change(screen.getByRole("textbox", { name: "新分支" }), { target: { value: "feature/draft" } });
   vi.mocked(invoke).mockClear();
   rerender(workspace(1));
@@ -410,7 +462,7 @@ it.each(["external", "internal"] as const)("%s 重新检测 Git 后重新读取�
   const calls = vi.mocked(invoke).mock.calls.map(([command]) => command);
   expect(calls.filter((command) => command === "repo_status")).toHaveLength(2);
   expect(calls.filter((command) => command === "sync_state")).toHaveLength(1);
-  expect(calls.filter((command) => command === (role === "external" ? "list_packages" : "list_return_packages"))).toHaveLength(1);
+  expect(calls.filter((command) => command === "list_packages")).toHaveLength(1);
   expect(screen.getByRole<HTMLInputElement>("textbox", { name: "新分支" }).value).toBe("feature/draft");
 });
 
@@ -418,7 +470,7 @@ it.each([
   ["内网记录", () => api.internalState("/mirror")],
   ["外网记录", () => api.mirrorState("/mirror")],
   ["更新包列表", () => api.listPackages("/usb")],
-  ["回传包列表", () => api.listReturnPackages("/work", "/usb")],
+  ["回传包列表", () => api.listPackages("/usb")],
 ] as const)("%s 共享未完成读取，完成后再次读取", async (_, read) => {
   const pending = deferred<unknown>();
   vi.mocked(invoke).mockReturnValueOnce(pending.promise);
@@ -511,7 +563,7 @@ describe("开发库同步状态", () => {
     const markDone = await pendingRepos();
     const sync = vi.spyOn(api, "syncUpdates").mockImplementation(async ({ devDirs }) => {
       markDone(devDirs);
-      return { imported: null, repositories: devDirs.map((path) => ({ path, status: "fetched" })) };
+      return null;
     });
     fireEvent.click(within(devRow("/dev-one")).getByRole("button", { name: "同步仓库" }));
     await waitFor(() => expect(screen.getAllByText(/待同步/)).toHaveLength(1));
@@ -557,6 +609,7 @@ describe("开发库同步状态", () => {
     expect(within(devRow("/dev-one")).getByText(/已同步/)).toBeTruthy();
     expect(within(devRow("/dev-two")).getByText("待同步")).toBeTruthy();
     expect(within(devRow("/dev-three")).getByText("待同步")).toBeTruthy();
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "list_packages")).toHaveLength(2);
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status").length).toBeGreaterThan(before);
     expect(sync).toHaveBeenCalledExactlyOnceWith({ bundle: null, mirrorDir: "/mirror", devDirs: paths, name: "", email: "" });
   });
@@ -564,7 +617,7 @@ describe("开发库同步状态", () => {
 
 it("导入前阻止缺号、身份不符和缺失文件，只有可用的本项目全量包允许确认跳号", async () => {
   const makePackage = (seq: number, repoId = "matching", payloadExists = true, kind: "incr" | "full" = "incr"): PackageInfo => ({
-    payloadPath: "/usb/" + seq + ".bundle", payloadExists, manifestPath: "/usb/" + seq + ".json",
+    payloadPath: "/usb/" + seq + ".bundle", payloadExists,
     manifest: { format: 1, kind, repoName: "test", repoId, seq, createdAt: 1, payload: seq + ".bundle", baseBranch: "main", refs: [], toolVersion: "2.0.9" },
   });
   vi.spyOn(api, "mirrorState").mockResolvedValue({ repoId: "matching", lastInSeq: 2, backSeq: 0, lastImportAt: null });
@@ -575,7 +628,7 @@ it("导入前阻止缺号、身份不符和缺失文件，只有可用的本项�
   await screen.findByText("本次更新 #3 · 增量");
   expect(screen.queryByRole("button", { name: /选择更新包/ })).toBeNull();
   vi.mocked(api.mirrorState).mockResolvedValue({ repoId: "matching", lastInSeq: 3, backSeq: 0, lastImportAt: null });
-  fireEvent.click(screen.getByRole("button", { name: "刷新同步状态" }));
+  fireEvent.click(screen.getByRole("button", { name: "刷新", exact: true }));
   await screen.findByText("本次更新 #7 · 全量");
   fireEvent.click(screen.getByRole("button", { name: "导入下一包" }));
   const dialog = await screen.findByRole("alertdialog");
@@ -650,6 +703,17 @@ describe("分支行操作", () => {
     await waitFor(() => expect(screen.queryByRole("row", { name: "feature/one" })).toBeNull());
     expect(within(screen.getByRole("region", { name: "分支操作", exact: true })).getByText(/已选 0 个/)).toBeTruthy();
     expect(screen.getByRole("row", { name: "feature/two" }).getAttribute("aria-selected")).not.toBe("true");
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "list_packages")).toHaveLength(2);
+
+    deleted = false;
+    const refresh = screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true });
+    await waitFor(() => expect(refresh.disabled).toBe(false));
+    fireEvent.click(refresh);
+    const recreated = await screen.findByRole("row", { name: "feature/one" });
+    expect(recreated.getAttribute("aria-selected")).toBe("false");
+    if (role === "external") {
+      expect(screen.getByRole<HTMLButtonElement>("button", { name: "导出回传" }).disabled).toBe(true);
+    }
   });
 
   it("内网行内整理使用按钮所属分支，不误用其他选中的分支", async () => {

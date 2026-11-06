@@ -52,14 +52,8 @@ pub struct InProgressOp {
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoStatus {
-    pub path: String,
-    pub exists: bool,
     pub is_repo: bool,
     pub is_bare: bool,
-    pub is_mirror: bool,
-    pub current_branch: Option<String>,
-    /// 所有工作树，包括没有绑定分支且没有未提交修改的 detached HEAD。
-    pub worktrees: Vec<Worktree>,
     /// 有未提交修改的工作树（含主工作树）。分支常常是在 linked worktree
     /// 里开发的，只看主工作树会漏掉那里的改动。
     pub dirty_trees: Vec<Worktree>,
@@ -74,11 +68,6 @@ pub struct RepoStatus {
     pub branches: Vec<BranchInfo>,
     /// 实际公开引用快照，供导入前展示删除/变更；不包含应用私有引用。
     pub refs: Vec<super::manifest::RefEntry>,
-    /// 来自持久 receipt 的审查分支 → 原始分支映射；裸库为空。
-    pub review_sources: HashMap<String, String>,
-    /// 当前提交曾经核实推送成功的受管审查分支；仅查本地持久标记，裸库为空。
-    pub pushed_branches: Vec<String>,
-    pub remote_url: Option<String>,
 }
 
 pub fn is_nonempty_dir(p: &Path) -> bool {
@@ -181,9 +170,12 @@ pub fn list_worktrees(g: &Git, repo: &Path) -> Result<Vec<Worktree>> {
 /// 只看主工作树会漏掉：分支很可能是在某个 linked worktree 里开发的，
 /// 那里的改动同样不会被导出。取不到状态的工作树（目录已删、尚未 prune）跳过。
 pub fn dirty_worktrees(g: &Git, repo: &Path) -> Vec<Worktree> {
-    list_worktrees(g, repo)
-        .unwrap_or_default()
-        .into_iter()
+    dirty_worktrees_from(g, &list_worktrees(g, repo).unwrap_or_default())
+}
+
+fn dirty_worktrees_from(g: &Git, worktrees: &[Worktree]) -> Vec<Worktree> {
+    worktrees
+        .iter()
         .filter(|w| !w.bare)
         .filter(|w| {
             g.query(
@@ -193,6 +185,7 @@ pub fn dirty_worktrees(g: &Git, repo: &Path) -> Vec<Worktree> {
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false)
         })
+        .cloned()
         .collect()
 }
 
@@ -475,19 +468,27 @@ pub fn resolve_base(
 /// 每个工作树的标记文件在它自己的 git 目录里（linked worktree 是
 /// `.git/worktrees/<name>/`），所以必须逐个问 `git rev-parse --absolute-git-dir`，
 /// 不能只看主工作树。取不到状态的工作树（目录已被删、尚未 prune）直接跳过。
-pub fn in_progress_all(g: &Git, repo: &Path) -> Vec<InProgressOp> {
-    list_worktrees(g, repo)
-        .unwrap_or_default()
-        .into_iter()
+fn in_progress_from(g: &Git, worktrees: &[Worktree], current: (&Path, &Path)) -> Vec<InProgressOp> {
+    worktrees
+        .iter()
         .filter(|w| !w.bare)
         .filter_map(|w| {
-            let gd = git_dir(g, Path::new(&w.path)).ok()?;
+            let path = Path::new(&w.path);
+            let gd = match current {
+                (current_path, gd)
+                    if path == current_path
+                        || path.canonicalize().ok().as_deref() == Some(current_path) =>
+                {
+                    gd.to_path_buf()
+                }
+                _ => git_dir(g, path).ok()?,
+            };
             let op = in_progress(&gd)?;
             Some(InProgressOp {
                 // rebase 期间 HEAD 是 detached，`git worktree list` 不报分支名，
                 // 而这正是最该告诉用户"哪个分支卡住了"的时刻：从 rebase 状态里补。
-                branch: w.branch.or_else(|| rebasing_branch(&gd)),
-                path: w.path,
+                branch: w.branch.clone().or_else(|| rebasing_branch(&gd)),
+                path: w.path.clone(),
                 op,
                 main: w.main,
             })
@@ -523,12 +524,8 @@ pub fn in_progress(git_dir: &Path) -> Option<String> {
 }
 
 pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Result<RepoStatus> {
-    let mut st = RepoStatus {
-        path: path.to_string_lossy().into_owned(),
-        exists: path.exists(),
-        ..Default::default()
-    };
-    if !st.exists {
+    let mut st = RepoStatus::default();
+    if !path.exists() {
         return Ok(st);
     }
     let probe = g.exec(
@@ -542,25 +539,18 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
     }
     st.is_repo = true;
     st.is_bare = probe.stdout.trim() == "true";
-    st.is_mirror = is_mirror(g, path);
-    st.remote_url = g
-        .exec(
-            Some(path),
-            &args!["config", "--get", "remote.origin.url"],
-            None,
-            false,
-        )
-        .ok()
-        .filter(|o| o.ok())
-        .map(|o| super::git::redact(o.stdout.trim()));
 
+    let (worktrees, current_branch) = if st.is_bare {
+        (Vec::new(), None)
+    } else {
+        (list_worktrees(g, path)?, current_branch(g, path))
+    };
     if !st.is_bare {
-        st.review_sources = super::review::review_sources(g, path)?;
-        st.worktrees = list_worktrees(g, path)?;
-        st.current_branch = current_branch(g, path);
-        st.in_progress = in_progress(&git_dir(g, path)?);
-        st.in_progress_trees = in_progress_all(g, path);
-        st.dirty_trees = dirty_worktrees(g, path);
+        let gd = git_dir(g, path)?;
+        let current_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        st.in_progress = in_progress(&gd);
+        st.in_progress_trees = in_progress_from(g, &worktrees, (&current_path, &gd));
+        st.dirty_trees = dirty_worktrees_from(g, &worktrees);
     }
 
     let public_refs = list_refs(g, path, &["refs/heads", "refs/tags"])?;
@@ -598,8 +588,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
     // 工作仓库：基准记录一次读出，领先/落后按基准分组批量计算
     let prefix = "refs/remotes/origin/";
     let recorded = all_sync_bases(g, path);
-    let in_worktree: HashMap<String, String> = st
-        .worktrees
+    let in_worktree: HashMap<String, String> = worktrees
         .iter()
         .filter(|w| !w.main && !w.bare)
         .filter_map(|w| w.branch.clone().map(|b| (b, w.path.clone())))
@@ -639,7 +628,7 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
         };
         let (ahead, behind) = counts_for(&base, &short).unwrap_or((0, 0));
         st.branches.push(BranchInfo {
-            current: st.current_branch.as_deref() == Some(short.as_str()),
+            current: current_branch.as_deref() == Some(short.as_str()),
             worktree: in_worktree.get(&short).cloned(),
             name: short,
             sha,
@@ -649,7 +638,6 @@ pub fn status(g: &Git, path: &Path, mainline: &str, releases: &[String]) -> Resu
             behind,
         });
     }
-    st.pushed_branches = super::review::pushed_branches(g, path, &st.branches)?;
     Ok(st)
 }
 

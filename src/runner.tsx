@@ -87,13 +87,13 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       try {
         const result = await fn();
         if (result && typeof result === "object") {
-          const outcome = result as { ok?: boolean; message?: string; conflict?: boolean; outcomes?: { ok: boolean }[] };
+          const outcome = result as { ok?: boolean; message?: string; conflict?: boolean };
           if (typeof outcome.ok === "boolean" && outcome.message) {
             let kind: NoticeKind = "ok";
             if (!outcome.ok) kind = outcome.conflict ? "warn" : "error";
             notify(kind, outcome.message);
           }
-          if (outcome.ok === false || (Array.isArray(outcome.outcomes) && outcome.outcomes.some((item) => !item.ok))) {
+          if (outcome.ok === false) {
             setOperations((records) => records.map((record) => record.id === id ? { ...record, needsAttention: true } : record));
           }
         }
