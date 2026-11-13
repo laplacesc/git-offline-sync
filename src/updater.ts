@@ -5,7 +5,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 /**
  * 应用更新：对照 GitHub Releases 上的 latest.json（由 CI 签名生成）。
  *
- * 流程与 PI-Desktop 一致：
+ * 更新流程：
  *  - 启动后稍等片刻自动检查，之后每 6 小时检查一次；自动检查失败保持安静
  *    （内网离线、GitHub 限流都很常见），只有手动检查才显示错误。
  *  - 发现新版本后由用户点击下载，显示进度；下载完成后点击重启完成安装。

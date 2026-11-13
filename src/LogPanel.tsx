@@ -39,7 +39,7 @@ export function GitLogPanel({ open, setOpen }: { open: boolean; setOpen: (open: 
   return <div id="operation-records" onKeyDown={(event) => {
     if (event.key === "Escape") { event.preventDefault(); setOpen(false); }
   }}>
-    <LogPanel lines={log.lines} operations={operations} clear={() => { log.clear(); clearOperations(); }} open setOpen={setOpen} />
+    <LogPanel lines={log.lines} operations={operations} clear={() => { log.clear(); clearOperations(); }} setOpen={setOpen} />
   </div>;
 }
 
@@ -59,14 +59,12 @@ function operationStatus(operation: OperationRecord | undefined, failed: boolean
 export function LogPanel({
   lines,
   clear,
-  open,
   setOpen,
   operations = [],
 }: {
   lines: RecordedLog[];
   operations?: OperationRecord[];
   clear: () => void;
-  open: boolean;
   setOpen: (v: boolean) => void;
 }) {
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -87,12 +85,12 @@ export function LogPanel({
   useEffect(() => {
     const el = bodyRef.current;
     if (el && following) el.scrollTop = el.scrollHeight;
-  }, [lines, open, following]);
+  }, [lines, following]);
 
   return (
     <section aria-label="命令日志">
-    <Collapsible open={open} onOpenChange={setOpen}
-      className="log-panel" data-open={open} style={{ "--log-height": `${height}px` } as CSSProperties}>
+    <Collapsible open onOpenChange={setOpen}
+      className="log-panel" style={{ "--log-height": `${height}px` } as CSSProperties}>
       <div className="log-toolbar">
         <CollapsibleTrigger className="log-toggle">
           <Icon name="terminal" /><span>命令日志</span><Icon name="chevron" className="log-chevron" />
@@ -104,27 +102,24 @@ export function LogPanel({
           </Badge>
         )}
         <span className="flex-1" />
-        {open && <>
-          <Button size="icon-sm" variant="ghost" aria-label="缩小日志面板" disabled={height <= 150} onClick={() => setHeight((h) => Math.max(150, h - 60))}>−</Button>
-          <Button size="icon-sm" variant="ghost" aria-label="增大日志面板" disabled={height >= 480} onClick={() => setHeight((h) => Math.min(480, h + 60))}>+</Button>
-        </>}
-        {open && <Button size="sm" variant="ghost" aria-pressed={following} onClick={() => setFollowing((value) => !value)}>
+        <Button size="icon-sm" variant="ghost" aria-label="缩小日志面板" disabled={height <= 150} onClick={() => setHeight((h) => Math.max(150, h - 60))}>−</Button>
+        <Button size="icon-sm" variant="ghost" aria-label="增大日志面板" disabled={height >= 480} onClick={() => setHeight((h) => Math.min(480, h + 60))}>+</Button>
+        <Button size="sm" variant="ghost" aria-pressed={following} onClick={() => setFollowing((value) => !value)}>
           {following ? "暂停跟随" : "跟随最新"}
-        </Button>}
-        {open && lines.length > 0 && <Button size="sm" variant="ghost" onClick={async () => {
+        </Button>
+        {lines.length > 0 && <Button size="sm" variant="ghost" onClick={async () => {
           try {
             await navigator.clipboard.writeText(lines.map((line) => `${time(line.ts)} ${line.kind === "cmd" ? "$ " : ""}${line.text}`).join("\n"));
             notify("ok", "日志已复制");
           } catch { notify("error", "复制失败，请选择日志文本复制"); }
         }}>复制日志</Button>}
-        {open && (lines.length > 0 || operations.length > 0) && (
+        {(lines.length > 0 || operations.length > 0) && (
           <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-foreground" onClick={clear}>
             清空
           </Button>
         )}
       </div>
-      {open && (
-        <CollapsibleContent className="log-content">
+      <CollapsibleContent className="log-content">
         <div id="git-log-output" aria-label="命令输出" tabIndex={0} ref={bodyRef} onScroll={(event) => {
           const el = event.currentTarget;
           if (el.scrollHeight - el.scrollTop - el.clientHeight > 24) setFollowing(false);
@@ -149,7 +144,6 @@ export function LogPanel({
             </Collapsible>;
           })}
         </div></CollapsibleContent>
-      )}
     </Collapsible>
     </section>
   );

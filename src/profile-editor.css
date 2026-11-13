@@ -27,7 +27,7 @@
 }
 
 .profile-editor-title {
-  font-size: 18px;
+  font-size: 1.125rem;
   font-weight: 600;
   line-height: 1.35;
   letter-spacing: -0.025em;
@@ -37,7 +37,7 @@
 .profile-editor-description {
   margin: 0;
   color: var(--muted-foreground);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.5;
 }
 
@@ -67,14 +67,14 @@
 
 .profile-editor .form-section > [data-slot="field-legend"] {
   margin: 0 0 4px;
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 600;
   line-height: 1.5;
 }
 
 .profile-editor .form-section > [data-slot="field-description"] {
   margin: 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.55;
 }
 
@@ -124,7 +124,7 @@
 
 .profile-editor-role-copy [data-slot="field-description"] {
   margin: 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.55;
   text-wrap: pretty;
 }
@@ -140,14 +140,14 @@
 
 .profile-editor-role-name {
   flex-shrink: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 500;
 }
 
 .profile-editor-role-summary p {
   margin: 0;
   color: var(--muted-foreground);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.55;
 }
 
@@ -182,7 +182,7 @@
 
 .profile-editor-errors {
   padding: 12px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .profile-editor-error-links {
@@ -209,7 +209,7 @@
 .profile-editor-missing {
   margin: 0;
   color: var(--muted-foreground);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.55;
   overflow-wrap: anywhere;
 }

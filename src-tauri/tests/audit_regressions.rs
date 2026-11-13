@@ -411,6 +411,185 @@ fn patch_rejects_empty_only_and_mixed_ranges_without_publication() {
     }
 }
 
+#[test]
+fn patch_batch_validation_preserves_renames_deletions_and_binary_changes() {
+    let (root, seed) = setup();
+    bind_return_mirror(root.path(), &seed);
+    git(&seed, &["switch", "-c", "topic"]);
+    commit(&seed, "renamed-from");
+    git(&seed, &["mv", "renamed-from", "renamed-to"]);
+    git(&seed, &["commit", "-qm", "rename"]);
+    git(&seed, &["rm", "renamed-to"]);
+    git(&seed, &["commit", "-qm", "delete"]);
+    fs::write(seed.join("binary"), [0, 1, 2, 255]).unwrap();
+    git(&seed, &["add", "binary"]);
+    git(&seed, &["commit", "-qm", "binary"]);
+    #[cfg(unix)]
+    {
+        fs::write(seed.join(" \t "), "whitespace path").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "whitespace filename"]);
+    }
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let patch = payload(
+        sync::export_patches(
+            &g,
+            &seed,
+            &root.path().join("mirror"),
+            "topic",
+            &root.path().join("usb"),
+            "test",
+            "main",
+            &[],
+        )
+        .unwrap(),
+    );
+    let work = root.path().join("work");
+    git(
+        root.path(),
+        &[
+            "clone",
+            root.path().join("mirror").to_str().unwrap(),
+            work.to_str().unwrap(),
+        ],
+    );
+    git(&work, &["config", "user.name", "Audit"]);
+    git(&work, &["config", "user.email", "audit@example.invalid"]);
+    assert!(
+        sync::import_patches(&g, &work, &patch, "returned", "main", false)
+            .unwrap()
+            .ok
+    );
+    assert_eq!(
+        git(&work, &["rev-parse", "HEAD^{tree}"]),
+        git(&seed, &["rev-parse", "topic^{tree}"])
+    );
+}
+
+#[test]
+fn batch_sync_bases_matches_individual_config_reads() {
+    let (_root, seed) = setup();
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    for (branch, values) in [
+        ("duplicate", vec!["main", "release/1"]),
+        ("cleared", vec!["release/1", ""]),
+        ("whitespace", vec!["release/1", "  \t "]),
+        ("padded", vec!["  release/1  "]),
+        ("multiline", vec!["release/1\nmain"]),
+    ] {
+        for value in values {
+            git(
+                &seed,
+                &[
+                    "config",
+                    "--add",
+                    &format!("branch.{branch}.syncBase"),
+                    value,
+                ],
+            );
+        }
+        assert_eq!(
+            repo::all_sync_bases(&g, &seed).get(branch).cloned(),
+            repo::get_sync_base(&g, &seed, branch),
+            "{branch}"
+        );
+    }
+    let config = seed.join(".git/config");
+    let contents = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        format!("{contents}\n[branch \"valueless\"]\n\tsyncBase = release/1\n\tsyncBase\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        repo::all_sync_bases(&g, &seed).get("valueless").cloned(),
+        repo::get_sync_base(&g, &seed, "valueless"),
+        "valueless override"
+    );
+}
+
+#[test]
+fn return_bundle_keeps_recorded_and_inferred_bases() {
+    let (root, seed) = setup();
+    bind_return_mirror(root.path(), &seed);
+    git(
+        &seed,
+        &["update-ref", "refs/remotes/origin/release/1", "HEAD"],
+    );
+    git(&seed, &["switch", "-c", "feature/recorded"]);
+    commit(&seed, "feature");
+    git(&seed, &["branch", "hotfix/inferred"]);
+    git(&seed, &["branch", "feature/default"]);
+    git(&seed, &["branch", "feature/cleared"]);
+    git(
+        &seed,
+        &[
+            "config",
+            "--add",
+            "branch.feature/cleared.syncBase",
+            "release/1",
+        ],
+    );
+    git(
+        &seed,
+        &["config", "--add", "branch.feature/cleared.syncBase", ""],
+    );
+    git(
+        &seed,
+        &[
+            "config",
+            "--add",
+            "branch.feature/recorded.syncBase",
+            "main",
+        ],
+    );
+    git(
+        &seed,
+        &[
+            "config",
+            "--add",
+            "branch.feature/recorded.syncBase",
+            "release/1",
+        ],
+    );
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    let bundle = payload(
+        sync::export_back(
+            &g,
+            &seed,
+            &root.path().join("mirror"),
+            &[
+                "feature/recorded".into(),
+                "hotfix/inferred".into(),
+                "feature/default".into(),
+                "feature/cleared".into(),
+            ],
+            &root.path().join("usb"),
+            "test",
+            "main",
+            &["release/missing".into(), "release/1".into()],
+        )
+        .unwrap(),
+    );
+    let manifest = Manifest::read_for(&bundle).unwrap().unwrap();
+    assert_eq!(
+        manifest
+            .refs
+            .iter()
+            .map(|r| r.base.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("release/1"),
+            Some("release/1"),
+            Some("main"),
+            Some("main")
+        ]
+    );
+}
+
 struct ImportFixture {
     root: tempfile::TempDir,
     mirror: PathBuf,

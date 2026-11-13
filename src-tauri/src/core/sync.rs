@@ -1865,6 +1865,8 @@ pub fn export_back(
     let file_name = format!("{}-back-{seq:04}.bundle", sanitize(repo_name));
     let bundle = staging.path().join(&file_name);
 
+    let recorded = repo::all_sync_bases(g, repo);
+    let prefix = repo::base_ref_prefix(g, repo);
     let mut refs = Vec::new();
     let mut revisions = Vec::new();
     for b in branches {
@@ -1872,7 +1874,12 @@ pub fn export_back(
         refs.push(RefEntry {
             name: r.clone(),
             sha: repo::rev_parse(g, repo, &r)?,
-            base: Some(repo::resolve_base(g, repo, b, base_branch, releases).0),
+            base: Some(
+                recorded
+                    .get(b)
+                    .cloned()
+                    .unwrap_or_else(|| repo::infer_base(g, repo, b, base_branch, releases, prefix)),
+            ),
         });
         revisions.push(r);
     }
@@ -1963,28 +1970,29 @@ pub fn export_patches(
     {
         return invalid("待导出范围包含合并提交，Patch 会遗漏合并时的改动；请使用 Bundle 回传");
     }
-    if repo::commits_between(g, repo, &base, &tip)?.is_empty() {
+    // NUL separates commits; raw diff records start with ':' even for whitespace-only paths.
+    let changes = g.query(
+        repo,
+        args![
+            "log",
+            "--format=%x00",
+            "--raw",
+            "--no-renames",
+            "--root",
+            &range
+        ],
+    )?;
+    if changes.is_empty() {
         return Ok(ExportOutcome::NothingToSync {
             message: format!("{branch} 相对 {from} 没有新提交"),
         });
     }
-    for oid in g.query(repo, args!["rev-list", &range])?.lines() {
-        if g.query(
-            repo,
-            args![
-                "diff-tree",
-                "--root",
-                "--no-commit-id",
-                "--name-only",
-                "-r",
-                oid
-            ],
-        )?
-        .trim()
-        .is_empty()
-        {
-            return invalid("待导出范围包含空提交，Patch 无法保留空提交；请使用 Bundle 回传");
-        }
+    if changes
+        .split('\0')
+        .skip(1)
+        .any(|diff| !diff.lines().any(|line| line.starts_with(':')))
+    {
+        return invalid("待导出范围包含空提交，Patch 无法保留空提交；请使用 Bundle 回传");
     }
     fs::create_dir_all(&dir)?;
     g.run(repo, args!["format-patch", "--binary", "-o", &dir, range])?;

@@ -2,13 +2,13 @@
 
 通过 U 盘等移动介质，在内网 GitLab 与外网开发机之间传递代码更新和开发提交。应用使用 Git Bundle 或 Patch 保存变更，两端无需直接联网。
 
-支持 Windows 和 macOS。当前版本：**2.1.18**。
+支持 Windows 和 macOS。当前版本：**2.1.19**。
 
-[下载安装包](https://github.com/laplacesc/git-offline-sync/releases/latest) · [本次更新](docs/releases/v2.1.18.md) · [历史版本](https://github.com/laplacesc/git-offline-sync/releases)
+[下载安装包](https://github.com/laplacesc/git-offline-sync/releases/latest) · [本次更新](docs/releases/v2.1.19.md) · [历史版本](https://github.com/laplacesc/git-offline-sync/releases)
 
 ## 应用截图
 
-以下截图来自当前源码运行的 macOS 原生 Tauri 应用，使用本地示例仓库。
+以下截图来自 v2.1.18 的 macOS 原生 Tauri 应用，使用本地示例仓库。
 
 **内网端 · 浅色主题**：从 GitLab 准备镜像、导出更新，并接收外网回传的提交。
 

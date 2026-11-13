@@ -337,20 +337,35 @@ fn sync_base_key(branch: &str) -> String {
 pub fn all_sync_bases(g: &Git, repo: &Path) -> HashMap<String, String> {
     let out = g.exec(
         Some(repo),
-        &args!["config", "--get-regexp", r"^branch\..*\.syncbase$"],
+        &args![
+            "config",
+            "--null",
+            "--get-regexp",
+            r"^branch\..*\.syncbase$"
+        ],
         None,
         false,
     );
     let Ok(o) = out else { return HashMap::new() };
     // 没有任何记录时 git 返回 1，stdout 为空
-    o.stdout
-        .lines()
-        .filter_map(|l| {
-            let (key, val) = l.trim().split_once(' ')?;
-            let name = key.strip_prefix("branch.")?.strip_suffix(".syncbase")?;
-            Some((name.to_string(), val.trim().to_string()))
-        })
-        .collect()
+    let mut bases = HashMap::new();
+    for entry in o.stdout.split('\0') {
+        let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
+        let Some(name) = key
+            .strip_prefix("branch.")
+            .and_then(|k| k.strip_suffix(".syncbase"))
+        else {
+            continue;
+        };
+        let value = value.trim();
+        // Match config --get: the last value wins, including an empty override.
+        if value.is_empty() {
+            bases.remove(name);
+        } else {
+            bases.insert(name.to_string(), value.to_string());
+        }
+    }
+    bases
 }
 
 /// 所有本地分支相对 `base_ref` 的 (领先, 落后)。

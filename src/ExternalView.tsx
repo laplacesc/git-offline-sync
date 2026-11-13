@@ -264,7 +264,7 @@ export function ExternalView({ profile, refreshVersion = 0 }: {
           else if (manifest.kind === "incr" && manifest.seq !== lastIn + 1) status = `需先导入 #${lastIn + 1}`;
           else if (pkg === chosen) status = "本次推荐";
           return <div className="return-package-actions">
-            <span className="text-xs text-muted-foreground">{status}</span>
+            <span className="self-center text-xs text-muted-foreground">{status}</span>
             <ActionButton size="sm" variant="default" aria-label={`导入更新 #${manifest.seq}`}
               disabled={!importReady || !usable(pkg) || gap && !mirrorRefs} onClick={() => importUpdate(pkg)}>导入更新</ActionButton>
           </div>;
@@ -292,10 +292,10 @@ export function ExternalView({ profile, refreshVersion = 0 }: {
       </header>
       <InProgressBanners status={repo.status} onDone={(outcome) => {
         if (outcome) setOpRes(outcome);
-        void reloadAll();
+        void repo.reload();
       }} />
       <BranchManager key={actionKey} profile={profile} repoPath={devDir} status={repo.status} loading={repo.loading} error={repo.error}
-        onRefresh={reloadAll} selected={selected} onSelect={setSelected} multi={mode === "bundle"} />
+        onRefresh={repo.reload} selected={selected} onSelect={setSelected} multi={mode === "bundle"} />
 
       {opRes && !opRes.ok && <OutcomeView outcome={opRes} />}
       {exportRes?.status === "exported" && <Fold className="sync-details" title={`查看回传 #${exportRes.seq} 文件`}>

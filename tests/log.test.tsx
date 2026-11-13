@@ -16,7 +16,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it("原生日志折叠保留收起状态，后续输出不会强行展开", () => {
   const lines: LogEvent[] = [{ kind: "stdout", text: "first output", ts: 1 }];
-  const props = { open: true, setOpen: () => {}, clear: () => {} };
+  const props = { setOpen: () => {}, clear: () => {} };
   const { rerender } = render(<LogPanel {...props} lines={lines} />);
   const trigger = screen.getByRole("button", { name: /仓库状态与其他输出/ });
   expect(trigger.getAttribute("aria-expanded")).toBe("true");
@@ -36,7 +36,7 @@ it("同步到达的命令按实际操作分组，连续同名操作独立，后�
     return <><button onClick={() => runner.run("同步", async () => {
       emit({ payload: { kind: "cmd", text: "git fetch", ts: Date.now() } });
       await new Promise<void>((resolve) => { finish = resolve; });
-    })}>开始</button><LogPanel lines={log.lines} operations={runner.operations} clear={log.clear} open setOpen={() => {}} /></>;
+    })}>开始</button><LogPanel lines={log.lines} operations={runner.operations} clear={log.clear} setOpen={() => {}} /></>;
   }
   render(<RunnerProvider><Harness /></RunnerProvider>);
   fireEvent.click(screen.getByRole("button", { name: "开始" }));
@@ -52,7 +52,7 @@ it("同步到达的命令按实际操作分组，连续同名操作独立，后�
 });
 
 it("原生日志高度按钮逐步调整高度，在上下限禁用且离开边界后恢复", () => {
-  const { container } = render(<LogPanel lines={[]} clear={() => {}} open setOpen={() => {}} />);
+  const { container } = render(<LogPanel lines={[]} clear={() => {}} setOpen={() => {}} />);
   const panel = container.querySelector<HTMLElement>(".log-panel")!;
   const decrease = screen.getByRole<HTMLButtonElement>("button", { name: "缩小日志面板" });
   const increase = screen.getByRole<HTMLButtonElement>("button", { name: "增大日志面板" });
@@ -82,7 +82,7 @@ it("原生日志高度按钮逐步调整高度，在上下限禁用且离开边�
 });
 
 it("原生日志高度按钮支持 Enter 和空格键激活", async () => {
-  const { container } = render(<LogPanel lines={[]} clear={() => {}} open setOpen={() => {}} />);
+  const { container } = render(<LogPanel lines={[]} clear={() => {}} setOpen={() => {}} />);
   const panel = container.querySelector<HTMLElement>(".log-panel")!;
   const increase = screen.getByRole("button", { name: "增大日志面板" });
   const decrease = screen.getByRole("button", { name: "缩小日志面板" });
@@ -98,7 +98,7 @@ it("原生日志高度按钮支持 Enter 和空格键激活", async () => {
 it.each([true, false])("复制日志通过全局浮动横幅反馈（成功=%s）", async (ok) => {
   const writeText = vi.fn().mockImplementation(async () => { if (!ok) throw new Error("denied"); });
   vi.stubGlobal("navigator", { userAgent: navigator.userAgent, clipboard: { writeText } });
-  render(<><LogPanel lines={[{ kind: "stdout", text: "log output", ts: 1 }]} clear={() => {}} open setOpen={() => {}} /><OperationStatus /></>);
+  render(<><LogPanel lines={[{ kind: "stdout", text: "log output", ts: 1 }]} clear={() => {}} setOpen={() => {}} /><OperationStatus /></>);
   fireEvent.click(screen.getByRole("button", { name: "复制日志" }));
   const message = await screen.findByText(ok ? "日志已复制" : "复制失败，请选择日志文本复制");
   expect(message.closest(".operation-popups")?.parentElement).toBe(document.body);
@@ -112,7 +112,7 @@ it("失败即使没有后端日志也显示错误组，并可以清空", async (
   function Harness() {
     const runner = useRunner();
     return <><button onClick={() => runner.run("导出", async () => { throw new Error("unavailable"); })}>开始</button>
-      <LogPanel lines={[]} operations={runner.operations} clear={runner.clearOperations} open setOpen={() => {}} /></>;
+      <LogPanel lines={[]} operations={runner.operations} clear={runner.clearOperations} setOpen={() => {}} /></>;
   }
   render(<RunnerProvider><Harness /></RunnerProvider>);
   fireEvent.click(screen.getByRole("button", { name: "开始" }));

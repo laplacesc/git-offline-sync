@@ -201,7 +201,7 @@ export function InternalView({ profile, refreshVersion = 0 }: {
         <div><h2>导入回传</h2><p>回传包导入工作仓库后，可在下方检查分支、整理和推送。</p></div>
         <ActionButton size="sm" variant="ghost" onClick={browse} disabled={!workReady || work.loading || refreshing || !!stateError || unfinished}><Icon name="folder" />选择其他文件…</ActionButton>
       </header>
-      <InProgressBanners status={work.status} onDone={(result) => { if (result) setOutcome(result); void reloadAll(); }} />
+      <InProgressBanners status={work.status} onDone={(result) => { if (result) setOutcome(result); void work.reload(); }} />
       {!packageError && currentPackages && <PackageInbox key={`inbox:${refreshKey}`}
         packages={packages} disabled={!!busy || packagesLoading} renderDetails={packageRow} />}
       {returnResult && returnResult.branches.length > 0 && <div className="return-import-result" role="status">
@@ -210,7 +210,7 @@ export function InternalView({ profile, refreshVersion = 0 }: {
       {returnResult?.warnings.map((warning) => <Feedback key={warning} kind="warn" text={warning} />)}
       {outcome && !outcome.ok && <OutcomeView outcome={outcome} />}
       <BranchManager key={refreshKey} profile={profile} repoPath={workDir} status={work.status} loading={work.loading} error={work.error}
-        onRefresh={reloadAll} selected={selected} onSelect={setSelected} pushBlocked={refreshing || !!stateError} />
+        onRefresh={work.reload} selected={selected} onSelect={setSelected} pushBlocked={refreshing || !!stateError} />
       </section>
     </div>
   </div>;

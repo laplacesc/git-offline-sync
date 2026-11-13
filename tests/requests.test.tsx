@@ -224,7 +224,7 @@ describe.each(["external", "internal"] as const)("%s 统一刷新", (role) => {
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status")).toHaveLength(4);
   });
 
-  it.each([false, true])("写入提交身份后自动刷新全部数据（失败=%s）", async (fail) => {
+  it.each([false, true])("写入提交身份后只刷新当前仓库（失败=%s）", async (fail) => {
     const configure = vi.spyOn(api, "configureRepo");
     if (fail) configure.mockRejectedValue(new Error("identity write failed"));
     renderView(role, { ...profile, userName: "author", userEmail: "author@example.com" });
@@ -235,13 +235,13 @@ describe.each(["external", "internal"] as const)("%s 统一刷新", (role) => {
     await waitFor(() => expect(configure).toHaveBeenCalledOnce());
     await waitFor(() => expect(refresh.disabled).toBe(false));
     const calls = vi.mocked(invoke).mock.calls;
-    expect(calls.filter(([command]) => command === "repo_status")).toHaveLength(2);
-    expect(calls.filter(([command]) => command === "sync_state")).toHaveLength(1);
-    expect(calls.filter(([command]) => command === "list_packages")).toHaveLength(1);
+    expect(calls.filter(([command]) => command === "repo_status").map(([, args]) => (args as { path: string }).path))
+      .toEqual([role === "external" ? "/dev-one" : "/work"]);
+    expect(calls.some(([command]) => ["sync_state", "list_packages", "dev_sync_status"].includes(command))).toBe(false);
     expect(screen.queryByText("已写入提交身份") !== null).toBe(!fail);
   });
 
-  it.each(["继续", "中止"] as const)("%s 冲突处理后自动刷新包列表和本地状态", async (action) => {
+  it.each(["继续", "中止"] as const)("%s 冲突处理后只刷新工作仓库", async (action) => {
     const repoPath = role === "external" ? "/dev-one" : "/work";
     let finished = false;
     vi.spyOn(api, "repoStatus").mockImplementation(async (path) => ({
@@ -260,8 +260,7 @@ describe.each(["external", "internal"] as const)("%s 统一刷新", (role) => {
     await waitFor(() => expect(screen.queryByRole("button", { name: action, exact: true })).toBeNull());
     expect(operation).toHaveBeenCalledExactlyOnceWith(repoPath);
     const calls = vi.mocked(invoke).mock.calls;
-    expect(calls.filter(([command]) => command === "sync_state")).toHaveLength(1);
-    expect(calls.filter(([command]) => command === "list_packages")).toHaveLength(1);
+    expect(calls.some(([command]) => ["sync_state", "list_packages", "dev_sync_status"].includes(command))).toBe(false);
   });
 
   it("唯一刷新入口同时读取包列表、同步状态和仓库，并保留表单与选择", async () => {
@@ -356,9 +355,10 @@ describe.each(["external", "internal"] as const)("%s 统一刷新", (role) => {
     fireEvent.change(screen.getByRole("textbox", { name: "新分支" }), { target: { value: "feature/new" } });
     fireEvent.click(screen.getByRole("button", { name: "新建并切换" }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    await waitFor(() => expect(packages).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "Rebase feature/one" }).disabled).toBe(false));
-    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status")).toHaveLength(4);
+    expect(packages).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "repo_status").map(([, args]) => (args as { path: string }).path))
+      .toEqual(["/mirror", role === "internal" ? "/work" : "/dev-one", role === "internal" ? "/work" : "/dev-one"]);
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true }).disabled).toBe(true);
     await act(async () => pending.resolve([]));
   });
@@ -703,7 +703,7 @@ describe("分支行操作", () => {
     await waitFor(() => expect(screen.queryByRole("row", { name: "feature/one" })).toBeNull());
     expect(within(screen.getByRole("region", { name: "分支操作", exact: true })).getByText(/已选 0 个/)).toBeTruthy();
     expect(screen.getByRole("row", { name: "feature/two" }).getAttribute("aria-selected")).not.toBe("true");
-    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "list_packages")).toHaveLength(2);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "list_packages")).toHaveLength(1);
 
     deleted = false;
     const refresh = screen.getByRole<HTMLButtonElement>("button", { name: "刷新", exact: true });
