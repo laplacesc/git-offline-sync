@@ -36,12 +36,6 @@
   --motion-normal: 200ms;
   --spring: cubic-bezier(.22, 1, .36, 1);
   --destructive-soft: color-mix(in oklab, var(--destructive) 10%, transparent);
-  --log-fg: var(--foreground);
-  --log-text: var(--muted-foreground);
-  --log-muted: var(--muted-foreground);
-  --log-border: var(--border);
-  --log-head: var(--card);
-  --log-hover: var(--secondary);
 }
 
 :root[data-theme="dark"] {

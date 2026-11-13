@@ -6,7 +6,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem,
 import { api, AppConfig, Environment, newId, Profile, Role } from "./api";
 import { ExternalView } from "./ExternalView";
 import { InternalView } from "./InternalView";
-import { LogPanel, useGitLog } from "./LogPanel";
+import { GitLogPanel } from "./LogPanel";
 import { blankProfile, ProfileEditor } from "./ProfileEditor";
 import { Icon } from "./icons";
 import { Feedback, OperationStatus, RunnerProvider, useRunner } from "./runner";
@@ -14,7 +14,6 @@ import { AppGlyph, PathInput, TextInput } from "./ui";
 import { UpdatePanel } from "./UpdatePanel";
 import { WindowControls } from "./WindowControls";
 import { startAutoCheck } from "./updater";
-import { useInputModality } from "./motion";
 import { useAppearance, type AppearancePreference } from "./appearance";
 import { RadioGroup, RadioGroupItem } from "./components/ui/radio-group";
 import { Label } from "./components/ui/label";
@@ -26,19 +25,18 @@ type Mode = { kind: "view" } | { kind: "edit"; profile: Profile; isNew: boolean 
 
 function Shell() {
   const platform = navigator.userAgent.includes("Windows") ? "windows" : navigator.userAgent.includes("Mac") ? "mac" : "other";
-  useInputModality();
   const { appearance, preference, setPreference } = useAppearance();
-  const { busy, run, confirm, notify, operations, clearOperations } = useRunner();
+  const { busy, run, confirm, notify } = useRunner();
   useEffect(() => {
     if (platform !== "mac" || !isTauri()) return;
     let active = true;
     const appWindow = getCurrentWindow();
     void Promise.all([
-      appWindow.setTheme(appearance),
+      appWindow.setTheme(preference === "system" ? null : preference),
       appWindow.setBackgroundColor(appearance === "dark" ? "#181818" : "#ffffff"),
     ]).catch((error) => { if (active) notify("error", `更新标题栏外观失败：${String(error)}`); });
     return () => { active = false; };
-  }, [appearance, platform, notify]);
+  }, [appearance, preference, platform, notify]);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [env, setEnv] = useState<Environment | null>(null);
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -54,7 +52,6 @@ function Shell() {
   const navigationButtonRef = useRef<HTMLButtonElement>(null);
   const newConfigButtonRef = useRef<HTMLButtonElement>(null);
   const logButtonRef = useRef<HTMLButtonElement>(null);
-  const log = useGitLog();
 
   useEffect(() => startAutoCheck(), []);
   useEffect(() => {
@@ -236,11 +233,7 @@ function Shell() {
               </div>
             </div>
 
-            {logOpen && <div id="operation-records" onKeyDown={(event) => {
-              if (event.key === "Escape") { event.preventDefault(); closeLog(false); }
-            }}>
-              <LogPanel lines={log.lines} operations={operations} clear={() => { log.clear(); clearOperations(); }} open setOpen={closeLog} />
-            </div>}
+            <GitLogPanel open={logOpen} setOpen={closeLog} />
           </div>
       </main>
       <Dialog open={mode.kind !== "view"} onOpenChange={(open) => { if (!open) closeDialog(); }}>

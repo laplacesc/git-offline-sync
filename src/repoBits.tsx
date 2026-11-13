@@ -245,15 +245,18 @@ export function BranchTable({
   };
   if (branches.length === 0) return <Empty>{emptyText}</Empty>;
 
-  const visible = branches.filter((b) => b.name.toLowerCase().includes(query.trim().toLowerCase()));
+  const term = query.trim().toLowerCase();
+  const visible = branches.filter((b) => b.name.toLowerCase().includes(term));
+  const selectedNames = new Set(selected);
+  const dirtyBranches = new Set(dirtyTrees.map((tree) => tree.branch));
   const visibleNames = new Set(visible.map((b) => b.name));
   const hiddenSelected = multi ? selected.filter((name) => !visibleNames.has(name)) : [];
-  const selectedVisible = visible.filter((branch) => selected.includes(branch.name));
+  const selectedVisible = visible.filter((branch) => selectedNames.has(branch.name));
   const allVisibleSelected = selectedVisible.length === visible.length;
   const toggleBranch = (name: string) => {
     if (isSelectionDisabled) return;
     selectionRange.current = { anchor: name, end: name };
-    if (selected.includes(name)) onSelect(selected.filter((selectedName) => selectedName !== name));
+    if (selectedNames.has(name)) onSelect(selected.filter((selectedName) => selectedName !== name));
     else onSelect(multi ? [...selected, name] : [name]);
   };
   const extendSelection = (name: string, fallbackAnchor = name) => {
@@ -305,9 +308,9 @@ export function BranchTable({
               <TableRow
                 key={b.name}
                 aria-label={b.name}
-                aria-selected={selected.includes(b.name)}
+                aria-selected={selectedNames.has(b.name)}
                 aria-disabled={isSelectionDisabled || undefined}
-                data-state={selected.includes(b.name) ? "selected" : undefined}
+                data-state={selectedNames.has(b.name) ? "selected" : undefined}
                 tabIndex={isSelectionDisabled ? -1 : 0}
                 onClick={(event) => {
                   if ((event.target as HTMLElement).closest("button, input, a, [role='checkbox']")) return;
@@ -335,7 +338,7 @@ export function BranchTable({
                 className="branch-row"
               >
                 <TableCell>
-                  <Checkbox aria-label={`选择 ${b.name}`} checked={selected.includes(b.name)}
+                  <Checkbox aria-label={`选择 ${b.name}`} checked={selectedNames.has(b.name)}
                     disabled={isSelectionDisabled} onCheckedChange={() => toggleBranch(b.name)}
                     onClick={(event) => {
                       if (multi && event.shiftKey) { event.preventDefault(); extendSelection(b.name); }
@@ -361,7 +364,7 @@ export function BranchTable({
                           worktree · {baseName(b.worktree)}
                         </span>
                       )}
-                      {dirtyTrees.some((tree) => tree.branch === b.name) && (
+                      {dirtyBranches.has(b.name) && (
                         <Badge variant="outline" className="branch-dirty" title="工作树有未提交的修改，回传只包含已提交的内容。">
                           <CircleAlertIcon aria-hidden="true" />未提交修改
                         </Badge>

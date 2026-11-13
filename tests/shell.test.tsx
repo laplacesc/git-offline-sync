@@ -1,20 +1,26 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
-import { api, type Profile } from "../src/api";
+import { api, type LogEvent, type Profile } from "../src/api";
 import userEvent from "@testing-library/user-event";
 import { useRunner } from "../src/runner";
 
 const operation = vi.hoisted(() => ({ run: vi.fn<() => Promise<void>>() }));
+const gitLog = vi.hoisted(() => ({ emit: (_event: { payload: LogEvent }) => {} }));
+const workspaceRender = vi.hoisted(() => vi.fn());
 const nativeWindow = vi.hoisted(() => ({
   onResized: vi.fn(async () => () => {}), isMaximized: vi.fn(async () => false),
   minimize: vi.fn(async () => {}), toggleMaximize: vi.fn(async () => {}), close: vi.fn(async () => {}),
-  setTheme: vi.fn(async () => {}), setBackgroundColor: vi.fn(async () => {}),
+  setTheme: vi.fn(async (_theme?: "light" | "dark" | null) => {}), setBackgroundColor: vi.fn(async () => {}),
 }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => nativeWindow }));
 
-vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: async (_event: string, callback: typeof gitLog.emit) => {
+  gitLog.emit = callback;
+  return () => {};
+} }));
 vi.mock("../src/ExternalView", () => ({ ExternalView: ({ profile, refreshVersion }: { profile: Profile; refreshVersion?: number }) => {
+  workspaceRender();
   const { run } = useRunner();
   return <><p data-refresh-version={refreshVersion}>外网工作区：{profile.name}</p><input aria-label="工作区输入" defaultValue="" />
     <button onClick={() => void run("同步更新", operation.run)}>执行同步</button></>;
@@ -64,6 +70,32 @@ it("macOS 保留原生红绿灯，透明标题栏随主题变化", async () => {
   fireEvent.click(screen.getByRole("radio", { name: "深色", exact: true }));
   await waitFor(() => expect(nativeWindow.setTheme).toHaveBeenCalledWith("dark"));
   expect(nativeWindow.setBackgroundColor).toHaveBeenLastCalledWith("#181818");
+});
+
+it.each([false, true])("macOS 手动主题后恢复系统主题，解除原生覆盖（系统深色=%s）", async (systemDark) => {
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh)");
+  vi.stubGlobal("isTauri", true);
+  let webviewDark = systemDark;
+  const listeners = new Set<() => void>();
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    get matches() { return query === "(prefers-color-scheme: dark)" && webviewDark; },
+    addEventListener(_event: string, listener: () => void) { listeners.add(listener); },
+    removeEventListener(_event: string, listener: () => void) { listeners.delete(listener); },
+  }));
+  // macOS 原生覆盖也会改变 WebView 的媒体查询结果。
+  vi.spyOn(nativeWindow, "setTheme").mockImplementation(async (theme) => {
+    webviewDark = theme == null ? systemDark : theme === "dark";
+    listeners.forEach((update) => update());
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "打开设置" }));
+  fireEvent.click(screen.getByRole("radio", { name: systemDark ? "浅色" : "深色", exact: true }));
+  await waitFor(() => expect(document.documentElement.dataset.theme).toBe(systemDark ? "light" : "dark"));
+  fireEvent.click(screen.getByRole("radio", { name: "跟随系统", exact: true }));
+  await waitFor(() => expect(nativeWindow.setTheme).toHaveBeenLastCalledWith(null));
+  await waitFor(() => expect(document.documentElement.dataset.theme).toBe(systemDark ? "dark" : "light"));
+  expect(nativeWindow.setBackgroundColor).toHaveBeenLastCalledWith(systemDark ? "#181818" : "#ffffff");
+  expect(localStorage.getItem("app-shell-theme")).toBe("system");
 });
 
 it("配置列表直接显示全部配置，当前配置可辨认", async () => {
@@ -141,6 +173,24 @@ it("项目列表可收起，记录按需打开并能用 Escape 收起", async ()
   fireEvent.keyDown(logToggle, { key: "Escape" });
   expect(screen.queryByRole("region", { name: "命令日志" })).toBeNull();
   expect(document.activeElement).toBe(records);
+});
+
+it.each([false, true])("日志输出不重新渲染工作区，收起期间的输出在展开后保留（展开=%s）", async (open) => {
+  render(<App />);
+  await screen.findByText("外网工作区：订单服务");
+  if (open) fireEvent.click(screen.getByRole("button", { name: "查看记录" }));
+  const renders = workspaceRender.mock.calls.length;
+  for (let i = 0; i < 3; i++) {
+    act(() => gitLog.emit({ payload: { kind: "stdout", text: `output ${i}`, ts: i + 1 } }));
+  }
+  expect(workspaceRender.mock.calls.length).toBe(renders);
+  if (!open) fireEvent.click(screen.getByRole("button", { name: "查看记录" }));
+  for (let i = 0; i < 3; i++) expect(screen.getByText(`output ${i}`)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "收起记录" }));
+  fireEvent.click(screen.getByRole("button", { name: "查看记录" }));
+  expect(screen.getByText("output 0")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "清空", exact: true }));
+  expect(screen.queryByText("output 0")).toBeNull();
 });
 
 it("侧栏只显示配置列表，没有重复的任务页签和常驻记录栏", async () => {

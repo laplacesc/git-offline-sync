@@ -438,4 +438,3 @@ body:has(.modal-layer) > :is(.window-controls, .window-modal-drag, .operation-po
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   .ui-button:active { transform: none !important; }
 }
-:root[data-input-modality="keyboard"] { --motion-disclosure-duration: 0ms; }

@@ -31,6 +31,18 @@ export function useGitLog() {
   return { lines, clear: () => setLines([]) };
 }
 
+// 持续收集日志，将高频更新限制在日志面板内。
+export function GitLogPanel({ open, setOpen }: { open: boolean; setOpen: (open: boolean) => void }) {
+  const log = useGitLog();
+  const { operations, clearOperations } = useRunner();
+  if (!open) return null;
+  return <div id="operation-records" onKeyDown={(event) => {
+    if (event.key === "Escape") { event.preventDefault(); setOpen(false); }
+  }}>
+    <LogPanel lines={log.lines} operations={operations} clear={() => { log.clear(); clearOperations(); }} open setOpen={setOpen} />
+  </div>;
+}
+
 const logTime = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 function time(ts: number) { return logTime.format(ts); }
 
