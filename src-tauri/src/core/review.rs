@@ -54,6 +54,8 @@ struct ReviewItem {
     original: String,
     base: String,
     item_id: String,
+    #[serde(default)]
+    receive_only: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -257,11 +259,11 @@ fn review_item<'a>(receipts: &'a [Receipt], branch: &str) -> Result<Option<&'a R
     let mut direct = false;
     let mut legacy = None;
     for receipt in receipts {
-        if receipt.direct {
-            direct |= receipt.items.iter().any(|i| i.local == branch);
-            continue;
-        }
         for item in receipt.items.iter().filter(|i| i.local == branch) {
+            if receipt.direct && !item.receive_only {
+                direct = true;
+                continue;
+            }
             if legacy.replace(item).is_some() {
                 return invalid("回传接收记录存在歧义，无法确定原始推送目标");
             }
@@ -284,6 +286,14 @@ fn review_item<'a>(receipts: &'a [Receipt], branch: &str) -> Result<Option<&'a R
 pub struct ImportReturnResult {
     pub branches: Vec<String>,
     pub warnings: Vec<String>,
+    pub updates: Vec<ReturnUpdate>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReturnUpdate {
+    pub received: String,
+    pub target: String,
 }
 
 /// Receive all local branches, inbox refs and the receipt in one CAS transaction.
@@ -371,12 +381,14 @@ pub fn import_return(
                 .query_stdin(work, args!["hash-object", "--stdin"], &reference)?
                 .trim()
                 .to_owned();
-            // Match the original import's conservative occupancy rule, even when
-            // divergence would otherwise select a fallback branch.
-            sync::deletion_heads(g, work, source)?;
-            guarded.insert(source.to_owned());
+            let occupied = sync::branch_heads(g, work, source)?.1.is_some();
             let mut local = source.to_owned();
-            if let Some(old) = locals.get(&reference) {
+            if occupied {
+                local = format!("review/{}/{source}", &key[..12]);
+                warnings.push(format!(
+                    "{source} 正被工作树使用，回传已接收为 {local}。请检查后快进合入；未提交修改或分叉时请先提交、stash 或手动整理。"
+                ));
+            } else if let Some(old) = locals.get(&reference) {
                 let ancestor = g.exec(
                     Some(work),
                     &args!["merge-base", "--is-ancestor", old, &oid],
@@ -446,6 +458,7 @@ pub fn import_return(
                 original: oid,
                 base,
                 item_id,
+                receive_only: occupied,
             });
         }
         if items.is_empty() {
@@ -494,6 +507,15 @@ pub fn import_return(
             repo::set_sync_base(g, work, &item.local, &item.base)?;
         }
     }
+    let updates = receipt
+        .items
+        .iter()
+        .filter(|item| item.local != item.source && (!receipt.direct || item.receive_only))
+        .map(|item| ReturnUpdate {
+            received: item.local.clone(),
+            target: item.source.clone(),
+        })
+        .collect();
     let mut branches = Vec::with_capacity(receipt.items.len());
     for item in receipt.items {
         // A stored receipt does not guarantee its local branch still exists.
@@ -503,6 +525,58 @@ pub fn import_return(
     Ok(ImportReturnResult {
         branches,
         warnings: receipt.warnings,
+        updates,
+    })
+}
+
+/// Explicitly integrate into the worktree that already has the original branch checked out.
+pub fn fast_forward_return(g: &Git, work: &Path, received: &str) -> Result<OpOutcome> {
+    require_work_repo(g, work)?;
+    let common = common_dir(g, work)?;
+    let _lock = OperationLock::acquire(&common.join("offline-sync-operation"))?;
+    let receipts = read_receipts(g, work)?;
+    let item = review_item(&receipts, received)?
+        .filter(|item| item.local != item.source)
+        .ok_or_else(|| SyncError::Invalid("该分支没有独立的回传接收记录".into()))?;
+    let tree = repo::list_worktrees(g, work)?
+        .into_iter()
+        .find(|tree| !tree.bare && tree.branch.as_deref() == Some(&item.source))
+        .ok_or_else(|| {
+            SyncError::Invalid(format!("请先在工作树中检出 {}，再快进合入", item.source))
+        })?;
+    let path = Path::new(&tree.path);
+    let gd = repo::git_dir(g, path)?;
+    let _tree_lock = if gd.canonicalize()? != common.canonicalize()? {
+        Some(OperationLock::acquire(&gd.join("offline-sync-operation"))?)
+    } else {
+        None
+    };
+    if gd.join("offline-sync-rebase.json").exists() || gd.join("offline-sync-patch.json").exists() {
+        return invalid("工作树有待恢复的 Rebase 或补丁操作，请先继续或中止");
+    }
+    sync::ensure_worktree_clean(g, path)?;
+    let oid = repo::rev_parse(g, work, &format!("refs/heads/{received}"))?;
+    let ancestor = g.exec(
+        Some(path),
+        &args!["merge-base", "--is-ancestor", "HEAD", &oid],
+        None,
+        false,
+    )?;
+    if !ancestor.ok() {
+        return invalid(
+            "目标分支与回传已分叉，无法快进；回传已保留，请手动合并或 rebase 后检查推送",
+        );
+    }
+    if repo::current_branch(g, path).as_deref() != Some(&item.source) {
+        return invalid("工作树分支已变化，请刷新后重试");
+    }
+    g.run(path, args!["merge", "--ff-only", "--no-autostash", &oid])?;
+    Ok(OpOutcome {
+        ok: true,
+        conflict: false,
+        files: Vec::new(),
+        message: format!("{} 已快进合入 {received}", item.source),
+        worktree: Some(tree.path),
     })
 }
 

@@ -1182,7 +1182,22 @@ pub enum DeleteBranchOutcome {
 // Lock every registered worktree HEAD through Git's ref backend (including reftable).
 // Recheck both symbolic HEADs and detached operations after prepare acquires those locks.
 pub(super) fn deletion_heads(g: &Git, work: &Path, branch: &str) -> Result<Vec<PathBuf>> {
+    let (heads, occupied) = branch_heads(g, work, branch)?;
+    if let Some(path) = occupied {
+        return invalid(format!(
+            "分支 {branch} 正被工作树使用（{path}），请先结束操作或切换分支"
+        ));
+    }
+    Ok(heads)
+}
+
+pub(super) fn branch_heads(
+    g: &Git,
+    work: &Path,
+    branch: &str,
+) -> Result<(Vec<PathBuf>, Option<String>)> {
     let mut heads = Vec::new();
+    let mut occupied_path = None;
     for tree in repo::list_worktrees(g, work)?
         .into_iter()
         .filter(|t| !t.bare)
@@ -1201,15 +1216,12 @@ pub(super) fn deletion_heads(g: &Git, work: &Path, branch: &str) -> Result<Vec<P
             }
         }
         if occupied {
-            return invalid(format!(
-                "分支 {branch} 正被工作树使用（{}），请先结束操作或切换分支",
-                tree.path
-            ));
+            occupied_path = Some(tree.path);
         }
         heads.push(gd);
     }
     heads.sort();
-    Ok(heads)
+    Ok((heads, occupied_path))
 }
 
 pub(super) fn with_locked_heads(

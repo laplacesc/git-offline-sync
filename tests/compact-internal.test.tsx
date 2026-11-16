@@ -75,6 +75,7 @@ describe("内网同步与分支工作流", () => {
     vi.spyOn(api, "importReturn").mockResolvedValue({
       branches: [local],
       warnings: [],
+      updates: [],
     });
     render(view());
     const button = await screen.findByRole<HTMLButtonElement>("button", { name: "导入回传" });
@@ -241,6 +242,31 @@ describe("内网同步与分支工作流", () => {
     fireEvent.click(screen.getByRole("button", { name: /^检查并推送 / }));
     expect(await screen.findByRole("alertdialog")).toBeTruthy();
     expect(invoke).toHaveBeenCalledWith("prepare_push", { workDir: "/work", branch: local, forceWithLease: false });
+  });
+
+  it("占用分支回传先接收，用户确认后才请求快进合入", async () => {
+    const received = "review/receipt/feature/returned";
+    vi.spyOn(api, "listPackages").mockResolvedValue([returnPackage()]);
+    vi.spyOn(api, "importReturn").mockResolvedValue({
+      branches: [received], warnings: [], updates: [{ received, target: "feature/returned" }],
+    });
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation(async (command, args) => command === "fast_forward_return" ? success : original(command, args));
+    render(view());
+    const button = await screen.findByRole<HTMLButtonElement>("button", { name: "导入回传" });
+    await waitFor(() => expect(button.disabled).toBe(false));
+    fireEvent.click(button);
+    const integrate = await screen.findByRole("button", { name: "快进合入 feature/returned" });
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "fast_forward_return")).toBe(false);
+    fireEvent.click(integrate);
+    const dialog = await screen.findByRole("alertdialog", { name: "快进合入 feature/returned？" });
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "fast_forward_return")).toBe(false);
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "fast_forward_return")).toBe(false);
+    fireEvent.click(integrate);
+    const confirmed = await screen.findByRole("alertdialog", { name: "快进合入 feature/returned？" });
+    fireEvent.click(within(confirmed).getByRole("button", { name: "快进合入", exact: true }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("fast_forward_return", { workDir: "/work", received }));
   });
 
   it("补丁只传分支和基准，在已配置的工作仓库导入", async () => {

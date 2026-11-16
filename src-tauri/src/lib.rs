@@ -131,6 +131,7 @@ pub fn run() {
             commands::prepare_push,
             commands::execute_push,
             commands::import_return,
+            commands::fast_forward_return,
             commands::sync_updates,
             commands::dev_sync_status,
             commands::configure_repo,

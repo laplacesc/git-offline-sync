@@ -1118,17 +1118,21 @@ fn direct_multibranch_import_is_atomic_then_allows_manual_rebase() {
         sync::export_back(&g, &f.dev, &f.ext, &sources, &f.usb, "test", "main", &[]).unwrap(),
     );
     git(&f.work, &["switch", "-c", "feature/c"]);
-    assert!(review::import_return(&g, &f.work, &bundle, "main", &[]).is_err());
-    assert!(!repo::rev_exists(&g, &f.work, "feature/a"));
-    assert!(!repo::rev_exists(&g, &f.work, "feature/b"));
-    assert!(repo::list_refs(&g, &f.work, &["refs/offline-sync"])
-        .unwrap()
-        .is_empty());
+    let occupied_head = git(&f.work, &["rev-parse", "HEAD"]);
+    let accepted = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
+    assert_eq!(accepted.branches[..2], sources[..2]);
+    assert!(accepted.branches[2].starts_with("review/"));
+    assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), occupied_head);
+    assert!(
+        review::fast_forward_return(&g, &f.work, &accepted.branches[2])
+            .unwrap()
+            .ok
+    );
     git(&f.work, &["switch", "main"]);
     commit(&f.seed, "base", "internal conflict\n");
     git(&f.seed, &["push", "origin", "main"]);
     let first = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
-    assert_eq!(first.branches, sources);
+    assert_eq!(first.branches, accepted.branches);
     assert_eq!(git(&f.work, &["branch", "--show-current"]), "main");
     assert!(
         sync::rebase_onto(&g, &f.work, "feature/a", "main", true)
@@ -1191,8 +1195,16 @@ fn direct_import_protects_linked_worktrees_and_detached_rebases() {
         .unwrap(),
     );
     let head = git(&linked, &["rev-parse", "HEAD"]);
-    assert!(review::import_return(&g, &f.work, &next, "main", &[]).is_err());
+    let next_received = review::import_return(&g, &f.work, &next, "main", &[]).unwrap();
+    assert!(next_received.branches[0].starts_with("review/"));
     assert_eq!(git(&linked, &["rev-parse", "HEAD"]), head);
+    assert!(
+        review::fast_forward_return(&g, &f.work, &next_received.branches[0])
+            .unwrap()
+            .ok
+    );
+    let head = git(&linked, &["rev-parse", "HEAD"]);
+    assert_eq!(head, git(&f.dev, &["rev-parse", "HEAD"]));
     // Repeating an accepted receipt is read-only, including occupied branches.
     review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
     assert_eq!(git(&linked, &["rev-parse", "HEAD"]), head);
@@ -1206,11 +1218,116 @@ fn direct_import_protects_linked_worktrees_and_detached_rebases() {
         .unwrap();
     assert!(!rebase.status.success());
     let linked_head = git(&linked, &["rev-parse", "HEAD"]);
-    assert!(review::import_return(&g, &f.work, &next, "main", &[]).is_err());
+    let mut manifest = Manifest::read_for(&next).unwrap().unwrap();
+    manifest.seq += 1;
+    manifest.write_for(&next).unwrap();
+    let detached = review::import_return(&g, &f.work, &next, "main", &[]).unwrap();
+    assert!(detached.branches[0].starts_with("review/"));
+    assert!(review::fast_forward_return(&g, &f.work, &detached.branches[0]).is_err());
     assert_eq!(git(&linked, &["rev-parse", "HEAD"]), linked_head);
     assert!(repo::in_progress(&repo::git_dir(&g, &linked).unwrap()).is_some());
     assert_eq!(repo::list_worktrees(&g, &f.work).unwrap().len(), 2);
     assert_eq!(git(&f.work, &["branch", "--show-current"]), "main");
+}
+
+#[test]
+fn occupied_returns_preserve_dirty_work_and_only_integrate_by_explicit_fast_forward() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let log = |_: LogEvent| {};
+    let g = Git::new(None, &log);
+    for mode in ["clean", "dirty", "diverged"] {
+        let f = Fixture::new(&g);
+        let bundle = f.back(&g);
+        git(&f.work, &["switch", "-c", "feature/return"]);
+        if mode == "diverged" {
+            commit(&f.work, "internal", "keep internal commit\n");
+        } else if mode == "dirty" {
+            fs::write(f.work.join("base"), "staged\n").unwrap();
+            git(&f.work, &["add", "base"]);
+            fs::write(f.work.join("base"), "unstaged\n").unwrap();
+            fs::write(f.work.join("untracked"), "keep me\n").unwrap();
+            git(&f.work, &["config", "merge.autostash", "true"]);
+        }
+        let head = git(&f.work, &["rev-parse", "HEAD"]);
+        let index = fs::read(f.work.join(".git/index")).unwrap();
+        let base = fs::read(f.work.join("base")).unwrap();
+        let accepted = review::import_return(&g, &f.work, &bundle, "main", &[]).unwrap();
+        let received = &accepted.branches[0];
+        assert!(received.starts_with("review/"));
+        assert_eq!(accepted.updates[0].target, "feature/return");
+        assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(f.work.join(".git/index")).unwrap(), index);
+        assert_eq!(fs::read(f.work.join("base")).unwrap(), base);
+        assert_eq!(
+            review::import_return(&g, &f.work, &bundle, "main", &[])
+                .unwrap()
+                .branches,
+            accepted.branches
+        );
+        let plan = review::prepare_push(&g, &f.work, received, false).unwrap();
+        assert_eq!(plan.target_ref, "refs/heads/feature/return");
+        if mode != "clean" {
+            let error = review::fast_forward_return(&g, &f.work, received)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(if mode == "dirty" {
+                    "未提交"
+                } else {
+                    "分叉"
+                }),
+                "{error}"
+            );
+            assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), head);
+            assert_eq!(fs::read(f.work.join("base")).unwrap(), base);
+            if mode == "dirty" {
+                assert_eq!(git(&f.work, &["show", ":base"]), "staged");
+                assert_eq!(
+                    fs::read_to_string(f.work.join("untracked")).unwrap(),
+                    "keep me\n"
+                );
+                git(&f.work, &["restore", "--staged", "--worktree", "base"]);
+                fs::remove_file(f.work.join("untracked")).unwrap();
+            } else {
+                continue;
+            }
+        }
+        for name in ["offline-sync-rebase.json", "offline-sync-patch.json"] {
+            let journal = f.work.join(".git").join(name);
+            fs::write(&journal, "{}").unwrap();
+            assert!(review::fast_forward_return(&g, &f.work, received)
+                .unwrap_err()
+                .to_string()
+                .contains("待恢复"));
+            assert_eq!(git(&f.work, &["rev-parse", "HEAD"]), head);
+            assert_eq!(fs::read_to_string(&journal).unwrap(), "{}");
+            fs::remove_file(journal).unwrap();
+        }
+        assert!(
+            review::fast_forward_return(&g, &f.work, received)
+                .unwrap()
+                .ok
+        );
+        assert_eq!(
+            git(&f.work, &["rev-parse", "HEAD"]),
+            git(&f.dev, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(
+            fs::read_to_string(f.work.join("feature")).unwrap(),
+            "returned\n"
+        );
+        assert!(git(&f.work, &["status", "--porcelain"]).is_empty());
+        assert!(
+            review::fast_forward_return(&g, &f.work, received)
+                .unwrap()
+                .ok
+        );
+        assert!(review::execute_push(&g, &plan.plan_id).unwrap().ok);
+        assert_eq!(
+            git(&f.remote, &["rev-parse", "feature/return"]),
+            plan.source_oid
+        );
+    }
 }
 
 #[test]

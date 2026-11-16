@@ -324,6 +324,18 @@ pub async fn import_return(
 }
 
 #[tauri::command]
+pub async fn fast_forward_return(
+    app: AppHandle,
+    work_dir: String,
+    received: String,
+) -> CmdResult<OpOutcome> {
+    mutating(app, move |g| {
+        crate::core::review::fast_forward_return(g, &p(work_dir), &received)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn sync_updates(
     app: AppHandle,
     mirror_dir: String,

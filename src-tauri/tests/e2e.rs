@@ -579,22 +579,18 @@ fn full_round_trip() {
         None
     );
 
-    // 已接收包重导不触碰后来修改；新的回传身份仍须检查占用。
+    // 已接收包重导不触碰后来修改；新的回传身份独立接收。
     review::import_return(&g, &work, &cb, "main", &[]).unwrap();
     let mut next_return = Manifest::read_for(&cb).unwrap().unwrap();
     next_return.seq += 1;
     next_return.write_for(&cb).unwrap();
 
-    // 已检出分支不能直接导入（主工作树）
-    let err = review::import_return(&g, &work, &cb, "main", &[])
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("工作树") || err.contains("检出"), "{err}");
+    let head = sh(&work, &["rev-parse", "HEAD"]);
+    let received = review::import_return(&g, &work, &cb, "main", &[]).unwrap();
+    assert!(received.branches[0].starts_with("review/"));
+    assert_eq!(sh(&work, &["rev-parse", "HEAD"]), head);
 
-    // 回归：被 linked worktree 占用的分支同样要在动手前就拦住。
-    // 漏掉时 git 报 "refusing to fetch into branch ... checked out at ..."，
-    // 那条消息不含 non-fast-forward/rejected，会被当成未知错误抛出，
-    // 而循环里排在前面的分支已经导入了。
+    // linked worktree 的分支和文件也保持原样。
     sh(&work, &["switch", "-q", "main"]);
     sh(&work, &["branch", "-f", "feature/conflict", "origin/main"]);
     let iwt = root.join("internal/wt-conflict");
@@ -602,17 +598,17 @@ fn full_round_trip() {
         &work,
         &["worktree", "add", iwt.to_str().unwrap(), "feature/conflict"],
     );
-    let err = review::import_return(&g, &work, &cb, "main", &[])
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("工作树") || err.contains("检出"), "{err}");
-    assert!(
-        err.contains("wt-conflict"),
-        "错误里要指出分支在哪个工作树：{err}"
-    );
+    next_return.seq += 1;
+    next_return.write_for(&cb).unwrap();
+    let head = sh(&iwt, &["rev-parse", "HEAD"]);
+    let received = review::import_return(&g, &work, &cb, "main", &[]).unwrap();
+    assert!(received.branches[0].starts_with("review/"));
+    assert_eq!(sh(&iwt, &["rev-parse", "HEAD"]), head);
     sh(&work, &["worktree", "remove", iwt.to_str().unwrap()]);
 
     // 分叉的分支导入为新名字，不覆盖本地
+    next_return.seq += 1;
+    next_return.write_for(&cb).unwrap();
     sh(&work, &["switch", "-q", "main"]);
     sh(&work, &["branch", "-f", "feature/conflict", "origin/main"]);
     let ib = review::import_return(&g, &work, &cb, "main", &[]).unwrap();

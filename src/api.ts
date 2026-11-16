@@ -149,6 +149,7 @@ export interface OpOutcome {
 export interface ReturnImportResult {
   branches: string[];
   warnings: string[];
+  updates: { received: string; target: string }[];
 }
 
 export interface PushPlan {
@@ -271,6 +272,8 @@ export const api = {
   }) => mutate<OpOutcome>("import_patches", a),
   importReturn: (workDir: string, bundle: string, baseBranch: string, releaseBranches: string[]) =>
     mutate<ReturnImportResult>("import_return", { workDir, bundle, baseBranch, releaseBranches }),
+  fastForwardReturn: (workDir: string, received: string) =>
+    mutate<OpOutcome>("fast_forward_return", { workDir, received }),
   preparePush: (workDir: string, branch: string, forceWithLease: boolean) =>
     mutate<PushPlan>("prepare_push", { workDir, branch, forceWithLease }),
   executePush: (planId: string) => mutate<OpOutcome>("execute_push", { planId }),

@@ -102,7 +102,7 @@ export function InternalView({ profile, refreshVersion = 0 }: {
   async function receive(bundle: string, legacy = false) {
     const isCurrent = beginAction();
     if (legacy && !await confirm({ title: "导入没有清单的回传包", confirmLabel: "继续导入",
-      body: <p>此文件没有项目清单。请确认它属于当前工作仓库。回传分支会优先按外网原名导入本地；目标分支若已被检出，请先切换到其他分支。</p> })) return;
+      body: <p>此文件没有项目清单。请确认它属于当前工作仓库。回传分支会优先按外网原名导入本地；已被检出的分支会接收到独立分支，检查后可快进合入。</p> })) return;
     if (!isCurrent()) return;
     const result = await run("导入回传", () => api.importReturn(workDir, bundle, base, releases));
     if (!isCurrent()) return;
@@ -113,6 +113,16 @@ export function InternalView({ profile, refreshVersion = 0 }: {
       setOutcome(null);
       if (result.branches[0]) setSelected([result.branches[0]]);
     }
+  }
+  async function integrate(received: string, target: string) {
+    const isCurrent = beginAction();
+    if (!await confirm({ title: `快进合入 ${target}？`, confirmLabel: "快进合入",
+      body: <p>将 <Code>{received}</Code> 合入检出 <Code>{target}</Code> 的工作树。工作区必须干净，分叉时会停止，请先检查回传提交。</p> })) return;
+    if (!isCurrent()) return;
+    const result = await run("快进合入回传", () => api.fastForwardReturn(workDir, received));
+    if (!isCurrent()) return;
+    await reloadAll();
+    if (result && isCurrent()) { setOutcome(result); notify(result.ok ? "ok" : "warn", result.message); }
   }
   async function browse() {
     const isCurrent = beginAction();
@@ -207,6 +217,10 @@ export function InternalView({ profile, refreshVersion = 0 }: {
       {returnResult && returnResult.branches.length > 0 && <div className="return-import-result" role="status">
         <div><h2>已导入本地分支</h2><p>回传已导入，可在下方检查分支、整理和推送。</p><p>{returnResult.branches.map((branch) => <Code key={branch}>{branch}</Code>)}</p></div>
       </div>}
+      {returnResult?.updates?.map(({ received, target }) => <div key={received} className="flex flex-wrap items-center gap-2">
+        <Code>{received}</Code><span>→</span><Code>{target}</Code>
+        <ActionButton disabled={work.loading || refreshing} onClick={() => integrate(received, target)}>快进合入 {target}</ActionButton>
+      </div>)}
       {returnResult?.warnings.map((warning) => <Feedback key={warning} kind="warn" text={warning} />)}
       {outcome && !outcome.ok && <OutcomeView outcome={outcome} />}
       <BranchManager key={refreshKey} profile={profile} repoPath={workDir} status={work.status} loading={work.loading} error={work.error}

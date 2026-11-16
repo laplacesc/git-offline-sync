@@ -283,6 +283,28 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "macos")]
+fn macos_git_path(bin: &std::ffi::OsStr, inherited: Option<OsString>) -> Result<OsString> {
+    let mut paths: Vec<_> = inherited
+        .as_deref()
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .collect();
+    // Finder/Dock 不读取 shell 配置；Git 的过滤器和凭据助手也需要这些路径。
+    for path in Path::new(bin)
+        .parent()
+        .filter(|p| p.is_absolute())
+        .into_iter()
+        .chain([Path::new("/opt/homebrew/bin"), Path::new("/usr/local/bin")])
+    {
+        if !paths.iter().any(|p| p == path) {
+            paths.push(path.to_path_buf());
+        }
+    }
+    std::env::join_paths(paths).map_err(|e| SyncError::Invalid(format!("无法构造 Git PATH：{e}")))
+}
+
 impl<'a> Git<'a> {
     pub fn new(bin: Option<&str>, log: &'a Logger) -> Self {
         let bin = match bin {
@@ -336,8 +358,10 @@ impl<'a> Git<'a> {
         self.emit(LogKind::Info, text);
     }
 
-    fn build(&self, cwd: Option<&Path>, args: &[OsString]) -> Command {
+    fn build(&self, cwd: Option<&Path>, args: &[OsString]) -> Result<Command> {
         let mut cmd = Command::new(&self.bin);
+        #[cfg(target_os = "macos")]
+        cmd.env("PATH", macos_git_path(&self.bin, std::env::var_os("PATH"))?);
         // 统一输出格式：中文路径不转义、不输出颜色
         cmd.args(["-c", "core.quotepath=false", "-c", "color.ui=never"]);
         cmd.args(args);
@@ -346,7 +370,7 @@ impl<'a> Git<'a> {
         }
         // 没有终端可供交互：凭据提示直接失败而不是挂起（GUI 凭据管理器仍可用）
         cmd.env("GIT_TERMINAL_PROMPT", "0");
-        cmd
+        Ok(cmd)
     }
 
     fn display(args: &[OsString]) -> String {
@@ -378,7 +402,7 @@ impl<'a> Git<'a> {
         if echo_stdout {
             self.emit(LogKind::Cmd, Self::display(args));
         }
-        self.exec_command(self.build(cwd, args), stdin, echo_stdout)
+        self.exec_command(self.build(cwd, args)?, stdin, echo_stdout)
     }
 
     fn exec_command(
@@ -402,7 +426,7 @@ impl<'a> Git<'a> {
         self.emit(LogKind::Cmd, Self::display(&args));
         let input = format!("start\n{updates}prepare\n");
         let out = self.exec_command_prepared(
-            self.build(Some(cwd), &args),
+            self.build(Some(cwd), &args)?,
             Some(&input),
             true,
             Some(validate),
@@ -698,6 +722,115 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = bin.to_string_lossy().into_owned();
         (dir, path)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_path_preserves_priority_and_finds_git_helpers() {
+        let (dir, bin) = fake_git("exec git-lfs");
+        use std::os::unix::fs::PermissionsExt;
+        let helper = dir.path().join("git-lfs");
+        std::fs::write(&helper, "#!/bin/sh\necho lfs-fixture\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let inherited = OsString::from("/usr/bin:/bin:/usr/local/bin");
+        let path = macos_git_path(std::ffi::OsStr::new(&bin), Some(inherited)).unwrap();
+        let paths: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(
+            &paths[..3],
+            &[
+                Path::new("/usr/bin"),
+                Path::new("/bin"),
+                Path::new("/usr/local/bin")
+            ]
+        );
+        assert!(paths.contains(&Path::new("/opt/homebrew/bin").to_path_buf()));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|p| *p == Path::new("/usr/local/bin"))
+                .count(),
+            1
+        );
+        let logger = |_: LogEvent| {};
+        let git = Git::new(Some(&bin), &logger);
+        let mut cmd = git.build(None, &[]).unwrap();
+        cmd.env("PATH", path);
+        let output = git.exec_command(cmd, None, false).unwrap();
+        assert!(output.ok(), "{}", output.stderr);
+        assert_eq!(output.stdout.trim(), "lfs-fixture");
+        assert!(macos_git_path(std::ffi::OsStr::new("git"), None).is_ok());
+        assert!(macos_git_path(std::ffi::OsStr::new("/bad:path/git"), None).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_gui_path_runs_real_lfs_filters() {
+        if std::env::var_os("OFFLINE_SYNC_LFS_TEST_CHILD").is_none() {
+            if !["/opt/homebrew/bin/git-lfs", "/usr/local/bin/git-lfs"]
+                .iter()
+                .any(|p| Path::new(p).is_file())
+            {
+                eprintln!("Homebrew git-lfs unavailable; helper PATH coverage still runs");
+                return;
+            }
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "core::git::tests::macos_gui_path_runs_real_lfs_filters",
+                    "--nocapture",
+                ])
+                .env("OFFLINE_SYNC_LFS_TEST_CHILD", "1")
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let log = |_: LogEvent| {};
+        for bin in [None, Some("/usr/bin/git")] {
+            let work = dir.path().join(if bin.is_some() {
+                "configured"
+            } else {
+                "default"
+            });
+            std::fs::create_dir(&work).unwrap();
+            let g = Git::new(bin, &log);
+            g.run(&work, args!["init", "-q"]).unwrap();
+            g.run(&work, args!["lfs", "install", "--local"]).unwrap();
+            g.run(&work, args!["lfs", "track", "*.bin"]).unwrap();
+            let contents = b"offline-lfs-filter-content\0\xff";
+            std::fs::write(work.join("sample.bin"), contents).unwrap();
+            g.run(&work, args!["add", ".gitattributes", "sample.bin"])
+                .unwrap();
+            assert!(g
+                .query(&work, args!["show", ":sample.bin"])
+                .unwrap()
+                .starts_with("version https://git-lfs.github.com/spec/v1"));
+            g.run(
+                &work,
+                args![
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "lfs fixture"
+                ],
+            )
+            .unwrap();
+            std::fs::remove_file(work.join("sample.bin")).unwrap();
+            g.run(&work, args!["checkout", "--", "sample.bin"]).unwrap();
+            assert_eq!(std::fs::read(work.join("sample.bin")).unwrap(), contents);
+        }
     }
 
     #[cfg(unix)]
