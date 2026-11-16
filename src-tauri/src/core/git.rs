@@ -727,9 +727,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_path_preserves_priority_and_finds_git_helpers() {
-        let (dir, bin) = fake_git("exec git-lfs");
+        let (dir, bin) = fake_git("exec offline-sync-test-helper");
         use std::os::unix::fs::PermissionsExt;
-        let helper = dir.path().join("git-lfs");
+        let helper = dir.path().join("offline-sync-test-helper");
         std::fs::write(&helper, "#!/bin/sh\necho lfs-fixture\n").unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
         let inherited = OsString::from("/usr/bin:/bin:/usr/local/bin");
