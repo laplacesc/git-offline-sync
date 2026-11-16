@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Pi goal state
+/.pi/goals/
+/.pi/.goals-pool-snapshot.json
