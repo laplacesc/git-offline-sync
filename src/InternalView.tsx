@@ -35,6 +35,17 @@ export function InternalView({ profile, refreshVersion = 0 }: {
   const packages = useMemo(() => (currentPackages?.packages ?? []).filter(
     (p) => !p.manifest || p.manifest.kind === "back" || p.manifest.kind === "patch",
   ), [currentPackages?.packages]);
+  // 同步记录重建后（outSeq 为 0），传输目录里仍可能留有旧序号的更新包，可接续其最新序号继续导出。
+  const latestSeq = useMemo(() => (currentPackages?.packages ?? []).reduce<number | null>((top, p) => {
+    const m = p.manifest;
+    const same = !!m && (m.kind === "full" || m.kind === "incr") && p.payloadExists
+      && m.repoName === profile.repoName && m.baseBranch === base;
+    return same && (top === null || m.seq > top) ? m.seq : top;
+  }, null), [currentPackages?.packages, profile.repoName, base]);
+  const freshRecord = state?.outSeq === 0 && !state.lastExportAt;
+  const canContinue = freshRecord && latestSeq !== null;
+  // 记录重建后要等传输目录扫描完成，才能决定接续还是开始新的序号组。
+  const scanPending = state?.outSeq === 0 && packagesLoading;
   const mirrorReady = !!mirror.status?.isRepo;
   const workReady = !!work.status?.isRepo && !work.status.isBare;
 
@@ -61,6 +72,7 @@ export function InternalView({ profile, refreshVersion = 0 }: {
   useRefreshOnFocus(reloadAll);
 
   const [forceFull, setForceFull] = useState(false);
+  const [continueFrom, setContinueFrom] = useState<number | null>(null);
   const [fetchFirst, setFetchFirst] = useState(true);
   const [exportResult, setExportResult] = useState<ExportOutcome | null>(null);
   const [returnResult, setReturnResult] = useState<ReturnImportResult | null>(null);
@@ -68,7 +80,7 @@ export function InternalView({ profile, refreshVersion = 0 }: {
   const [selected, setSelected] = useState<string[]>([]);
   const [patchOptions, setPatchOptions] = useState<Record<string, { branch: string; base: string }>>({});
   useEffect(() => {
-    setExportResult(null); setReturnResult(null); setOutcome(null); setSelected([]); setPatchOptions({});
+    setExportResult(null); setReturnResult(null); setOutcome(null); setSelected([]); setPatchOptions({}); setContinueFrom(null);
   }, [refreshKey]);
   useEffect(() => {
     if (work.loading || !selected.length) return;
@@ -88,11 +100,13 @@ export function InternalView({ profile, refreshVersion = 0 }: {
   async function exportUpdate() {
     const isCurrent = beginAction();
     const result = await run("导出更新", () => api.exportOut({ mirrorDir, transferDir: profile.transferDir,
-      repoName: profile.repoName, baseBranch: base, fetchUpstream: fetchFirst, forceFull }));
+      repoName: profile.repoName, baseBranch: base, fetchUpstream: fetchFirst, forceFull,
+      continueAfter: canContinue && continueFrom === latestSeq ? latestSeq : null }));
     if (!isCurrent()) return;
     if (result) {
       setExportResult(result);
       setForceFull(false);
+      setContinueFrom(null);
       if (result.status === "exported") {
         notify(result.warnings.length ? "warn" : "ok", [`已导出更新 #${result.seq}`, ...result.warnings].join("\n"));
       } else notify("ok", result.message);
@@ -186,7 +200,7 @@ export function InternalView({ profile, refreshVersion = 0 }: {
           <p className="text-sm text-muted-foreground">{mirrorReady ? `${base}${releases.length ? `、${releases.join("、")}` : ""} 等 ${mirror.status?.branches.length ?? 0} 个分支` : "首次使用时从 GitLab 准备代码"}</p>
         </div>
         <div className="sync-button-group">
-        {mirrorReady ? <ActionButton variant="default" onClick={exportUpdate} disabled={refreshing || !!stateError || !!mirror.error || mirror.loading}>导出更新</ActionButton>
+        {mirrorReady ? <ActionButton variant="default" onClick={exportUpdate} disabled={refreshing || !!stateError || !!mirror.error || mirror.loading || scanPending}>导出更新</ActionButton>
           : <ActionButton variant="default" onClick={initialize} disabled={refreshing || !profile.remoteUrl?.trim() || !mirrorDir || mirror.loading || !!mirror.error || !!stateError}>建立镜像</ActionButton>}
         </div>
       </header>
@@ -194,6 +208,10 @@ export function InternalView({ profile, refreshVersion = 0 }: {
       <section className="workspace-section" aria-label="导出设置">
         <Check checked={fetchFirst} onChange={setFetchFirst}>先拉取 GitLab 最新代码</Check>
         {state && <div className="export-history">{state.outSeq ? <>最近已导出 #{state.outSeq} · <DateTime value={state.lastExportAt} label="最近导出时间" /></> : "尚未导出"}</div>}
+        {canContinue && <div className="space-y-1">
+          <Check checked={continueFrom === latestSeq} onChange={(on) => setContinueFrom(on ? latestSeq : null)}>接续旧序号：从 #{latestSeq + 1} 导出</Check>
+          <p className="text-xs text-muted-foreground">同步记录已重建，但传输目录里已有到 #{latestSeq} 的更新包。接续后沿用旧序号组，外网通常无需确认新序号组（外网记录落后于该序号时仍需确认跳号）；不勾选则从 #1 开始新的序号组，外网导入时需确认，且传输目录里不能已有同名的 #1 包。</p>
+        </div>}
         <Fold className="sync-details" title="高级选项"><div className="space-y-3">
           <Check checked={forceFull} onChange={setForceFull}>强制全量</Check>
           <p className="text-xs text-muted-foreground break-all">镜像：{mirrorDir || "请在项目设置中填写"}</p>

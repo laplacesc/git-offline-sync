@@ -248,6 +248,7 @@ pub async fn export_out(
     base_branch: String,
     fetch_upstream: bool,
     force_full: bool,
+    continue_after: Option<u32>,
 ) -> CmdResult<ExportOutcome> {
     mutating(app, move |g| {
         sync::export_out(
@@ -258,6 +259,7 @@ pub async fn export_out(
             &base_branch,
             fetch_upstream,
             force_full,
+            continue_after,
         )
     })
     .await

@@ -142,6 +142,9 @@ struct ExportJournal {
     manifest: Manifest,
     state: serde_json::Value,
     warnings: Vec<String>,
+    /// 接续旧序号的导出：准备时同步记录是新建的（outSeq 为 0），恢复时据此放行。
+    #[serde(default)]
+    continued: bool,
 }
 
 fn export_journal(dir: &Path) -> PathBuf {
@@ -161,11 +164,29 @@ fn publish_export<T: Serialize>(
     manifest: Manifest,
     state: &T,
     warnings: Vec<String>,
+    continued: bool,
 ) -> Result<ExportOutcome> {
     let destination = std::path::absolute(transfer_dir)?.join(&manifest.payload);
     let _transfer_lock = OperationLock::acquire(destination.parent().unwrap())?;
     if destination.exists() || super::manifest::manifest_path_for(&destination).exists() {
         return invalid(format!("包已存在，不会覆盖：{}", destination.display()));
+    }
+    // 同一项目、同一序号组、同一序号只能有一个更新包（Full 与 Incr 文件名不同，不会互相覆盖）。
+    if matches!(manifest.kind, BundleKind::Full | BundleKind::Incr)
+        && list_packages(transfer_dir)?
+            .into_iter()
+            .filter_map(|package| package.manifest)
+            .any(|m| {
+                matches!(m.kind, BundleKind::Full | BundleKind::Incr)
+                    && m.repo_id == manifest.repo_id
+                    && m.series_id == manifest.series_id
+                    && m.seq == manifest.seq
+            })
+    {
+        return invalid(format!(
+            "传输目录里已有同一序号组的更新包 #{}，不会生成序号冲突的包",
+            manifest.seq
+        ));
     }
     manifest.validate(&destination)?;
     let payload = staging.path().join(&manifest.payload);
@@ -196,6 +217,7 @@ fn publish_export<T: Serialize>(
         manifest,
         state: serde_json::to_value(state)?,
         warnings,
+        continued,
     };
     atomic_write(
         &export_journal(state_dir),
@@ -223,6 +245,22 @@ fn recover_export(state_dir: &Path) -> Result<Option<ExportOutcome>> {
 
 fn finish_export(state_dir: &Path, journal: ExportJournal) -> Result<ExportOutcome> {
     journal.manifest.validate(&journal.destination)?;
+    if !matches!(journal.manifest.kind, BundleKind::Back | BundleKind::Patch) {
+        // 同步记录必须仍是导出准备时的记录：序号处于旧值或目标值，序号组一致；
+        // 只有接续旧序号的导出，才允许在全新（outSeq 为 0）的记录上完成。
+        let current: InternalState = repo::load_state(state_dir)?;
+        let planned: InternalState = serde_json::from_value(journal.state.clone())?;
+        let target = journal.manifest.seq;
+        if current.out_seq != target
+            && current.out_seq != target - 1
+            && !(journal.continued && current.out_seq == 0)
+        {
+            return invalid("导出恢复冲突：当前 outSeq 与预期旧值/目标值不一致");
+        }
+        if current.series_id.is_some() && current.series_id != planned.series_id {
+            return invalid("导出恢复冲突：当前同步记录的序号组与导出日志不一致");
+        }
+    }
     let marker = pending_marker(&journal.destination);
     atomic_write(&marker, b"export not committed\n")?;
     let staged = journal.staging.join(&journal.manifest.payload);
@@ -247,14 +285,7 @@ fn finish_export(state_dir: &Path, journal: ExportJournal) -> Result<ExportOutco
             current.back_seq = target;
             repo::save_state(state_dir, &current)?;
         }
-        _ => {
-            let current: InternalState = repo::load_state(state_dir)?;
-            let target = journal.manifest.seq;
-            if current.out_seq != target && current.out_seq != target - 1 {
-                return invalid("导出恢复冲突：当前 outSeq 与预期旧值/目标值不一致");
-            }
-            repo::save_state(state_dir, &journal.state)?;
-        }
+        _ => repo::save_state(state_dir, &journal.state)?,
     }
     fs::remove_file(&marker)?;
     fs::remove_file(export_journal(state_dir))?;
@@ -688,7 +719,40 @@ pub fn init_mirror(g: &Git, url: &str, mirror_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 传输目录里属于该项目（同一根提交、项目名、基础分支）且包文件存在的最新更新包。
+/// 同步记录重建后，用它接续外网已导入的序号。最新序号处有不同序号组的包时无法确定接续哪一组。
+fn latest_update_package(
+    transfer_dir: &Path,
+    repo_id: &str,
+    repo_name: &str,
+    base_branch: &str,
+) -> Result<Option<Manifest>> {
+    let candidates: Vec<Manifest> = list_packages(transfer_dir)?
+        .into_iter()
+        .filter(|package| package.payload_exists)
+        .filter_map(|package| package.manifest)
+        .filter(|m| {
+            matches!(m.kind, BundleKind::Full | BundleKind::Incr)
+                && m.repo_id == repo_id
+                && m.repo_name == repo_name
+                && m.base_branch == base_branch
+        })
+        .collect();
+    let Some(top) = candidates.iter().map(|m| m.seq).max() else {
+        return Ok(None);
+    };
+    let mut latest = candidates.into_iter().filter(|m| m.seq == top);
+    let first = latest.next();
+    if latest.any(|m| Some(&m.series_id) != first.as_ref().map(|f| &f.series_id)) {
+        return invalid(format!(
+            "传输目录中 #{top} 有不同序号组的更新包，无法确定接续哪一组，请清理传输目录后重试"
+        ));
+    }
+    Ok(first)
+}
+
 /// 内网 → 外网：首次或 `force_full` 时全量，否则基于上次导出的全部 ref 做增量。
+#[allow(clippy::too_many_arguments)]
 pub fn export_out(
     g: &Git,
     mirror: &Path,
@@ -697,6 +761,7 @@ pub fn export_out(
     base_branch: &str,
     fetch_upstream: bool,
     force_full: bool,
+    continue_after: Option<u32>,
 ) -> Result<ExportOutcome> {
     let _lock = OperationLock::acquire(mirror)?;
     if let Some(outcome) = recover_export(mirror)? {
@@ -717,6 +782,25 @@ pub fn export_out(
         if prev != &rid {
             return invalid("镜像仓库身份与上次导出不一致（根提交变化），请用新的镜像目录");
         }
+    }
+    if let Some(after) = continue_after {
+        if state.out_seq != 0 || state.last_refs.is_some() {
+            return invalid("该镜像已有导出记录，不能再接续旧序号");
+        }
+        match latest_update_package(transfer_dir, &rid, repo_name, base_branch)? {
+            Some(latest) if latest.seq == after => {
+                state.out_seq = after;
+                state.series_id = latest.series_id;
+            }
+            _ => {
+                return invalid(format!(
+                    "传输目录中该项目最新的更新包已不是 #{after}，请刷新后重新确认"
+                ))
+            }
+        }
+    }
+    if state.series_id.is_none() {
+        state.series_id = Some(uuid::Uuid::new_v4().to_string());
     }
 
     let refs = repo::list_refs(g, mirror, &["refs/heads", "refs/tags"])?;
@@ -807,6 +891,7 @@ pub fn export_out(
         base_branch: base_branch.to_string(),
         refs: ref_entries,
         tool_version: tool_version(),
+        series_id: state.series_id.clone(),
     };
     validate_bundle_snapshot(g, mirror, &bundle, &manifest, &baseline)?;
     state.repo_id = Some(rid);
@@ -814,7 +899,15 @@ pub fn export_out(
     state.last_heads = refs.into_iter().map(|(_, s)| s).collect();
     state.last_refs = Some(snapshot);
     state.last_export_at = Some(now_secs());
-    publish_export(mirror, transfer_dir, staging, manifest, &state, warnings)
+    publish_export(
+        mirror,
+        transfer_dir,
+        staging,
+        manifest,
+        &state,
+        warnings,
+        continue_after.is_some(),
+    )
 }
 
 fn parse_list_heads(out: &str) -> Vec<(String, String)> {
@@ -1373,6 +1466,18 @@ fn bundle_object_format(bundle: &Path) -> Result<String> {
     Ok(format.unwrap_or_else(|| "sha1".into()))
 }
 
+/// 包是否属于和当前镜像记录不同的序号组。镜像记录没有序号组时（旧状态或从未导入），
+/// 没有序号组的旧包按原序号规则处理，带序号组的包只有序号不大于已导入序号时才算新的一组；
+/// 镜像记录已有序号组后，没有序号组的包（如切换前遗留的旧包）不再属于它。
+pub fn is_foreign_series(state: &MirrorState, m: &Manifest) -> bool {
+    match (&state.series_id, &m.series_id) {
+        (None, None) => false,
+        (Some(_), None) => true,
+        (Some(current), Some(incoming)) => current != incoming,
+        (None, Some(_)) => state.last_in_seq > 0 && m.seq <= state.last_in_seq,
+    }
+}
+
 /// The manifest and mirror snapshot the caller displayed before import.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1381,6 +1486,10 @@ pub struct ImportConfirmation {
     pub last_in_seq: u32,
     pub mirror_refs: BTreeMap<String, String>,
     pub allow_full_gap: bool,
+    #[serde(default)]
+    pub series_id: Option<String>,
+    #[serde(default)]
+    pub allow_new_series: bool,
 }
 
 /// 内网 → 外网：把包导入**外网镜像**（bare 仓库）。
@@ -1437,7 +1546,10 @@ pub fn import_in(
         mirror_refs(g, mirror_dir)?
     };
 
-    if state.last_in_seq != confirmation.last_in_seq || before != confirmation.mirror_refs {
+    if state.last_in_seq != confirmation.last_in_seq
+        || state.series_id != confirmation.series_id
+        || before != confirmation.mirror_refs
+    {
         return invalid("镜像序号或引用已变化，请刷新后重新确认导入");
     }
 
@@ -1497,31 +1609,48 @@ pub fn import_in(
             return invalid("该包与当前镜像不是同一个项目（根提交不同）");
         }
     }
-    if m.kind == BundleKind::Full && m.seq < state.last_in_seq {
+    // 序号只在同一个序号组内比较：内网同步记录重建后序号会从 1 重新开始。
+    if is_foreign_series(&state, m) {
+        if m.kind != BundleKind::Full {
+            return invalid(format!(
+                "增量包 #{} 属于另一组序号（内网同步记录可能已重建），请先导入该序号组的全量包",
+                m.seq
+            ));
+        }
+        if !confirmation.allow_new_series {
+            return invalid("该全量包属于新的序号组，需要明确确认，请刷新后确认引用变化");
+        }
         g.info(format!(
-            "警告：正在用较旧的全量包 #{} 回退镜像（当前 #{}）；分支和标签将按该快照同步",
+            "警告：全量包 #{} 属于新的序号组，序号将从该包重新计数（当前 #{}）；分支和标签将按该快照同步",
             m.seq, state.last_in_seq
         ));
-    }
-    if m.kind == BundleKind::Full
-        && state.last_in_seq > 0
-        && m.seq > state.last_in_seq.saturating_add(1)
-        && !confirmation.allow_full_gap
-    {
-        return invalid("全量包跳号需要明确确认，请刷新后确认引用变化");
-    }
-    if m.kind == BundleKind::Incr && state.last_in_seq > 0 {
-        if m.seq <= state.last_in_seq {
-            return invalid(format!(
-                "包 #{} 已导入过（上次导入 #{}）",
+    } else {
+        if m.kind == BundleKind::Full && m.seq < state.last_in_seq {
+            g.info(format!(
+                "警告：正在用较旧的全量包 #{} 回退镜像（当前 #{}）；分支和标签将按该快照同步",
                 m.seq, state.last_in_seq
             ));
         }
-        if m.seq != state.last_in_seq + 1 {
-            return invalid(format!(
-                "序号不连续：上次导入 #{}，本包 #{}，中间的包可能遗漏",
-                state.last_in_seq, m.seq
-            ));
+        if m.kind == BundleKind::Full
+            && state.last_in_seq > 0
+            && m.seq > state.last_in_seq.saturating_add(1)
+            && !confirmation.allow_full_gap
+        {
+            return invalid("全量包跳号需要明确确认，请刷新后确认引用变化");
+        }
+        if m.kind == BundleKind::Incr && state.last_in_seq > 0 {
+            if m.seq <= state.last_in_seq {
+                return invalid(format!(
+                    "包 #{} 已导入过（上次导入 #{}）",
+                    m.seq, state.last_in_seq
+                ));
+            }
+            if m.seq != state.last_in_seq + 1 {
+                return invalid(format!(
+                    "序号不连续：上次导入 #{}，本包 #{}，中间的包可能遗漏",
+                    state.last_in_seq, m.seq
+                ));
+            }
         }
     }
 
@@ -1535,6 +1664,7 @@ pub fn import_in(
     let wanted = unpack_snapshot(g, mirror_dir, bundle, Some(&manifest))?;
     let current: MirrorState = repo::load_state(mirror_dir)?;
     if current.last_in_seq != state.last_in_seq
+        || current.series_id != state.series_id
         || current.repo_id != state.repo_id
         || mirror_refs(g, mirror_dir)? != before
     {
@@ -1545,6 +1675,9 @@ pub fn import_in(
     replace_refs(g, mirror_dir, &before, &wanted)?;
 
     state.last_in_seq = m.seq;
+    if m.series_id.is_some() {
+        state.series_id = m.series_id.clone();
+    }
     if state.repo_id.is_none() {
         state.repo_id = Some(m.repo_id.clone());
     }
@@ -1922,6 +2055,7 @@ pub fn export_back(
         base_branch: base_branch.to_string(),
         refs,
         tool_version: tool_version(),
+        series_id: None,
     };
     validate_bundle_snapshot(g, repo, &bundle, &manifest, &baseline)?;
     state.back_seq = seq;
@@ -1932,6 +2066,7 @@ pub fn export_back(
         manifest,
         &state,
         dirty_warning(g, repo).into_iter().collect(),
+        false,
     )
 }
 
@@ -2025,6 +2160,7 @@ pub fn export_patches(
         base_branch: base_branch.to_string(),
         refs,
         tool_version: tool_version(),
+        series_id: None,
     };
     state.back_seq = seq;
     publish_export(
@@ -2034,5 +2170,6 @@ pub fn export_patches(
         manifest,
         &state,
         dirty_warning(g, repo).into_iter().collect(),
+        false,
     )
 }

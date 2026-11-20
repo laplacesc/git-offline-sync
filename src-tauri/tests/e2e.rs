@@ -178,7 +178,7 @@ fn full_round_trip() {
     assert!(sync::init_mirror(&g, upstream.to_str().unwrap(), &mirror).is_err());
 
     let (kind, seq, full) =
-        exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false).unwrap());
+        exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false, None).unwrap());
     assert_eq!((kind, seq), (BundleKind::Full, 1));
     assert!(full.exists());
 
@@ -326,7 +326,7 @@ fn full_round_trip() {
         ],
     );
     let (kind, seq, incr) =
-        exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false).unwrap());
+        exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false, None).unwrap());
     assert_eq!((kind, seq), (BundleKind::Incr, 2));
 
     support::import_confirmed(&g, &incr, &extm, false).unwrap();
@@ -350,7 +350,7 @@ fn full_round_trip() {
 
     // 内网无变化 → 不生成空包
     assert!(matches!(
-        sync::export_out(&g, &mirror, &usb, "proj", "main", true, false).unwrap(),
+        sync::export_out(&g, &mirror, &usb, "proj", "main", true, false, None).unwrap(),
         ExportOutcome::NothingToSync { .. }
     ));
 
@@ -359,7 +359,7 @@ fn full_round_trip() {
     commit(&seed, "d.txt", "d\n", "more");
     sh(&seed, &["push", "-q", "origin", "main"]);
     let (_, seq, incr3) =
-        exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false).unwrap());
+        exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false, None).unwrap());
     assert_eq!(seq, 3);
 
     // 序号跳号检查：先伪造一个 #5 的包
@@ -694,7 +694,7 @@ fn release_hotfix_round_trip() {
         &["clone", "-q", upstream.to_str().unwrap(), "internal/work"],
     );
     let (_, _, full) =
-        exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false).unwrap());
+        exported(sync::export_out(&g, &mirror, &usb, "proj", "main", true, false, None).unwrap());
 
     let extm = root.join("external/mirror.git");
     let ext = root.join("external/proj");
@@ -1015,7 +1015,7 @@ fn snapshot_fixture(root: &Path, g: &Git) -> (PathBuf, PathBuf, PathBuf, PathBuf
     sync::init_mirror(g, seed.to_str().unwrap(), &mirror).unwrap();
     let usb = root.join("usb");
     let full =
-        exported(sync::export_out(g, &mirror, &usb, "test", "main", false, false).unwrap()).2;
+        exported(sync::export_out(g, &mirror, &usb, "test", "main", false, false, None).unwrap()).2;
     let ext = root.join("external.git");
     support::import_confirmed(g, &full, &ext, false).unwrap();
     (seed, mirror, usb, ext, full)
@@ -1134,8 +1134,9 @@ fn ref_only_changes_and_legacy_state_are_synced_once() {
     ];
     for (index, command) in commands.iter().enumerate() {
         sh(&mirror, command);
-        let (kind, seq, bundle) =
-            exported(sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap());
+        let (kind, seq, bundle) = exported(
+            sync::export_out(&g, &mirror, &usb, "test", "main", false, false, None).unwrap(),
+        );
         assert_eq!(
             kind,
             BundleKind::Full,
@@ -1148,7 +1149,7 @@ fn ref_only_changes_and_legacy_state_are_synced_once() {
             repo::list_refs(&g, &mirror, &["refs/heads", "refs/tags"]).unwrap()
         );
         assert!(matches!(
-            sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap(),
+            sync::export_out(&g, &mirror, &usb, "test", "main", false, false, None).unwrap(),
             ExportOutcome::NothingToSync { .. }
         ));
     }
@@ -1160,11 +1161,12 @@ fn ref_only_changes_and_legacy_state_are_synced_once() {
     legacy.as_object_mut().unwrap().remove("lastRefs");
     fs::write(&state_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
     assert_eq!(
-        exported(sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap()).0,
+        exported(sync::export_out(&g, &mirror, &usb, "test", "main", false, false, None).unwrap())
+            .0,
         BundleKind::Full
     );
     assert!(matches!(
-        sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap(),
+        sync::export_out(&g, &mirror, &usb, "test", "main", false, false, None).unwrap(),
         ExportOutcome::NothingToSync { .. }
     ));
 }
@@ -1270,7 +1272,7 @@ fn import_transaction_and_state_failures_are_retryable() {
     sh(&seed, &["branch", "-D", "keep"]);
     sh(&seed, &["tag", "-d", "v1"]);
     let (kind, _, incr) =
-        exported(sync::export_out(&g, &mirror, &usb, "test", "main", true, false).unwrap());
+        exported(sync::export_out(&g, &mirror, &usb, "test", "main", true, false, None).unwrap());
     assert_eq!(kind, BundleKind::Incr);
     let before = repo::list_refs(&g, &ext, &["refs/heads", "refs/tags"]).unwrap();
     // Lock failure in one ref must abort additions, updates AND deletions together.
@@ -1334,7 +1336,7 @@ fn interrupted_export_is_hidden_and_finishes_with_the_same_sequence() {
     commit(&seed, "next", "next\n", "next");
     let backup = mirror.join("offline-sync/state.json.bak");
     fs::create_dir(&backup).unwrap();
-    assert!(sync::export_out(&g, &mirror, &usb, "test", "main", true, false).is_err());
+    assert!(sync::export_out(&g, &mirror, &usb, "test", "main", true, false, None).is_err());
     let pending = usb.join("test-out-0002-incr.bundle");
     assert!(pending.exists());
     assert!(mirror.join("offline-sync/export-pending.json").exists());
@@ -1348,14 +1350,14 @@ fn interrupted_export_is_hidden_and_finishes_with_the_same_sequence() {
     );
     fs::remove_dir(backup).unwrap();
     let (_, seq, recovered) =
-        exported(sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap());
+        exported(sync::export_out(&g, &mirror, &usb, "test", "main", false, false, None).unwrap());
     assert_eq!(seq, 2);
     assert_eq!(recovered, pending);
     assert!(!mirror.join("offline-sync/export-pending.json").exists());
     assert_eq!(sync::list_packages(&usb).unwrap().len(), 2);
     support::import_confirmed(&g, &recovered, &ext, false).unwrap();
     assert!(matches!(
-        sync::export_out(&g, &mirror, &usb, "test", "main", false, false).unwrap(),
+        sync::export_out(&g, &mirror, &usb, "test", "main", false, false, None).unwrap(),
         ExportOutcome::NothingToSync { .. }
     ));
 }

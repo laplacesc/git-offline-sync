@@ -639,7 +639,7 @@ it("导入前阻止缺号、身份不符和缺失文件，只有可用的本项�
     bundle: "/usb/7.bundle", mirrorDir: "/mirror", devDirs: [], name: "", email: "",
     confirmation: {
       manifest: makePackage(7, "matching", true, "full").manifest,
-      lastInSeq: 3, mirrorRefs: {}, allowFullGap: true,
+      lastInSeq: 3, mirrorRefs: {}, allowFullGap: true, seriesId: null, allowNewSeries: false,
     },
   }));
 });

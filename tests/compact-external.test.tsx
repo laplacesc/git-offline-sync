@@ -178,7 +178,7 @@ describe("精简外网同步", () => {
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith({
       bundle: "/usb/matching-3.bundle", mirrorDir: "/mirror", devDirs: [], name: "", email: "",
       confirmation: {
-        manifest: pkg(3).manifest, lastInSeq: 2, allowFullGap: false,
+        manifest: pkg(3).manifest, lastInSeq: 2, allowFullGap: false, seriesId: null, allowNewSeries: false,
         mirrorRefs: Object.fromEntries(status("/mirror").refs.map((ref) => [ref.name, ref.sha])),
       },
     }));
@@ -192,7 +192,7 @@ describe("精简外网同步", () => {
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledExactlyOnceWith({
       bundle: "/usb/matching-3.bundle", mirrorDir: "/mirror", devDirs: [], name: "", email: "",
       confirmation: {
-        manifest: pkg(3).manifest, lastInSeq: 2, allowFullGap: false,
+        manifest: pkg(3).manifest, lastInSeq: 2, allowFullGap: false, seriesId: null, allowNewSeries: false,
         mirrorRefs: Object.fromEntries(status("/mirror").refs.map((ref) => [ref.name, ref.sha])),
       },
     }));
@@ -233,10 +233,60 @@ describe("精简外网同步", () => {
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({
       bundle: "/usb/matching-7.bundle",
       confirmation: {
-        manifest: pkg(7, "full").manifest, lastInSeq: 2, allowFullGap: true,
+        manifest: pkg(7, "full").manifest, lastInSeq: 2, allowFullGap: true, seriesId: null, allowNewSeries: false,
         mirrorRefs: Object.fromEntries(status("/mirror").refs.map((ref) => [ref.name, ref.sha])),
       },
     })));
+  });
+
+  it("内网记录重建后的新序号组：全量包确认后才导入，增量包只能等待其全量包", async () => {
+    const series = (seq: number, kind: "full" | "incr", seriesId: string): PackageInfo => {
+      const base = pkg(seq, kind, "matching");
+      return { ...base, payloadPath: `/usb/${seriesId}-${seq}.bundle`, manifest: { ...base.manifest!, seriesId, payload: `${seriesId}-${seq}.bundle` } };
+    };
+    vi.mocked(api.mirrorState).mockResolvedValue({ repoId: "matching", lastInSeq: 2, backSeq: 0, seriesId: "old", lastImportAt: 1 });
+    vi.mocked(api.listPackages).mockResolvedValue([series(1, "full", "fresh"), series(2, "incr", "fresh")]);
+    await loaded();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "导入更新 #2", exact: true }).disabled).toBe(true);
+    expect(within(screen.getByRole("listitem", { name: "fresh-2.bundle" })).getByText("属于另一组序号，需先导入其全量包")).toBeTruthy();
+    expect(within(screen.getByRole("listitem", { name: "fresh-1.bundle" })).getByText("新的序号组，需确认后导入")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "导入更新 #1", exact: true }));
+    let dialog = await screen.findByRole("alertdialog");
+    expect(dialog.textContent).toContain("新的序号组");
+    expect(api.syncUpdates).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(api.syncUpdates).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "导入更新 #1", exact: true }));
+    dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "导入到 #1" }));
+    await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({
+      bundle: "/usb/fresh-1.bundle",
+      confirmation: expect.objectContaining({ lastInSeq: 2, allowFullGap: false, seriesId: "old", allowNewSeries: true }),
+    })));
+  });
+
+  it("旧版本外网状态没有序号组时，序号接得上的带序号组的包照常导入", async () => {
+    const next = pkg(3);
+    next.manifest!.seriesId = "fresh";
+    vi.mocked(api.listPackages).mockResolvedValue([next]);
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: "导入下一包", exact: true }));
+    await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({
+      confirmation: expect.objectContaining({ seriesId: null, allowNewSeries: false, allowFullGap: false }),
+    })));
+  });
+
+  it("切换到新序号组后，旧序号组遗留的无序号组更新包不会被当作下一包", async () => {
+    vi.mocked(api.mirrorState).mockResolvedValue({ repoId: "matching", lastInSeq: 1, backSeq: 0, seriesId: "fresh", lastImportAt: 1 });
+    vi.mocked(api.listPackages).mockResolvedValue([pkg(2)]);
+    await loaded();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "导入下一包", exact: true }).disabled).toBe(true);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "导入更新 #2", exact: true }).disabled).toBe(true);
+    expect(screen.getByText("属于另一组序号，需先导入其全量包")).toBeTruthy();
+    expect(api.syncUpdates).not.toHaveBeenCalled();
   });
 
   it("首轮读取真实引用差异，镜像已导入时用 null 同步开发仓库", async () => {
@@ -292,7 +342,7 @@ describe("精简外网同步", () => {
     fireEvent.click(screen.getByRole("button", { name: "导入下一包", exact: true }));
     await waitFor(() => expect(api.syncUpdates).toHaveBeenCalledWith(expect.objectContaining({
       bundle: "/usb/matching-4.bundle",
-      confirmation: { manifest: pkg(4, "full").manifest, lastInSeq: 0, mirrorRefs: {}, allowFullGap: false },
+      confirmation: { manifest: pkg(4, "full").manifest, lastInSeq: 0, mirrorRefs: {}, allowFullGap: false, seriesId: null, allowNewSeries: false },
     })));
   });
 

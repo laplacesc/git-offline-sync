@@ -309,6 +309,7 @@ fn package_refresh_reads_manifests_without_opening_bundle_or_patch_contents() {
                 base: None,
             }],
             tool_version: "test".into(),
+            series_id: None,
         }
         .write_for(&payload)
         .unwrap();

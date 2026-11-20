@@ -113,6 +113,8 @@ export interface Manifest {
   baseBranch: string;
   refs: RefEntry[];
   toolVersion: string;
+  /** 更新包的序号组 ID；旧版本的包没有，按同一组处理 */
+  seriesId?: string;
 }
 
 export interface PackageInfo {
@@ -174,6 +176,10 @@ export interface ImportConfirmation {
   lastInSeq: number;
   mirrorRefs: Record<string, string>;
   allowFullGap: boolean;
+  /** 确认时看到的镜像序号组；旧状态没有记录时为 null */
+  seriesId: string | null;
+  /** 允许切换到新的序号组（仅全量包） */
+  allowNewSeries: boolean;
 }
 
 export interface InternalState {
@@ -183,6 +189,7 @@ export interface InternalState {
   /** Older state files do not record exported ref names. */
   lastRefs?: Record<string, string> | null;
   lastExportAt: number | null;
+  seriesId?: string | null;
 }
 
 /** 外网镜像的同步状态（存在镜像目录里，多个开发仓库共享） */
@@ -190,6 +197,8 @@ export interface MirrorState {
   repoId: string | null;
   lastInSeq: number;
   backSeq: number;
+  /** 当前导入的序号组；旧状态没有记录时为 null */
+  seriesId?: string | null;
   lastImportAt: number | null;
 }
 
@@ -262,6 +271,8 @@ export const api = {
     baseBranch: string;
     fetchUpstream: boolean;
     forceFull: boolean;
+    /** 同步记录重建后接续传输目录里已有的最新序号（该序号本身，导出的是下一号） */
+    continueAfter: number | null;
   }) => mutate<ExportOutcome>("export_out", a),
   importPatches: (a: {
     workDir: string;

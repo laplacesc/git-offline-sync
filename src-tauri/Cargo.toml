@@ -1,6 +1,6 @@
 [package]
 name = "git-offline-sync"
-version = "2.1.20"
+version = "2.1.21"
 description = "Sync Git repositories between an offline intranet and the internet via git bundle"
 authors = ["laplacesc"]
 edition = "2021"
@@ -26,6 +26,7 @@ tauri-plugin-window-state = "2"
 tauri-plugin-process = "2"
 tempfile = "3"
 regex = "1"
+uuid = { version = "1.29.2", features = ["v4"] }
 
 [profile.release]
 codegen-units = 1

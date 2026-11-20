@@ -72,6 +72,7 @@ impl Fixture {
                 "main",
                 false,
                 false,
+                None,
             )
             .unwrap(),
         );
@@ -93,6 +94,7 @@ impl Fixture {
                 "main",
                 false,
                 false,
+                None,
             )
             .unwrap(),
         )
@@ -558,7 +560,17 @@ fn sha256_bundle_round_trip_with_manifest() {
     let mirror = f.path("internal.git");
     sync::init_mirror(&g, seed.to_str().unwrap(), &mirror).unwrap();
     let full = exported(
-        sync::export_out(&g, &mirror, &f.path("usb"), "test", "main", true, false).unwrap(),
+        sync::export_out(
+            &g,
+            &mirror,
+            &f.path("usb"),
+            "test",
+            "main",
+            true,
+            false,
+            None,
+        )
+        .unwrap(),
     );
     let external = f.path("external.git");
     support::import_confirmed(&g, &full, &external, false).unwrap();

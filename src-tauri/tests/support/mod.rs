@@ -16,10 +16,12 @@ pub fn confirmation(
     mirror: &Path,
     allow_full_gap: bool,
 ) -> Result<ImportConfirmation> {
+    let state = repo::load_state::<repo::MirrorState>(mirror)?;
     Ok(ImportConfirmation {
         manifest: Manifest::read_for(bundle)?
             .ok_or_else(|| SyncError::Invalid("test package needs a manifest".into()))?,
-        last_in_seq: repo::load_state::<repo::MirrorState>(mirror)?.last_in_seq,
+        last_in_seq: state.last_in_seq,
+        series_id: state.series_id,
         mirror_refs: if repo::is_ext_mirror(g, mirror) {
             repo::list_refs(g, mirror, &["refs/heads", "refs/tags"])?
                 .into_iter()
@@ -28,6 +30,7 @@ pub fn confirmation(
             Default::default()
         },
         allow_full_gap,
+        allow_new_series: false,
     })
 }
 

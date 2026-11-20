@@ -689,6 +689,9 @@ pub struct InternalState {
     #[serde(default)]
     pub last_refs: Option<std::collections::BTreeMap<String, String>>,
     pub last_export_at: Option<u64>,
+    /// 序号组 ID：同步记录首次创建（或重建）后第一次导出时生成。
+    #[serde(default)]
+    pub series_id: Option<String>,
 }
 
 /// 外网镜像仓库的同步状态（存于 `<mirror>/offline-sync`）。
@@ -700,6 +703,9 @@ pub struct InternalState {
 pub struct MirrorState {
     pub repo_id: Option<String>,
     pub last_in_seq: u32,
+    /// 当前导入的序号组；旧状态没有记录，导入带序号组的包时按序号接续或确认后切换。
+    #[serde(default)]
+    pub series_id: Option<String>,
     pub back_seq: u32,
     pub last_import_at: Option<u64>,
 }

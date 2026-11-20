@@ -62,6 +62,7 @@ fn bind_return_mirror(root: &Path, seed: &Path) {
             "main",
             false,
             false,
+            None,
         )
         .unwrap(),
     );
@@ -173,7 +174,9 @@ fn outgoing_snapshot_races_never_publish_or_advance_full_incremental_or_fallback
                 mirror.to_str().unwrap(),
             ],
         );
-        payload(sync::export_out(&setup, &mirror, &usb, "test", "main", false, true).unwrap());
+        payload(
+            sync::export_out(&setup, &mirror, &usb, "test", "main", false, true, None).unwrap(),
+        );
         let old = git(&mirror, &["rev-parse", "main"]);
         commit(&seed, "one");
         let one = git(&seed, &["rev-parse", "main"]);
@@ -205,7 +208,17 @@ fn outgoing_snapshot_races_never_publish_or_advance_full_incremental_or_fallback
         };
         let g = Git::new(None, &log);
         assert!(
-            sync::export_out(&g, &mirror, &usb, "test", "main", false, mode == "full").is_err(),
+            sync::export_out(
+                &g,
+                &mirror,
+                &usb,
+                "test",
+                "main",
+                false,
+                mode == "full",
+                None
+            )
+            .is_err(),
             "{mode}"
         );
         assert_eq!(
@@ -616,10 +629,10 @@ impl ImportFixture {
             ],
         );
         let first =
-            payload(sync::export_out(g, &mirror, &usb, "test", "main", false, true).unwrap());
+            payload(sync::export_out(g, &mirror, &usb, "test", "main", false, true, None).unwrap());
         support::import_confirmed(g, &first, &external, false).unwrap();
         let second =
-            payload(sync::export_out(g, &mirror, &usb, "test", "main", false, true).unwrap());
+            payload(sync::export_out(g, &mirror, &usb, "test", "main", false, true, None).unwrap());
         Self {
             root,
             mirror,
@@ -632,7 +645,19 @@ impl ImportFixture {
     fn third(&self, g: &Git) -> PathBuf {
         git(&self.mirror, &["update-ref", "-d", "refs/heads/retired"]);
         git(&self.mirror, &["update-ref", "-d", "refs/tags/retired"]);
-        payload(sync::export_out(g, &self.mirror, &self.usb, "test", "main", false, true).unwrap())
+        payload(
+            sync::export_out(
+                g,
+                &self.mirror,
+                &self.usb,
+                "test",
+                "main",
+                false,
+                true,
+                None,
+            )
+            .unwrap(),
+        )
     }
 
     fn unchanged(&self, g: &Git, old_refs: &BTreeMap<String, String>, old_state: &[u8]) {

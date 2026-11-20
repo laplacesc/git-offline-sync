@@ -3,8 +3,9 @@ import { RadioGroup, RadioGroupItem } from "./components/ui/radio-group";
 import { Label } from "./components/ui/label";
 import { BranchManager } from "./BranchManager";
 import { PackageInbox } from "./PackageInbox";
+import { isForeignSeries } from "./lib/series";
 import {
-  api, baseCandidates, ExportOutcome, MirrorState,
+  api, baseCandidates, ExportOutcome, Manifest, MirrorState,
   OpOutcome, PackageInfo, Profile, releasesOf, shortSha,
 } from "./api";
 import { Feedback, useRunner } from "./runner";
@@ -92,13 +93,18 @@ export function ExternalView({ profile, refreshVersion = 0 }: {
     return m && (m.kind === "full" || m.kind === "incr")
       && (state?.repoId ? m.repoId === state.repoId : m.repoName === profile.repoName && m.baseBranch === base);
   }), [currentPackages?.packages, state?.repoId, profile.repoName, base]);
-  const packages = useMemo(() => updatePackages.filter((p) => p.manifest!.seq > lastIn)
-    .sort((a, b) => a.manifest!.seq - b.manifest!.seq), [updatePackages, lastIn]);
-  const usable = (p: PackageInfo) => p.payloadExists && !!p.manifest && p.manifest.seq > lastIn
-    && (needsFull ? p.manifest.kind === "full" : p.manifest.seq === lastIn + 1 || p.manifest.kind === "full");
+  // 序号只在同一个序号组内比较；内网同步记录重建后的新序号组需要确认后才能导入。
+  const foreign = (m: Manifest) => isForeignSeries(state, m);
+  const packages = useMemo(() => updatePackages.filter((p) => !foreign(p.manifest!) && p.manifest!.seq > lastIn)
+    .sort((a, b) => a.manifest!.seq - b.manifest!.seq), [updatePackages, lastIn, state?.seriesId]);
+  const usable = (p: PackageInfo) => p.payloadExists && !!p.manifest && (foreign(p.manifest)
+    ? p.manifest.kind === "full"
+    : p.manifest.seq > lastIn
+      && (needsFull ? p.manifest.kind === "full" : p.manifest.seq === lastIn + 1 || p.manifest.kind === "full"));
   const chosen = packages.find((p) => usable(p) && (needsFull || p.manifest!.seq === lastIn + 1))
     ?? packages.find((p) => usable(p) && p.manifest!.kind === "full");
   const missing = !needsFull && !chosen && packages.some((p) => p.manifest!.seq > lastIn + 1);
+  const newSeriesPackage = updatePackages.find((p) => !!p.manifest && foreign(p.manifest) && usable(p));
   const missingImpact = mirrorReady && !mirrorRefs;
   const importReady = ready && !packagesLoading && !currentPackages?.packageError
     && !!mirrorDir.trim() && !mirror.loading && (!mirror.status?.isRepo || mirrorReady);
@@ -111,30 +117,35 @@ export function ExternalView({ profile, refreshVersion = 0 }: {
     const startedAt = revision.current;
     const m = bundle.manifest!;
     let allowFullGap = false;
-    if (m?.kind === "full" && !needsFull && m.seq > lastIn + 1) {
+    let allowNewSeries = false;
+    const newSeries = m.kind === "full" && foreign(m);
+    if (m.kind === "full" && (newSeries || !needsFull && m.seq > lastIn + 1)) {
       if (!mirrorRefs) return;
       const targetRefs = new Map(m.refs.map((ref) => [ref.name, ref.sha]));
       const oldRefs = new Map(mirrorRefs.map((ref) => [ref.name, ref.sha]));
       const affected = [...new Set([...oldRefs.keys(), ...targetRefs.keys()])]
         .filter((name) => oldRefs.get(name) !== targetRefs.get(name));
       const approved = await confirm({
-        title: `使用全量更新 #${m.seq}？`, tone: "warning", confirmLabel: `导入到 #${m.seq}`,
+        title: newSeries ? `使用新序号组的全量更新 #${m.seq}？` : `使用全量更新 #${m.seq}？`,
+        tone: "warning", confirmLabel: `导入到 #${m.seq}`,
         body: <div className="space-y-3">
-          <p>将 {mirrorDir} 从 #{lastIn} 导入到 #{m.seq}，跳过 #{lastIn + 1}–#{m.seq - 1}。</p>
+          {newSeries
+            ? <p>该包属于新的序号组（内网同步记录可能已重建）。{mirrorDir} 当前为 #{lastIn}，导入后同步记录改为 #{m.seq}，之后按新序号组接续。</p>
+            : <p>将 {mirrorDir} 从 #{lastIn} 导入到 #{m.seq}，跳过 #{lastIn + 1}–#{m.seq - 1}。</p>}
           <p>以下引用将按全量包更新，可能回退；包外的分支和标签将移除。</p>
           <ul>{affected.map((name) => <li key={name}><Code>{name}</Code>：{shortSha(oldRefs.get(name))} → {targetRefs.has(name) ? shortSha(targetRefs.get(name)) : "删除"}</li>)}</ul>
           {!affected.length && <p>分支和标签没有变化，仅推进同步记录。</p>}
         </div>,
       });
       if (!approved || !isCurrent() || startedAt !== revision.current) return;
-      allowFullGap = true;
+      if (newSeries) allowNewSeries = true; else allowFullGap = true;
     }
     await run("导入更新", () => api.syncUpdates({
       bundle: bundle.payloadPath, mirrorDir, devDirs: [], name: "", email: "",
       confirmation: {
         manifest: m, lastInSeq: lastIn,
         mirrorRefs: Object.fromEntries((mirrorReady ? mirrorRefs! : []).map((ref) => [ref.name, ref.sha])),
-        allowFullGap,
+        allowFullGap, seriesId: state?.seriesId ?? null, allowNewSeries,
       },
     }));
     if (!isCurrent()) return;
@@ -247,6 +258,7 @@ export function ExternalView({ profile, refreshVersion = 0 }: {
       {current && !current.loading && !current.stateError && !packagesLoading && !currentPackages?.packageError && <>
         {missing && <Feedback kind="warn" text={`缺少更新 #${lastIn + 1}，请在传输目录补齐更新包或放入较新的全量包。`} />}
         {missingImpact && <Feedback kind="warn" text="无法读取完整引用影响，请刷新后再导入更新。" />}
+        {newSeriesPackage && !chosen && <Feedback kind="warn" text={`检测到新的序号组的更新包 #${newSeriesPackage.manifest!.seq}（内网同步记录可能已重建），请在下方列表确认后导入。`} />}
       </>}
       <header className="internal-page-heading">
         <div><h2>导入更新</h2><p><span>{summary}</span> · 仅导入镜像仓库</p></div>
@@ -256,9 +268,11 @@ export function ExternalView({ profile, refreshVersion = 0 }: {
         packages={updatePackages} packageLabel="更新包" disabled={!!busy || packagesLoading}
         renderDetails={(pkg) => {
           const manifest = pkg.manifest!;
-          const gap = manifest.kind === "full" && !needsFull && manifest.seq > lastIn + 1;
+          const newSeries = foreign(manifest);
+          const gap = !newSeries && manifest.kind === "full" && !needsFull && manifest.seq > lastIn + 1;
           let status = "待导入";
           if (!pkg.payloadExists) status = "缺少包文件";
+          else if (newSeries) status = manifest.kind === "full" ? "新的序号组，需确认后导入" : "属于另一组序号，需先导入其全量包";
           else if (manifest.seq <= lastIn) status = "已导入";
           else if (needsFull && manifest.kind !== "full") status = "需要先导入全量包";
           else if (manifest.kind === "incr" && manifest.seq !== lastIn + 1) status = `需先导入 #${lastIn + 1}`;
@@ -266,7 +280,7 @@ export function ExternalView({ profile, refreshVersion = 0 }: {
           return <div className="return-package-actions">
             <span className="self-center text-xs text-muted-foreground">{status}</span>
             <ActionButton size="sm" variant="default" aria-label={`导入更新 #${manifest.seq}`}
-              disabled={!importReady || !usable(pkg) || gap && !mirrorRefs} onClick={() => importUpdate(pkg)}>导入更新</ActionButton>
+              disabled={!importReady || !usable(pkg) || (gap || newSeries) && !mirrorRefs} onClick={() => importUpdate(pkg)}>导入更新</ActionButton>
           </div>;
         }} />}
       </section>

@@ -82,6 +82,7 @@ impl Fixture {
                 base: Some("main".into()),
             }],
             tool_version: "test".into(),
+            series_id: None,
         }
         .write_for(&patches)
         .unwrap();

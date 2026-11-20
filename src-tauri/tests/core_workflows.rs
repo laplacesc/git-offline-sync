@@ -85,7 +85,7 @@ impl Fixture {
         );
         sync::init_mirror(g, remote.to_str().unwrap(), &mirror).unwrap();
         let full =
-            payload(sync::export_out(g, &mirror, &usb, "test", "main", true, false).unwrap());
+            payload(sync::export_out(g, &mirror, &usb, "test", "main", true, false, None).unwrap());
         support::import_confirmed(g, &full, &ext, false).unwrap();
         sync::create_dev_repo(g, &ext, &dev, "Tester", "tester@example.com").unwrap();
         Self {
@@ -136,7 +136,19 @@ impl Fixture {
     fn advance(&self, g: &Git) -> PathBuf {
         commit(&self.seed, "upstream", "advanced\n");
         git(&self.seed, &["push", "origin", "main"]);
-        payload(sync::export_out(g, &self.mirror, &self.usb, "test", "main", true, false).unwrap())
+        payload(
+            sync::export_out(
+                g,
+                &self.mirror,
+                &self.usb,
+                "test",
+                "main",
+                true,
+                false,
+                None,
+            )
+            .unwrap(),
+        )
     }
 }
 
@@ -450,8 +462,9 @@ fn moved_tags_sync_from_exported_snapshots_and_retry_without_changing_local_bran
     let branches = repo::list_refs(&g, &f.dev, &["refs/heads"]).unwrap();
     git(&f.seed, &["tag", "-a", "v1", "-m", "initial"]);
     git(&f.seed, &["push", "origin", "refs/tags/v1"]);
-    let first =
-        payload(sync::export_out(&g, &f.mirror, &f.usb, "test", "main", true, false).unwrap());
+    let first = payload(
+        sync::export_out(&g, &f.mirror, &f.usb, "test", "main", true, false, None).unwrap(),
+    );
     support::import_confirmed(&g, &first, &f.ext, false).unwrap();
     sync::sync_dev_repo(&g, &f.dev, &f.ext).unwrap();
     let old_tag = git(&f.dev, &["rev-parse", "refs/tags/v1"]);
@@ -461,8 +474,9 @@ fn moved_tags_sync_from_exported_snapshots_and_retry_without_changing_local_bran
         &f.seed,
         &["push", "--force", "origin", "main", "refs/tags/v1"],
     );
-    let moved =
-        payload(sync::export_out(&g, &f.mirror, &f.usb, "test", "main", true, false).unwrap());
+    let moved = payload(
+        sync::export_out(&g, &f.mirror, &f.usb, "test", "main", true, false, None).unwrap(),
+    );
     support::import_confirmed(&g, &moved, &f.ext, false).unwrap();
     let expected = git(&f.seed, &["rev-parse", "refs/tags/v1"]);
     assert_ne!(old_tag, expected);

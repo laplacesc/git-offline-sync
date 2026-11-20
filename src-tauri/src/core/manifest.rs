@@ -52,6 +52,10 @@ pub struct Manifest {
     /// Full/Incr：导出时内网全部分支与 tag；Back/Patch：回传的分支
     pub refs: Vec<RefEntry>,
     pub tool_version: String,
+    /// Full/Incr：序号组 ID。内网同步记录重建后序号会从 1 重新开始，外网端靠它区分
+    /// “同一组里已导入的旧序号”和“新一组的序号”。旧版本的包没有这个字段，视为同一组。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_id: Option<String>,
 }
 
 /// `foo.bundle` → `foo.manifest.json`；目录 `foo/` → `foo.manifest.json`
@@ -105,6 +109,13 @@ impl Manifest {
     pub fn validate(&self, payload: &Path) -> Result<()> {
         if self.format != FORMAT || self.seq == 0 {
             return invalid("manifest 格式或序号无效");
+        }
+        if self.series_id.as_ref().is_some_and(|id| {
+            id.is_empty()
+                || id.len() > 64
+                || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        }) {
+            return invalid("manifest seriesId 无效");
         }
         if !valid_oid(&self.repo_id) {
             return invalid("manifest repoId 必须是完整 SHA");

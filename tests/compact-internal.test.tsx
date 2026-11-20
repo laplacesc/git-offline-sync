@@ -163,9 +163,58 @@ describe("内网同步与分支工作流", () => {
     expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "list_return_packages")).toBe(false);
     fireEvent.click(exportButton);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_out", {
-      mirrorDir: "/mirror", transferDir: "/usb", repoName: "project", baseBranch: "main", fetchUpstream: true, forceFull: false,
+      mirrorDir: "/mirror", transferDir: "/usb", repoName: "project", baseBranch: "main", fetchUpstream: true, forceFull: false, continueAfter: null,
     }));
     expect(await screen.findByText("没有新更新")).toBeTruthy();
+  });
+
+  it("同步记录重建后，传输目录已有旧序号时可选择接续，导出带上最新序号", async () => {
+    const old = returnPackage();
+    const update = (seq: number): PackageInfo => ({
+      payloadPath: `/usb/project-${seq}.bundle`, payloadExists: true,
+      manifest: { ...old.manifest!, kind: seq === 1 ? "full" : "incr", seq, payload: `project-${seq}.bundle` },
+    });
+    vi.spyOn(api, "listPackages").mockResolvedValue([update(1), update(7), update(2)]);
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      switch (command) {
+        case "repo_status": return status((args as { path: string }).path);
+        case "sync_state": return { repoId: "project-id", outSeq: 0, lastHeads: [], lastExportAt: null };
+        case "export_out": return { status: "nothingToSync", message: "没有新更新" };
+        default: throw new Error(`Unexpected IPC: ${command}`);
+      }
+    });
+    render(view());
+    const exportButton = await screen.findByRole<HTMLButtonElement>("button", { name: "导出更新" });
+    await waitFor(() => expect(exportButton.disabled).toBe(false));
+    const option = await screen.findByRole("checkbox", { name: "接续旧序号：从 #8 导出" });
+    fireEvent.click(exportButton);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_out", expect.objectContaining({ continueAfter: null })));
+    fireEvent.click(option);
+    fireEvent.click(exportButton);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_out", expect.objectContaining({ continueAfter: 7 })));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "接续旧序号：从 #8 导出" }).getAttribute("aria-checked")).toBe("false"));
+  });
+
+  it("同步记录重建后，传输目录扫描完成前不能导出，避免误开新序号组", async () => {
+    const old = returnPackage();
+    const scan = deferred<PackageInfo[]>();
+    vi.spyOn(api, "listPackages").mockReturnValue(scan.promise);
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      switch (command) {
+        case "repo_status": return status((args as { path: string }).path);
+        case "sync_state": return { repoId: "project-id", outSeq: 0, lastHeads: [], lastExportAt: null };
+        case "export_out": return { status: "nothingToSync", message: "没有新更新" };
+        default: throw new Error(`Unexpected IPC: ${command}`);
+      }
+    });
+    render(view());
+    const exportButton = await screen.findByRole<HTMLButtonElement>("button", { name: "导出更新" });
+    await screen.findByText("尚未导出");
+    expect(exportButton.disabled).toBe(true);
+    scan.resolve([{ payloadPath: "/usb/project-4.bundle", payloadExists: true,
+      manifest: { ...old.manifest!, kind: "incr", seq: 4, payload: "project-4.bundle" } }]);
+    await screen.findByRole("checkbox", { name: "接续旧序号：从 #5 导出" });
+    await waitFor(() => expect(exportButton.disabled).toBe(false));
   });
 
   it("同步记录加载中或失败均阻止导出，刷新恢复后才能导出", async () => {
